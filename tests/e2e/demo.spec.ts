@@ -13,6 +13,9 @@ test("demo project can compare, resume, and show ranked results", async ({ page 
   await expect(page.getByText(/本次已完成/)).toContainText("1");
   await page.getByRole("button", { name: "查看当前结果" }).click();
   await expect(page.getByRole("heading", { name: "你的偏好序列" })).toBeVisible();
+  await expect(page.getByText("不确定性较初始降低")).toBeVisible();
+  await expect(page.getByText("用于本次排序的人工比较")).toBeVisible();
+  await expect(page.getByText(/当前平均值 .*越低越稳定/)).toBeVisible();
   await expect(page.locator("tbody tr")).toHaveCount(16);
   await page.getByRole("button", { name: /两两比较/ }).click();
   await expect(page.getByText(/本次已完成/)).toContainText("1");

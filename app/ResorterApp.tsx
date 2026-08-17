@@ -70,6 +70,11 @@ function toSkips(history: ComparisonRecord[]) {
     .map((record) => ({ leftSubjectId: record.leftSubjectId, rightSubjectId: record.rightSubjectId, acceptedCountAtAnswer: record.acceptedCountAtAnswer }));
 }
 
+function uncertaintyReduction(model: Pick<ModelState, "initialMeanUncertainty" | "currentMeanUncertainty">) {
+  if (model.initialMeanUncertainty <= 0) return 0;
+  return Math.min(1, Math.max(0, 1 - model.currentMeanUncertainty / model.initialMeanUncertainty));
+}
+
 function formatDate(date?: string) {
   if (!date) return "日期未知";
   return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "short", day: "numeric" }).format(new Date(date));
@@ -273,7 +278,7 @@ function CompareView({ state, busy, scoresVisible, onToggleScores, onAnswer, onU
   const currentSessionAccepted = state.history.filter((item) => item.sessionId === state.session.id && item.active && item.outcome !== "skip").length;
   const progress = Math.min(100, currentSessionAccepted / state.session.suggestedComparisons * 100);
   const budgetMode = sessionBudgetMode(state.session);
-  const uncertaintyDrop = state.model.initialMeanUncertainty > 0 ? Math.max(0, 1 - state.model.currentMeanUncertainty / state.model.initialMeanUncertainty) : 0;
+  const uncertaintyDrop = uncertaintyReduction(state.model);
   if (!left || !right) return <div className="center-message"><h2>暂时没有可比较的条目</h2><p>你可以查看当前结果，或返回收藏调整范围。</p><button className="primary-button" onClick={onResults}>查看结果</button></div>;
   return <>
     <header className="topbar"><div><span className="eyebrow">{SUBJECT_TYPES[state.session.subjectType]} · {BUDGET_MODE_COPY[budgetMode].label}模式 · {state.session.title}</span><h1>哪一部更值得你给出高分？</h1></div><button className="ghost-button" onClick={onToggleScores}>{scoresVisible ? "隐藏原评分" : "显示原评分"}</button></header>
@@ -298,9 +303,10 @@ function ResultsView({ state, onBack, onDistribution, onExportCsv }: { state: Co
   const comparisons = toRankingComparisons(state.history);
   const result = buildRankedItems(state.items, state.model, comparisons, state.session.distribution);
   const changed = result.filter((item) => item.newRate !== item.rate).length;
+  const uncertaintyDrop = uncertaintyReduction(state.model);
   return <>
     <header className="page-header"><div><span className="eyebrow">排序结果 · {BUDGET_MODE_COPY[sessionBudgetMode(state.session)].label}模式</span><h1>你的偏好序列</h1><p>{result.length} 个{SUBJECT_TYPES[state.session.subjectType]}条目 · {changed} 个评分发生变化 · 原评分已作为模型先验</p></div><div className="header-actions"><button className="outline-button" onClick={onBack}>继续比较</button><button className="primary-button compact" onClick={() => onExportCsv(result)}>导出 CSV</button></div></header>
-    <section className="result-summary"><article className="panel"><div className="panel-title"><div><span className="eyebrow">评分分布对比</span><h2>原评分 → 新评分</h2></div><select value={state.session.distribution.preset} onChange={(event) => { const preset = event.target.value as DistributionPreset; void onDistribution({ preset, weights: preset === "custom" ? state.session.distribution.weights : preset === "high-tail" ? DISTRIBUTIONS["high-tail"] : preset === "preserve" ? DISTRIBUTIONS.preserve : DISTRIBUTIONS.uniform }); }}><option value="uniform">均匀 1–10</option><option value="preserve">保持原分布</option><option value="high-tail">高分辨率尾部</option><option value="custom">自定义权重</option></select></div>{state.session.distribution.preset === "custom" && <DistributionWeights weights={state.session.distribution.weights} onChange={(weights) => void onDistribution({ preset: "custom", weights })} />}<Histogram items={state.items} result={result} /><div className="chart-legend"><span><i className="old" />原评分</span><span><i className="new" />新评分</span></div></article><article className="summary-stat"><span>平均不确定性</span><strong>{state.model.currentMeanUncertainty.toFixed(2)}</strong><small>{state.model.converged ? `模型已收敛 · ${state.model.iterations} 次迭代` : "当前结果仍可继续改进"}</small><hr /><span>已记录比较</span><strong>{state.model.acceptedComparisons}</strong><small>允许矛盾和偏好变化</small></article></section>
+    <section className="result-summary"><article className="panel"><div className="panel-title"><div><span className="eyebrow">评分分布对比</span><h2>原评分 → 新评分</h2></div><select value={state.session.distribution.preset} onChange={(event) => { const preset = event.target.value as DistributionPreset; void onDistribution({ preset, weights: preset === "custom" ? state.session.distribution.weights : preset === "high-tail" ? DISTRIBUTIONS["high-tail"] : preset === "preserve" ? DISTRIBUTIONS.preserve : DISTRIBUTIONS.uniform }); }}><option value="uniform">均匀 1–10</option><option value="preserve">保持原分布</option><option value="high-tail">高分辨率尾部</option><option value="custom">自定义权重</option></select></div>{state.session.distribution.preset === "custom" && <DistributionWeights weights={state.session.distribution.weights} onChange={(weights) => void onDistribution({ preset: "custom", weights })} />}<Histogram items={state.items} result={result} /><div className="chart-legend"><span><i className="old" />原评分</span><span><i className="new" />新评分</span></div></article><article className="summary-stat"><span>不确定性较初始降低</span><strong>{Math.round(uncertaintyDrop * 100)}%</strong><small>当前平均值 {state.model.currentMeanUncertainty.toFixed(2)} · 越低越稳定</small><hr /><span>用于本次排序的人工比较</span><strong>{state.model.acceptedComparisons}</strong><small>不含跳过，可能包含同类旧会话记录</small></article></section>
     <section className="ranking-table-wrap"><table className="ranking-table"><thead><tr><th>名次</th><th>条目</th><th>原评分</th><th>新评分</th><th>模型分</th><th>不确定性</th><th /></tr></thead><tbody>{result.map((item) => <tr key={item.subjectId}><td><strong>#{item.rank}</strong></td><td><div className="title-cell"><Poster item={item} /><div><strong>{primaryName(item)}</strong><small>{item.nameCn ? item.name : `${item.date?.slice(0, 4) || ""} · ${SUBJECT_TYPES[item.subjectType]}`}</small></div></div></td><td><span className="score-pill old">{item.rate}</span></td><td><span className={`score-pill new ${item.newRate !== item.rate ? "changed" : ""}`}>{item.newRate}</span></td><td>{item.ability.toFixed(3)}</td><td>{item.uncertainty.toFixed(3)}</td><td><a href={`https://bgm.tv/subject/${item.subjectId}`} target="_blank" rel="noreferrer" aria-label={`在 Bangumi 打开 ${primaryName(item)}`}>↗</a></td></tr>)}</tbody></table></section>
   </>;
 }
