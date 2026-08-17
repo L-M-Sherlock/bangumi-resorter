@@ -3,8 +3,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { createDemoItems } from "../lib/demo";
 import { fitModel, toModelState } from "../lib/ranking/engine";
 import {
-  commitComparisonDeletion, commitResponse, commitSessionDistribution, createSession, db, deleteSession, exportProject, getSessionBundle, importProject,
-  initializeModel, lastActiveResponse, saveSnapshot,
+  commitComparisonDeletion, commitResponse, commitSessionDistribution, createSession, db, deleteSession, deriveSessionWithTagFilter, exportProject, getSessionBundle, importProject,
+  initializeModel, lastActiveResponse, previewSessionTagDerivation, previewSessionUpgrade, saveSnapshot, upgradeSessionToSnapshot,
 } from "../lib/db";
 import type { ComparisonRecord } from "../lib/types";
 
@@ -87,21 +87,37 @@ describe("IndexedDB project persistence", () => {
 
   it("round-trips a backup as a non-destructive new project", async () => {
     const snapshotId = crypto.randomUUID();
-    const items = createDemoItems(snapshotId).slice(0, 2);
+    const items = createDemoItems(snapshotId).slice(0, 4);
     const snapshot = await saveSnapshot({ username: "demo", nickname: "Demo" }, snapshotId, items);
-    await createSession(snapshot, 2, [2], { preset: "uniform", weights: Array(10).fill(10) });
+    const source = await createSession(snapshot, 2, [2], { preset: "uniform", weights: Array(10).fill(10) });
+    const upgraded = await createSession(snapshot, 2, [2], { preset: "uniform", weights: Array(10).fill(10) });
+    const derived = await deriveSessionWithTagFilter(source.id, { source: "collection", match: "all", tags: ["经典"] });
+    await db.sessions.update(upgraded.id, { upgradedFromSessionId: source.id });
     const payload = await exportProject("demo");
-    payload.sessions[0].stoppingTarget = "top-tail";
-    payload.sessions[0].status = "complete";
+    payload.sessions.forEach((session) => {
+      session.stoppingTarget = "top-tail";
+      session.status = "complete";
+    });
     const imported = await importProject(payload);
     expect(imported.id).not.toBe("demo");
     expect(imported.username).toContain("导入");
     expect(await db.profiles.count()).toBe(2);
     expect(await db.snapshots.count()).toBe(2);
-    expect(await db.sessions.count()).toBe(2);
-    const importedSession = await db.sessions.where("profileId").equals(imported.id).first();
-    expect(importedSession?.stoppingTarget).toBeUndefined();
-    expect(importedSession?.status).toBe("active");
+    expect(await db.sessions.count()).toBe(6);
+    const importedSessions = await db.sessions.where("profileId").equals(imported.id).toArray();
+    expect(importedSessions.every((session) => session.stoppingTarget === undefined)).toBe(true);
+    expect(importedSessions.every((session) => session.status === "active")).toBe(true);
+    const importedUpgrade = importedSessions.find((session) => session.upgradedFromSessionId);
+    expect(importedUpgrade).toBeDefined();
+    const importedSource = importedSessions.find((session) => session.id === importedUpgrade?.upgradedFromSessionId);
+    expect(importedSource).toBeDefined();
+    expect(importedUpgrade?.id).not.toBe(upgraded.id);
+    expect(importedUpgrade?.upgradedFromSessionId).not.toBe(source.id);
+    const importedDerived = importedSessions.find((session) => session.derivedFromSessionId);
+    expect(importedDerived?.derivedFromSessionId).not.toBe(source.id);
+    expect(importedSessions.some((session) => session.id === importedDerived?.derivedFromSessionId)).toBe(true);
+    expect(importedDerived?.tagFilter).toEqual({ source: "collection", match: "all", tags: ["经典"] });
+    expect(derived.session.tagFilter?.tags).toEqual(["经典"]);
   });
 
   it("scopes reusable comparisons to the session, snapshot, or whole profile", async () => {
@@ -140,6 +156,189 @@ describe("IndexedDB project persistence", () => {
 
     await db.sessions.update(snapshotOnly.id, { comparisonReusePolicy: undefined });
     expect((await getSessionBundle(snapshotOnly.id))?.history).toHaveLength(5);
+  });
+
+  it("derives an immutable tag-scoped child and inherits only comparisons inside the new scope", async () => {
+    const snapshotId = crypto.randomUUID();
+    const items = createDemoItems(snapshotId).slice(0, 4);
+    const snapshot = await saveSnapshot({ username: "demo", nickname: "Demo" }, snapshotId, items);
+    const source = await createSession(snapshot, 2, [2], { preset: "uniform", weights: Array(10).fill(10) });
+    const records: ComparisonRecord[] = [
+      {
+        id: "tag-kept", profileId: "demo", sessionId: source.id, subjectType: 2,
+        leftSubjectId: items[0].subjectId, rightSubjectId: items[3].subjectId,
+        outcome: "left", queryKind: "adaptive", acceptedCountAtAnswer: 1, active: true,
+        createdAt: new Date(1).toISOString(),
+      },
+      {
+        id: "tag-calibration", profileId: "demo", sessionId: source.id, subjectType: 2,
+        leftSubjectId: items[3].subjectId, rightSubjectId: items[0].subjectId,
+        outcome: "right", queryKind: "calibration", calibrationOfComparisonId: "tag-kept",
+        acceptedCountAtAnswer: 2, active: true, createdAt: new Date(2).toISOString(),
+      },
+      {
+        id: "tag-dropped", profileId: "demo", sessionId: source.id, subjectType: 2,
+        leftSubjectId: items[0].subjectId, rightSubjectId: items[1].subjectId,
+        outcome: "left", queryKind: "manual", acceptedCountAtAnswer: 3, active: true,
+        createdAt: new Date(3).toISOString(),
+      },
+      {
+        id: "tag-skip", profileId: "demo", sessionId: source.id, subjectType: 2,
+        leftSubjectId: items[3].subjectId, rightSubjectId: items[2].subjectId,
+        outcome: "skip", queryKind: "adaptive", acceptedCountAtAnswer: 3, active: true,
+        createdAt: new Date(4).toISOString(),
+      },
+    ];
+    await db.comparisons.bulkAdd(records);
+    const tagFilter = { source: "collection" as const, match: "all" as const, tags: ["经典"] };
+
+    const preview = await previewSessionTagDerivation(source.id, tagFilter);
+    expect(preview).toMatchObject({
+      previousItemCount: 4,
+      currentItemCount: 2,
+      addedSubjectIds: [],
+      removedSubjectIds: [items[1].subjectId, items[2].subjectId],
+      inheritedComparisonCount: 2,
+      droppedComparisonCount: 1,
+    });
+    const derived = await deriveSessionWithTagFilter(source.id, tagFilter);
+    expect(derived.preview).toEqual(preview);
+    expect(derived.session).toMatchObject({
+      snapshotId,
+      derivedFromSessionId: source.id,
+      comparisonReusePolicy: "session",
+      modelVersion: 0,
+      status: "active",
+      tagFilter,
+    });
+    expect((await getSessionBundle(source.id))?.items).toHaveLength(4);
+    const bundle = await getSessionBundle(derived.session.id);
+    expect(bundle?.items.map((entry) => entry.subjectId).sort((a, b) => a - b)).toEqual([items[0].subjectId, items[3].subjectId]);
+    expect(bundle?.history).toHaveLength(2);
+    const inheritedCalibration = bundle?.history.find((entry) => entry.queryKind === "calibration");
+    const inheritedOriginal = bundle?.history.find((entry) => entry.queryKind === "adaptive");
+    expect(inheritedCalibration?.calibrationOfComparisonId).toBe(inheritedOriginal?.id);
+    expect(inheritedOriginal?.id).not.toBe("tag-kept");
+
+    const broadened = await previewSessionTagDerivation(derived.session.id, undefined);
+    expect(broadened).toMatchObject({ previousItemCount: 2, currentItemCount: 4, inheritedComparisonCount: 2, droppedComparisonCount: 0 });
+    expect(broadened.addedSubjectIds).toEqual([items[1].subjectId, items[2].subjectId]);
+    await expect(previewSessionTagDerivation(source.id, undefined)).rejects.toThrow(/没有变化/);
+    await expect(previewSessionTagDerivation(source.id, { ...tagFilter, tags: ["不存在"] })).rejects.toThrow(/不足两个/);
+  });
+
+  it("forks a session onto a newer snapshot and inherits only valid comparisons", async () => {
+    const firstSnapshotId = crypto.randomUUID();
+    const firstItems = createDemoItems(firstSnapshotId).slice(0, 3);
+    const firstSnapshot = await saveSnapshot({ username: "demo", nickname: "Demo" }, firstSnapshotId, firstItems);
+    const source = await createSession(firstSnapshot, 2, [2], { preset: "preserve", weights: Array(10).fill(10) });
+    const records: ComparisonRecord[] = [
+      {
+        id: "kept", profileId: "demo", sessionId: source.id, subjectType: 2,
+        leftSubjectId: firstItems[0].subjectId, rightSubjectId: firstItems[1].subjectId,
+        outcome: "left", queryKind: "adaptive", acceptedCountAtAnswer: 1, active: true,
+        createdAt: new Date(1).toISOString(),
+      },
+      {
+        id: "removed-item", profileId: "demo", sessionId: source.id, subjectType: 2,
+        leftSubjectId: firstItems[1].subjectId, rightSubjectId: firstItems[2].subjectId,
+        outcome: "right", queryKind: "manual", acceptedCountAtAnswer: 2, active: true,
+        createdAt: new Date(2).toISOString(),
+      },
+      {
+        id: "calibration", profileId: "demo", sessionId: source.id, subjectType: 2,
+        leftSubjectId: firstItems[1].subjectId, rightSubjectId: firstItems[0].subjectId,
+        outcome: "right", queryKind: "calibration", calibrationOfComparisonId: "kept",
+        acceptedCountAtAnswer: 3, active: true, createdAt: new Date(3).toISOString(),
+      },
+      {
+        id: "skipped", profileId: "demo", sessionId: source.id, subjectType: 2,
+        leftSubjectId: firstItems[0].subjectId, rightSubjectId: firstItems[2].subjectId,
+        outcome: "skip", queryKind: "adaptive", acceptedCountAtAnswer: 3, active: true,
+        createdAt: new Date(4).toISOString(),
+      },
+    ];
+    await db.comparisons.bulkAdd(records);
+
+    const secondSnapshotId = crypto.randomUUID();
+    const added = { ...firstItems[2], snapshotId: secondSnapshotId, subjectId: 999999, name: "New item", rate: 7 };
+    const secondItems = [
+      { ...firstItems[0], snapshotId: secondSnapshotId, rate: firstItems[0].rate - 1 },
+      { ...firstItems[1], snapshotId: secondSnapshotId },
+      added,
+    ];
+    const secondSnapshot = await saveSnapshot({ username: "demo", nickname: "Demo" }, secondSnapshotId, secondItems);
+
+    const preview = await previewSessionUpgrade(source.id, secondSnapshot.id);
+    expect(preview).toMatchObject({
+      previousItemCount: 3,
+      currentItemCount: 3,
+      addedSubjectIds: [added.subjectId],
+      removedSubjectIds: [firstItems[2].subjectId],
+      ratingChangedSubjectIds: [firstItems[0].subjectId],
+      inheritedComparisonCount: 2,
+      droppedComparisonCount: 1,
+    });
+
+    const upgraded = await upgradeSessionToSnapshot(source.id, secondSnapshot.id);
+    expect(upgraded.preview).toEqual(preview);
+    expect(upgraded.session).toMatchObject({
+      snapshotId: secondSnapshot.id,
+      upgradedFromSessionId: source.id,
+      comparisonReusePolicy: "session",
+      modelVersion: 0,
+      status: "active",
+    });
+    expect(await db.sessions.get(source.id)).toBeDefined();
+    const bundle = await getSessionBundle(upgraded.session.id);
+    expect(bundle?.items.map((entry) => entry.subjectId).sort((a, b) => a - b))
+      .toEqual([firstItems[0].subjectId, firstItems[1].subjectId, added.subjectId].sort((a, b) => a - b));
+    expect(bundle?.history).toHaveLength(2);
+    expect(bundle?.history.every((entry) => entry.sessionId === upgraded.session.id)).toBe(true);
+    expect(bundle?.history.map((entry) => entry.acceptedCountAtAnswer).sort((a, b) => a - b)).toEqual([1, 2]);
+    const inheritedCalibration = bundle?.history.find((entry) => entry.queryKind === "calibration");
+    const inheritedOriginal = bundle?.history.find((entry) => entry.queryKind === "adaptive");
+    expect(inheritedCalibration?.calibrationOfComparisonId).toBe(inheritedOriginal?.id);
+    expect(inheritedOriginal?.id).not.toBe("kept");
+    await expect(previewSessionUpgrade(upgraded.session.id, secondSnapshot.id)).rejects.toThrow(/已经使用当前收藏/);
+  });
+
+  it("reapplies the stored personal-tag rule when upgrading to a newer snapshot", async () => {
+    const firstSnapshotId = crypto.randomUUID();
+    const firstItems = createDemoItems(firstSnapshotId).slice(0, 4);
+    const firstSnapshot = await saveSnapshot({ username: "demo", nickname: "Demo" }, firstSnapshotId, firstItems);
+    const tagFilter = { source: "collection" as const, match: "all" as const, tags: ["经典"] };
+    const source = await createSession(
+      firstSnapshot,
+      2,
+      [2],
+      { preset: "uniform", weights: Array(10).fill(10) },
+      "quick",
+      "snapshot",
+      tagFilter,
+    );
+    expect((await getSessionBundle(source.id))?.items.map((entry) => entry.subjectId)).toEqual([firstItems[0].subjectId, firstItems[3].subjectId]);
+
+    const secondSnapshotId = crypto.randomUUID();
+    const added = { ...firstItems[1], snapshotId: secondSnapshotId, subjectId: 999999, name: "New classic", tags: ["demo", "经典"] };
+    const secondItems = [
+      { ...firstItems[0], snapshotId: secondSnapshotId, tags: ["demo"] },
+      { ...firstItems[1], snapshotId: secondSnapshotId },
+      { ...firstItems[3], snapshotId: secondSnapshotId },
+      added,
+    ];
+    const secondSnapshot = await saveSnapshot({ username: "demo", nickname: "Demo" }, secondSnapshotId, secondItems);
+    const preview = await previewSessionUpgrade(source.id, secondSnapshot.id);
+    expect(preview).toMatchObject({
+      previousItemCount: 2,
+      currentItemCount: 2,
+      addedSubjectIds: [added.subjectId],
+      removedSubjectIds: [firstItems[0].subjectId],
+    });
+    const upgraded = await upgradeSessionToSnapshot(source.id, secondSnapshot.id);
+    expect(upgraded.session.tagFilter).toEqual(tagFilter);
+    expect((await getSessionBundle(upgraded.session.id))?.items.map((entry) => entry.subjectId).sort((a, b) => a - b))
+      .toEqual([firstItems[3].subjectId, added.subjectId].sort((a, b) => a - b));
   });
 
   it("remaps calibration references when importing a backup", async () => {

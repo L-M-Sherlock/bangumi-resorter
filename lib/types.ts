@@ -70,6 +70,12 @@ export interface DistributionConfig {
   weights: number[];
 }
 
+export interface SessionTagFilter {
+  source: "collection";
+  match: "all";
+  tags: string[];
+}
+
 export interface SortingSession {
   id: string;
   profileId: string;
@@ -91,6 +97,12 @@ export interface SortingSession {
   suggestedComparisons?: number;
   /** Safety stop for fatigue; this is not a completion target. */
   maxComparisons?: number;
+  /** Set when this session was forked onto a newer collection snapshot. */
+  upgradedFromSessionId?: string;
+  /** Set when this session was forked with a different immutable item scope. */
+  derivedFromSessionId?: string;
+  /** Missing or empty means that all personal collection tags are accepted. */
+  tagFilter?: SessionTagFilter;
   createdAt: string;
   updatedAt: string;
 }
@@ -99,6 +111,21 @@ export interface SessionItem {
   id: string;
   sessionId: string;
   subjectId: number;
+}
+
+export interface SessionScopePreview {
+  sourceSessionId: string;
+  targetSnapshotId: string;
+  previousItemCount: number;
+  currentItemCount: number;
+  addedSubjectIds: number[];
+  removedSubjectIds: number[];
+  inheritedComparisonCount: number;
+  droppedComparisonCount: number;
+}
+
+export interface SessionUpgradePreview extends SessionScopePreview {
+  ratingChangedSubjectIds: number[];
 }
 
 export interface ComparisonRecord {
@@ -299,4 +326,4 @@ export const DISTRIBUTIONS: Record<Exclude<DistributionPreset, "custom">, number
   "reverse-j": [50, 25, 14, 4, 2, 1, 1, 1, 1, 1],
 };
 
-export const APP_VERSION = "0.9.0";
+export const APP_VERSION = "0.11.0";

@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-test("demo project can compare, edit records, and delete a session", async ({ page }) => {
+test("demo project can filter, compare, derive, upgrade, edit records, and delete sessions", async ({ page }) => {
   await page.goto("/");
   await page.locator("html[data-resorter-ready='true']").waitFor();
   await page.getByRole("button", { name: "先用演示数据体验" }).click();
@@ -11,6 +11,9 @@ test("demo project can compare, edit records, and delete a session", async ({ pa
   await expect(page.locator("#distribution-preset")).toHaveValue("high-tail");
   await page.locator("#distribution-preset").selectOption("reverse-j");
   await expect(page.getByText(/约 50% 为 1 分/)).toBeVisible();
+  await page.locator("#new-session-tag-search").fill("经典");
+  await page.getByRole("option", { name: /经典/ }).click();
+  await expect(page.getByText("同时包含 1 个标签，匹配 6 部作品")).toBeVisible();
   await page.getByRole("button", { name: /开始快速比较 · 动态停止/ }).click();
   await expect(page.getByRole("heading", { name: "哪一部在你的偏好中更靠前？" })).toBeVisible();
   await expect(page.getByText(/原评分 \d/)).toHaveCount(0);
@@ -41,9 +44,14 @@ test("demo project can compare, edit records, and delete a session", async ({ pa
   await expect(page.getByText("完全零错桶概率")).toHaveCount(0);
   await expect(page.getByText("未来 20 次内达标")).toHaveCount(0);
   await expect(page.getByText(/区间仅代表模型内近似/)).toBeVisible();
-  await expect(page.locator("tbody tr")).toHaveCount(16);
+  await expect(page.locator("tbody tr")).toHaveCount(6);
   await expect(page.locator("#stopping-target")).toHaveCount(0);
   await expect(page.getByText("本会话判断记录（1）")).toBeVisible();
+  const rightItemPicker = page.getByRole("combobox", { name: "右侧条目" });
+  await rightItemPicker.fill("电脑线圈");
+  await expect(page.getByRole("option", { name: /电脑线圈/ })).toBeVisible();
+  await rightItemPicker.press("Enter");
+  await expect(rightItemPicker).toHaveValue(/电脑线圈/);
   await page.getByLabel("手动比较结果").selectOption("tie");
   await page.getByRole("button", { name: "添加比较" }).click();
   await expect(page.getByText("本会话判断记录（2）")).toBeVisible();
@@ -56,10 +64,42 @@ test("demo project can compare, edit records, and delete a session", async ({ pa
   await expect(page.locator("#result-distribution-preset")).toHaveValue("uniform");
   await page.getByRole("button", { name: /两两比较/ }).click();
   await expect(page.getByText(/本次已完成/)).toContainText("1");
+  await page.getByRole("button", { name: /收藏概览/ }).click();
+  await page.getByRole("button", { name: "调整标签范围" }).click();
+  await expect(page.getByRole("heading", { name: "调整标签范围" })).toBeVisible();
+  await page.locator(".scope-modal .tag-filter-selected button").filter({ hasText: "经典" }).click();
+  await expect(page.getByRole("dialog", { name: "调整标签范围" }).getByText("未选择标签，包含当前基础范围的全部 16 部作品")).toBeVisible();
+  await expect(page.locator(".scope-preview")).toContainText("6 → 16");
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toContain("作品：6 → 16");
+    expect(dialog.message()).toContain("继承 1 条有效判断");
+    await dialog.accept();
+  });
+  await page.getByRole("button", { name: "预览并创建" }).click();
+  await expect(page.getByRole("heading", { name: "哪一部在你的偏好中更靠前？" })).toBeVisible();
+  await expect(page.getByText(/本次已完成/)).toContainText("1");
+  await page.getByRole("button", { name: /收藏概览/ }).click();
+  await expect(page.locator(".session-row")).toHaveCount(2);
+  await expect(page.getByText("标签范围：全部标签")).toBeVisible();
+  await page.getByRole("button", { name: "重新同步" }).click();
+  await page.getByRole("button", { name: "先用演示数据体验" }).click();
+  await expect(page.getByRole("button", { name: "升级到当前收藏" }).first()).toBeVisible();
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toContain("作品：16 → 16");
+    expect(dialog.message()).toContain("继承 1 条有效判断");
+    await dialog.accept();
+  });
+  await page.getByRole("button", { name: "升级到当前收藏" }).first().click();
+  await expect(page.getByRole("heading", { name: "哪一部在你的偏好中更靠前？" })).toBeVisible();
+  await expect(page.getByText(/本次已完成/)).toContainText("1");
   await page.getByRole("button", { name: /备份与导出/ }).click();
   await expect(page.getByRole("button", { name: /下载 JSON 备份/ })).toBeVisible();
   await page.getByRole("button", { name: /收藏概览/ }).click();
-  page.once("dialog", (dialog) => dialog.accept());
-  await page.getByRole("button", { name: /删除会话/ }).click();
+  const sessionCount = await page.locator(".session-row").count();
+  for (let remaining = sessionCount; remaining > 0; remaining -= 1) {
+    page.once("dialog", (dialog) => dialog.accept());
+    await page.locator(".session-delete").first().click();
+    await expect(page.locator(".session-row")).toHaveCount(remaining - 1);
+  }
   await expect(page.getByText("还没有会话，选择范围后开始第一次比较。")).toBeVisible();
 });

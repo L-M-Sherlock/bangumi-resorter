@@ -1,7 +1,7 @@
 "use client";
 /* eslint-disable @next/next/no-img-element -- Bangumi cover hosts are user-data dependent; static export cannot preconfigure every remote host. */
 
-import { FormEvent, ReactNode, useCallback, useEffect, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { syncBangumi, SyncProgress } from "@/lib/bangumi";
 import { createDemoItems } from "@/lib/demo";
 import {
@@ -12,6 +12,7 @@ import {
   createSession,
   db,
   deleteSession,
+  deriveSessionWithTagFilter,
   exportProject,
   getSessionBundle,
   getSnapshotItems,
@@ -21,7 +22,10 @@ import {
   latestSnapshot,
   listSessions,
   markExported,
+  previewSessionTagDerivation,
+  previewSessionUpgrade,
   saveSnapshot,
+  upgradeSessionToSnapshot,
 } from "@/lib/db";
 import { downloadJson, downloadText, readBackup, requestPersistentStorage, resultsCsv, storageStatus } from "@/lib/export";
 import { buildRankedItems } from "@/lib/ranking/engine";
@@ -35,6 +39,16 @@ import {
   sessionReusePolicy,
 } from "@/lib/ranking/strategy";
 import { RankingWorkerClient } from "@/lib/ranking/worker-client";
+import {
+  collectionTagFilter,
+  collectionTagOptions,
+  filterBaseItems,
+  filterScopeItems,
+  itemMatchesTagFilter,
+  normalizeCollectionTag,
+  sameTagFilter,
+  tagFilterSummary,
+} from "@/lib/scope";
 import {
   COLLECTION_TYPES,
   CollectionItem,
@@ -56,6 +70,7 @@ import {
   StoppingForecast,
   SUBJECT_TYPES,
   SubjectType,
+  SessionTagFilter,
 } from "@/lib/types";
 
 type View = "connect" | "library" | "compare" | "results" | "backup";
@@ -347,7 +362,72 @@ function CustomDistributionEditor({ weights, busy, onApply }: { weights: number[
   </div>;
 }
 
-function LibraryView({ snapshot, items, sessions, onStart, onResume, onDeleteSession, onSyncAgain }: {
+const TAG_OPTION_LIMIT = 50;
+
+function TagFilterSelector({ id, items, selectedTags, onChange }: {
+  id: string;
+  items: CollectionItem[];
+  selectedTags: string[];
+  onChange: (tags: string[]) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const options = collectionTagOptions(items);
+  const selectedKeys = new Set(selectedTags.map(normalizeCollectionTag));
+  const normalizedQuery = normalizeCollectionTag(query);
+  const matchingOptions = options.filter((option) => !normalizedQuery || option.key.includes(normalizedQuery));
+  const visibleOptions = matchingOptions.slice(0, TAG_OPTION_LIMIT);
+  const filter = collectionTagFilter(selectedTags);
+  const matchedCount = items.filter((item) => itemMatchesTagFilter(item, filter)).length;
+
+  function updateTag(label: string) {
+    const key = normalizeCollectionTag(label);
+    const next = selectedKeys.has(key)
+      ? selectedTags.filter((tag) => normalizeCollectionTag(tag) !== key)
+      : [...selectedTags, label];
+    onChange(collectionTagFilter(next)?.tags ?? []);
+  }
+
+  return <div className="tag-filter-control">
+    {selectedTags.length > 0 && <div className="tag-filter-selected" aria-label="已选择标签">
+      {selectedTags.map((tag) => <button key={normalizeCollectionTag(tag)} type="button" onClick={() => updateTag(tag)}>{tag}<span aria-hidden="true">×</span></button>)}
+    </div>}
+    <input
+      id={id}
+      type="search"
+      value={query}
+      onChange={(event) => setQuery(event.target.value)}
+      placeholder="搜索个人收藏标签"
+      autoComplete="off"
+    />
+    <div className="tag-filter-options" role="listbox" aria-label="个人收藏标签">
+      {visibleOptions.map((option) => {
+        const selected = selectedKeys.has(option.key);
+        return <button
+          key={option.key}
+          type="button"
+          role="option"
+          aria-selected={selected}
+          className={selected ? "selected" : ""}
+          onClick={() => updateTag(option.label)}
+        ><span>{option.label}</span><small>{option.count}</small></button>;
+      })}
+      {visibleOptions.length === 0 && <span className="tag-filter-empty">没有匹配的标签</span>}
+    </div>
+    {matchingOptions.length > TAG_OPTION_LIMIT && <small className="field-help">仅显示前 {TAG_OPTION_LIMIT} 个结果，请继续输入以缩小范围。</small>}
+    <small className="tag-filter-summary">{selectedTags.length === 0
+      ? `未选择标签，包含当前基础范围的全部 ${items.length} 部作品`
+      : `同时包含 ${selectedTags.length} 个标签，匹配 ${matchedCount} 部作品`}</small>
+  </div>;
+}
+
+interface TagDerivationDraft {
+  session: SortingSession;
+  baseItems: CollectionItem[];
+  previousItemCount: number;
+  selectedTags: string[];
+}
+
+function LibraryView({ snapshot, items, sessions, onStart, onResume, onUpgradeSession, onDeriveSession, onDeleteSession, onSyncAgain }: {
   snapshot: Snapshot; items: CollectionItem[]; sessions: SortingSession[];
   onStart: (
     type: SubjectType,
@@ -355,8 +435,11 @@ function LibraryView({ snapshot, items, sessions, onStart, onResume, onDeleteSes
     distribution: DistributionConfig,
     budgetMode: ComparisonBudgetMode,
     comparisonReusePolicy: ComparisonReusePolicy,
+    tagFilter?: SessionTagFilter,
   ) => Promise<void>;
   onResume: (sessionId: string) => Promise<void>;
+  onUpgradeSession: (sessionId: string) => Promise<void>;
+  onDeriveSession: (sessionId: string, tagFilter?: SessionTagFilter) => Promise<void>;
   onDeleteSession: (sessionId: string) => Promise<void>;
   onSyncAgain: () => void;
 }) {
@@ -364,16 +447,29 @@ function LibraryView({ snapshot, items, sessions, onStart, onResume, onDeleteSes
   const initialType = availableTypes[0]?.[0] ?? 2;
   const [selectedType, setSelectedType] = useState<SubjectType>(initialType);
   const [statuses, setStatuses] = useState<CollectionType[]>(collectionEntries.map(([type]) => type));
+  const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [manualPreset, setManualPreset] = useState<DistributionPreset>();
   const [customWeights, setCustomWeights] = useState([...DISTRIBUTIONS.uniform]);
   const [budgetMode, setBudgetMode] = useState<ComparisonBudgetMode>("quick");
   const [comparisonReusePolicy, setComparisonReusePolicy] = useState<ComparisonReusePolicy>("snapshot");
   const [busy, setBusy] = useState(false);
+  const [upgradingSessionId, setUpgradingSessionId] = useState<string>();
+  const [derivingSessionId, setDerivingSessionId] = useState<string>();
   const [deletingSessionId, setDeletingSessionId] = useState<string>();
+  const [derivationDraft, setDerivationDraft] = useState<TagDerivationDraft>();
   const [error, setError] = useState("");
-  const selectedItems = items.filter((item) => item.subjectType === selectedType && statuses.includes(item.collectionType));
+  const baseItems = filterBaseItems(selectedType, statuses, items);
+  const tagFilter = collectionTagFilter(selectedTags);
+  const selectedItems = filterScopeItems({ subjectType: selectedType, collectionTypes: statuses, tagFilter }, items);
   const preset = manualPreset ?? recommendedDistribution(selectedItems.length);
   const maxComparisons = comparisonLimit(selectedItems.length, budgetMode);
+  const derivationTagFilter = collectionTagFilter(derivationDraft?.selectedTags ?? []);
+  const derivationItems = derivationDraft
+    ? filterScopeItems({ ...derivationDraft.session, tagFilter: derivationTagFilter }, derivationDraft.baseItems)
+    : [];
+  const derivationUnchanged = derivationDraft
+    ? sameTagFilter(derivationDraft.session.tagFilter, derivationTagFilter)
+    : true;
 
   async function start() {
     setBusy(true); setError("");
@@ -384,6 +480,7 @@ function LibraryView({ snapshot, items, sessions, onStart, onResume, onDeleteSes
         distributionConfig(preset, customWeights),
         budgetMode,
         comparisonReusePolicy,
+        tagFilter,
       );
     }
     catch (cause) { setError(cause instanceof Error ? cause.message : "无法创建会话。"); }
@@ -399,15 +496,74 @@ function LibraryView({ snapshot, items, sessions, onStart, onResume, onDeleteSes
     finally { setDeletingSessionId(undefined); }
   }
 
+  async function upgradeSession(session: SortingSession) {
+    setUpgradingSessionId(session.id); setError("");
+    try {
+      const preview = await previewSessionUpgrade(session.id, snapshot.id);
+      const confirmed = window.confirm([
+        `把会话“${session.title}”升级到当前收藏？`,
+        "",
+        `作品：${preview.previousItemCount} → ${preview.currentItemCount}`,
+        `新增 ${preview.addedSubjectIds.length} · 移除 ${preview.removedSubjectIds.length} · 原评分变化 ${preview.ratingChangedSubjectIds.length}`,
+        `继承 ${preview.inheritedComparisonCount} 条有效判断 · 舍弃 ${preview.droppedComparisonCount} 条涉及已移除作品的判断`,
+        "",
+        "系统会创建一个新会话并保留旧会话；分桶、后验和停止预测会全部重算。",
+      ].join("\n"));
+      if (!confirmed) return;
+      await onUpgradeSession(session.id);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "无法升级这个会话。"); }
+    finally { setUpgradingSessionId(undefined); }
+  }
+
+  async function beginTagDerivation(session: SortingSession) {
+    setDerivingSessionId(session.id); setError("");
+    try {
+      const [snapshotItems, links] = await Promise.all([
+        getSnapshotItems(session.snapshotId),
+        db.sessionItems.where("sessionId").equals(session.id).toArray(),
+      ]);
+      setDerivationDraft({
+        session,
+        baseItems: filterBaseItems(session.subjectType, session.collectionTypes, snapshotItems),
+        previousItemCount: links.length,
+        selectedTags: collectionTagFilter(session.tagFilter?.tags ?? [])?.tags ?? [],
+      });
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "无法读取这个会话的范围。"); }
+    finally { setDerivingSessionId(undefined); }
+  }
+
+  async function confirmTagDerivation() {
+    if (!derivationDraft || derivationUnchanged || derivationItems.length < 2) return;
+    setDerivingSessionId(derivationDraft.session.id); setError("");
+    try {
+      const preview = await previewSessionTagDerivation(derivationDraft.session.id, derivationTagFilter);
+      const confirmed = window.confirm([
+        `按新标签范围派生会话“${derivationDraft.session.title}”？`,
+        "",
+        `标签：${tagFilterSummary(derivationDraft.session.tagFilter)} → ${tagFilterSummary(derivationTagFilter)}`,
+        `作品：${preview.previousItemCount} → ${preview.currentItemCount}`,
+        `新增 ${preview.addedSubjectIds.length} · 移除 ${preview.removedSubjectIds.length}`,
+        `继承 ${preview.inheritedComparisonCount} 条有效判断 · 舍弃 ${preview.droppedComparisonCount} 条范围外判断`,
+        "",
+        "系统会创建一个新会话并保留原会话；分桶、后验和停止预测会全部重算。",
+      ].join("\n"));
+      if (!confirmed) return;
+      await onDeriveSession(derivationDraft.session.id, derivationTagFilter);
+      setDerivationDraft(undefined);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "无法派生这个会话。"); }
+    finally { setDerivingSessionId(undefined); }
+  }
+
   return <>
     <header className="page-header"><div><span className="eyebrow">收藏概览</span><h1>{snapshot.username} 的已评分收藏</h1><p>上次同步于 {formatDate(snapshot.syncedAt)} · 共 {items.length} 个条目</p></div><button className="outline-button" onClick={onSyncAgain}>重新同步</button></header>
     <section className="metric-grid">
-      {availableTypes.map(([type, label]) => { const count = items.filter((item) => item.subjectType === type).length; const mean = items.filter((item) => item.subjectType === type).reduce((sum, item) => sum + item.rate, 0) / count; return <button key={type} className={`metric-card ${selectedType === type ? "selected" : ""}`} onClick={() => setSelectedType(type)}><span>{label}</span><strong>{count}</strong><small>平均 {mean.toFixed(1)} 分</small></button>; })}
+      {availableTypes.map(([type, label]) => { const count = items.filter((item) => item.subjectType === type).length; const mean = items.filter((item) => item.subjectType === type).reduce((sum, item) => sum + item.rate, 0) / count; return <button key={type} className={`metric-card ${selectedType === type ? "selected" : ""}`} onClick={() => { setSelectedType(type); setSelectedTags([]); }}><span>{label}</span><strong>{count}</strong><small>平均 {mean.toFixed(1)} 分</small></button>; })}
     </section>
     <section className="dashboard-grid">
-      <article className="panel distribution-panel"><div className="panel-title"><div><span className="eyebrow">当前评分分布</span><h2>{SUBJECT_TYPES[selectedType]}</h2></div><span className="legend"><i />原评分</span></div><Histogram items={items.filter((item) => item.subjectType === selectedType)} /></article>
+      <article className="panel distribution-panel"><div className="panel-title"><div><span className="eyebrow">当前范围评分分布</span><h2>{SUBJECT_TYPES[selectedType]} · {selectedItems.length} 部</h2></div><span className="legend"><i />原评分</span></div><Histogram items={selectedItems} /></article>
       <article className="panel start-panel"><span className="eyebrow">新建排序会话</span><h2>选择本次范围</h2><p>不同媒介会分别建立模型，比较记录可在后续会话中复用。</p>
         <div className="field-group"><span className="field-label" id="collection-status-label">收藏状态</span><div className="chip-row" role="group" aria-labelledby="collection-status-label">{collectionEntries.map(([type, label]) => <button key={type} className={statuses.includes(type) ? "selected" : ""} onClick={() => setStatuses((value) => value.includes(type) ? value.filter((item) => item !== type) : [...value, type])}>{label}</button>)}</div></div>
+        <div className="field-group"><label htmlFor="new-session-tag-search">个人标签（全部匹配）</label><TagFilterSelector id="new-session-tag-search" items={baseItems} selectedTags={selectedTags} onChange={setSelectedTags} /><small className="field-help">标签来自你的 Bangumi 收藏；选择多个标签时，作品必须同时包含全部标签。</small></div>
         <div className="field-group"><label htmlFor="comparison-budget">推断模式</label><select id="comparison-budget" value={budgetMode} onChange={(event) => setBudgetMode(event.target.value as ComparisonBudgetMode)}><option value="quick">快速（推荐）</option><option value="standard">标准</option><option value="thorough">精细</option></select><small className="field-help">{BUDGET_MODE_COPY[budgetMode].description} · 每次回答后动态重估剩余区间，疲劳安全上限 {maxComparisons} 次</small></div>
         <div className="field-group"><label htmlFor="distribution-preset">新评分分布</label><select id="distribution-preset" value={preset} onChange={(event) => setManualPreset(event.target.value as DistributionPreset)}><option value="uniform">均匀 1–10</option><option value="preserve">保持原分布</option><option value="high-tail">高分辨率尾部</option><option value="reverse-j">反 J 分布</option><option value="custom">自定义权重</option></select><small className="field-help">{manualPreset === undefined ? `已按 ${selectedItems.length} 个条目的规模自动推荐` : "已使用手动选择"}</small>{preset === "reverse-j" && <small className="field-help">约 50% 为 1 分、25% 为 2 分，越高分档越稀有；8–10 分各约 1%。</small>}{preset === "custom" && <DistributionWeights weights={customWeights} onChange={setCustomWeights} />}</div>
         <div className="field-group"><label htmlFor="reuse-policy">历史判断</label><select id="reuse-policy" value={comparisonReusePolicy} onChange={(event) => setComparisonReusePolicy(event.target.value as ComparisonReusePolicy)}><option value="snapshot">复用同一快照（推荐）</option><option value="session">本会话从零开始</option><option value="profile">复用所有历史快照</option></select><small className="field-help">新快照默认不继承旧偏好，避免长期漂移被历史判断锁定。</small></div>
@@ -416,7 +572,41 @@ function LibraryView({ snapshot, items, sessions, onStart, onResume, onDeleteSes
         <button className="primary-button" onClick={start} disabled={busy || selectedItems.length < 2}>{busy ? "正在准备模型…" : `开始${BUDGET_MODE_COPY[budgetMode].label}比较 · 动态停止`}<span>→</span></button>
       </article>
     </section>
-    <section className="sessions-section"><div className="section-title"><div><span className="eyebrow">排序会话</span><h2>继续或管理已有判断</h2></div></div>{sessions.length === 0 ? <div className="empty-row">还没有会话，选择范围后开始第一次比较。</div> : <div className="session-list">{sessions.map((session) => { const sessionItemCount = items.filter((item) => item.subjectType === session.subjectType && session.collectionTypes.includes(item.collectionType)).length; return <article className="session-row" key={session.id}><button className="session-open" disabled={Boolean(deletingSessionId)} onClick={() => onResume(session.id)}><span className="session-type">{SUBJECT_TYPES[session.subjectType]}</span><div><strong>{session.title}</strong><small>{BUDGET_MODE_COPY[sessionBudgetMode(session)].label}模式 · 动态停止 · 上限 {sessionComparisonLimit(session, sessionItemCount)} 次 · {sessionReusePolicy(session) === "snapshot" ? "同快照复用" : sessionReusePolicy(session) === "session" ? "不复用" : "全历史复用"} · 更新于 {formatDate(session.updatedAt)}</small></div><span className={`session-status ${session.status}`}>{session.status === "complete" ? "已稳定" : "进行中"}</span><b>→</b></button><button className="session-delete" disabled={Boolean(deletingSessionId)} aria-label={`删除会话 ${session.title}`} onClick={() => void removeSession(session)}>{deletingSessionId === session.id ? "删除中…" : "删除"}</button></article>; })}</div>}</section>
+    <section className="sessions-section"><div className="section-title"><div><span className="eyebrow">排序会话</span><h2>继续或管理已有判断</h2></div></div>{sessions.length === 0 ? <div className="empty-row">还没有会话，选择范围后开始第一次比较。</div> : <div className="session-list">{sessions.map((session) => {
+      const sessionItemCount = filterScopeItems(session, items).length;
+      const usesCurrentSnapshot = session.snapshotId === snapshot.id;
+      const upgradedAlready = sessions.some((candidate) =>
+        candidate.snapshotId === snapshot.id && candidate.upgradedFromSessionId === session.id);
+      const actionBusy = Boolean(deletingSessionId || upgradingSessionId || derivingSessionId);
+      const historyLabel = session.upgradedFromSessionId || session.derivedFromSessionId
+        ? "继承旧会话判断"
+        : sessionReusePolicy(session) === "snapshot"
+          ? "同快照复用"
+          : sessionReusePolicy(session) === "session" ? "不复用" : "全历史复用";
+      return <article className="session-row" key={session.id}>
+        <button className="session-open" disabled={actionBusy} onClick={() => onResume(session.id)}>
+          <span className="session-type">{SUBJECT_TYPES[session.subjectType]}</span>
+          <div><strong>{session.title}</strong><small>{BUDGET_MODE_COPY[sessionBudgetMode(session)].label}模式 · {usesCurrentSnapshot ? "当前收藏" : "旧收藏"} · {historyLabel} · 上限 {sessionComparisonLimit(session, sessionItemCount)} 次 · 更新于 {formatDate(session.updatedAt)}</small><small>标签范围：{tagFilterSummary(session.tagFilter)}</small></div>
+          <span className={`session-status ${session.status}`}>{session.status === "complete" ? "已稳定" : "进行中"}</span><b>→</b>
+        </button>
+        <div className="session-actions">
+          {!usesCurrentSnapshot && !upgradedAlready && <button className="session-upgrade" disabled={actionBusy} onClick={() => void upgradeSession(session)}>{upgradingSessionId === session.id ? "升级中…" : "升级到当前收藏"}</button>}
+          <button className="session-derive" disabled={actionBusy} onClick={() => void beginTagDerivation(session)}>{derivingSessionId === session.id ? "读取中…" : "调整标签范围"}</button>
+          <button className="session-delete" disabled={actionBusy} aria-label={`删除会话 ${session.title}`} onClick={() => void removeSession(session)}>{deletingSessionId === session.id ? "删除中…" : "删除"}</button>
+        </div>
+      </article>;
+    })}</div>}</section>
+    {derivationDraft && <div className="scope-modal-backdrop" role="presentation">
+      <section className="scope-modal" role="dialog" aria-modal="true" aria-labelledby="scope-modal-title">
+        <div className="scope-modal-header"><div><span className="eyebrow">派生新会话</span><h2 id="scope-modal-title">调整标签范围</h2></div><button type="button" aria-label="关闭标签范围窗口" onClick={() => setDerivationDraft(undefined)}>×</button></div>
+        <p>原会话及其判断不会被修改。新会话会使用同一收藏快照，并继承新范围内仍然有效的判断。</p>
+        <div className="field-group"><label htmlFor="derived-session-tag-search">个人标签（全部匹配）</label><TagFilterSelector id="derived-session-tag-search" items={derivationDraft.baseItems} selectedTags={derivationDraft.selectedTags} onChange={(selectedTags) => setDerivationDraft((current) => current ? { ...current, selectedTags } : current)} /></div>
+        <div className="scope-preview"><span>作品范围</span><strong>{derivationDraft.previousItemCount} → {derivationItems.length}</strong><small>{tagFilterSummary(derivationDraft.session.tagFilter)} → {tagFilterSummary(derivationTagFilter)}</small></div>
+        {derivationUnchanged && <Notice>请选择与原会话不同的标签范围。</Notice>}
+        {!derivationUnchanged && derivationItems.length < 2 && <Notice tone="error">筛选后不足两部作品，无法创建比较会话。</Notice>}
+        <div className="scope-modal-actions"><button className="outline-button" type="button" disabled={Boolean(derivingSessionId)} onClick={() => setDerivationDraft(undefined)}>取消</button><button className="primary-button compact" type="button" disabled={Boolean(derivingSessionId) || derivationUnchanged || derivationItems.length < 2} onClick={() => void confirmTagDerivation()}>{derivingSessionId ? "正在计算…" : "预览并创建"}</button></div>
+      </section>
+    </div>}
   </>;
 }
 
@@ -460,6 +650,118 @@ function MediaCard({ item, side, showScore, disabled, onChoose }: { item: Collec
   return <article className="media-card"><Poster item={item} wide /><div className="media-copy"><span className="media-kicker">{item.platform || SUBJECT_TYPES[item.subjectType]} · {item.date?.slice(0, 4) || "年份未知"}</span><h2>{primaryName(item)}</h2>{item.nameCn && <p>{item.name}</p>}{showScore && <span className="old-score">原评分 {item.rate}</span>}</div><button className="choice-button" disabled={disabled} onClick={onChoose}>{side === "left" && <span aria-hidden="true">←</span>} 更喜欢这部 {side === "right" && <span aria-hidden="true">→</span>}<kbd>{side === "left" ? "←" : "→"}</kbd></button></article>;
 }
 
+const ITEM_PICKER_RESULT_LIMIT = 50;
+
+function itemPickerLabel(item: RankedItem) {
+  return `#${item.rank} · ${primaryName(item)}`;
+}
+
+function normalizedSearch(value: string) {
+  return value.normalize("NFKC").toLocaleLowerCase().trim();
+}
+
+function SearchableItemPicker({ id, label, items, value, excludeSubjectId, disabled, onChange }: {
+  id: string;
+  label: string;
+  items: RankedItem[];
+  value: number;
+  excludeSubjectId?: number;
+  disabled: boolean;
+  onChange: (subjectId: number) => void;
+}) {
+  const selected = items.find((item) => item.subjectId === value);
+  const selectedLabel = selected ? itemPickerLabel(selected) : "";
+  const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const listboxId = `${id}-results`;
+  const tokens = normalizedSearch(query).split(/\s+/).filter(Boolean);
+  const matches = items.filter((item) => {
+    if (item.subjectId === excludeSubjectId) return false;
+    const searchable = normalizedSearch([
+      `#${item.rank}`, item.rank, item.subjectId, item.name, item.nameCn, primaryName(item),
+    ].filter(Boolean).join(" "));
+    return tokens.every((token) => searchable.includes(token));
+  });
+  const visibleMatches = matches.slice(0, ITEM_PICKER_RESULT_LIMIT);
+  const effectiveActiveIndex = Math.min(activeIndex, Math.max(visibleMatches.length - 1, 0));
+
+  function choose(item: RankedItem) {
+    onChange(item.subjectId);
+    setQuery("");
+    setOpen(false);
+  }
+
+  function handleKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setOpen(true);
+      setActiveIndex((index) => Math.min(index + 1, Math.max(visibleMatches.length - 1, 0)));
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setOpen(true);
+      setActiveIndex((index) => Math.max(index - 1, 0));
+    } else if (event.key === "Enter" && open && visibleMatches[effectiveActiveIndex]) {
+      event.preventDefault();
+      choose(visibleMatches[effectiveActiveIndex]);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      setQuery("");
+      setOpen(false);
+    }
+  }
+
+  return <div className={`item-picker${open ? " open" : ""}`} onBlur={(event) => {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+      setQuery("");
+      setOpen(false);
+    }
+  }}>
+    <label htmlFor={id}><span>{label}</span></label>
+    <input
+      id={id}
+      type="search"
+      role="combobox"
+      aria-autocomplete="list"
+      aria-expanded={open}
+      aria-controls={listboxId}
+      aria-activedescendant={open && visibleMatches[effectiveActiveIndex] ? `${id}-option-${visibleMatches[effectiveActiveIndex].subjectId}` : undefined}
+      autoComplete="off"
+      spellCheck={false}
+      value={open ? query : selectedLabel}
+      disabled={disabled}
+      placeholder="搜索标题、原名、排名或 Bangumi ID"
+      onFocus={(event) => { setQuery(""); setActiveIndex(0); setOpen(true); event.currentTarget.select(); }}
+      onChange={(event) => { setQuery(event.target.value); setActiveIndex(0); setOpen(true); }}
+      onKeyDown={handleKeyDown}
+    />
+    {open && <div className="item-picker-menu">
+      <div className="item-picker-meta">{matches.length > ITEM_PICKER_RESULT_LIMIT ? `显示前 ${ITEM_PICKER_RESULT_LIMIT} 项，共 ${matches.length} 项；继续输入可缩小范围` : `找到 ${matches.length} 项`}</div>
+      <div id={listboxId} className="item-picker-results" role="listbox" aria-label={`${label}搜索结果`}>
+        {visibleMatches.length === 0
+          ? <div className="item-picker-empty">没有匹配条目</div>
+          : visibleMatches.map((item, index) => {
+            const alternateName = primaryName(item) === item.name ? item.nameCn : item.name;
+            return <button
+              id={`${id}-option-${item.subjectId}`}
+              className={`item-picker-option${index === effectiveActiveIndex ? " active" : ""}`}
+              type="button"
+              role="option"
+              aria-selected={item.subjectId === value}
+              key={item.subjectId}
+              onPointerDown={(event) => event.preventDefault()}
+              onMouseEnter={() => setActiveIndex(index)}
+              onClick={() => choose(item)}
+            >
+              <span><b>#{item.rank}</b><strong>{primaryName(item)}</strong></span>
+              <small>{alternateName ? `${alternateName} · ` : ""}原评分 {item.rate} · ID {item.subjectId}</small>
+            </button>;
+          })}
+      </div>
+    </div>}
+  </div>;
+}
+
 function ComparisonManager({ items, history, sessionId, busy, onAdd, onDelete }: {
   items: RankedItem[];
   history: ComparisonRecord[];
@@ -494,11 +796,11 @@ function ComparisonManager({ items, history, sessionId, busy, onAdd, onDelete }:
 
   return <section className="panel comparison-manager" aria-labelledby="comparison-manager-title">
     <div className="panel-title"><div><span className="eyebrow">判断管理</span><h2 id="comparison-manager-title">手动添加或删除比较</h2></div><span className="record-count">本会话 {currentRecords.length} 条</span></div>
-    <p>选择当前会话中的两个条目；保存后，排名、可信度与动态剩余预测都会立即重算。</p>
+    <p>搜索并选择当前会话中的两个条目；可按中文标题、原名、当前排名或 Bangumi ID 查找。保存后，排名、可信度与动态剩余预测都会立即重算。</p>
     <form className="manual-comparison-form" onSubmit={(event) => { event.preventDefault(); if (leftSubjectId !== rightSubjectId) void onAdd(leftSubjectId, rightSubjectId, outcome); }}>
-      <label><span>左侧条目</span><select aria-label="手动比较左侧条目" value={leftSubjectId} disabled={busy} onChange={(event) => setLeftSubjectId(Number(event.target.value))}>{items.map((item) => <option key={item.subjectId} value={item.subjectId}>#{item.rank} · {primaryName(item)}</option>)}</select></label>
+      <SearchableItemPicker id="manual-left-item" label="左侧条目" items={items} value={leftSubjectId} excludeSubjectId={rightSubjectId} disabled={busy} onChange={setLeftSubjectId} />
       <label><span>判断</span><select aria-label="手动比较结果" value={outcome} disabled={busy} onChange={(event) => setOutcome(event.target.value as Exclude<ComparisonOutcome, "skip">)}><option value="left">更喜欢左侧</option><option value="tie">差不多喜欢</option><option value="right">更喜欢右侧</option></select></label>
-      <label><span>右侧条目</span><select aria-label="手动比较右侧条目" value={rightSubjectId} disabled={busy} onChange={(event) => setRightSubjectId(Number(event.target.value))}>{items.map((item) => <option key={item.subjectId} value={item.subjectId}>#{item.rank} · {primaryName(item)}</option>)}</select></label>
+      <SearchableItemPicker id="manual-right-item" label="右侧条目" items={items} value={rightSubjectId} excludeSubjectId={leftSubjectId} disabled={busy} onChange={setRightSubjectId} />
       <button className="primary-button compact" type="submit" disabled={busy || !leftSubjectId || !rightSubjectId || leftSubjectId === rightSubjectId}>{busy ? "正在重算…" : "添加比较"}</button>
     </form>
     {leftSubjectId === rightSubjectId && <small className="comparison-form-error">左右两侧不能选择同一个条目。</small>}
@@ -624,12 +926,26 @@ export default function ResorterApp() {
     distribution: DistributionConfig,
     budgetMode: ComparisonBudgetMode,
     comparisonReusePolicy: ComparisonReusePolicy,
+    tagFilter?: SessionTagFilter,
   ) {
     if (!snapshot) return;
-    const session = await createSession(snapshot, type, statuses, distribution, budgetMode, comparisonReusePolicy);
+    const session = await createSession(snapshot, type, statuses, distribution, budgetMode, comparisonReusePolicy, tagFilter);
     setSessions(await listSessions(snapshot.profileId));
     await openSession(session.id);
     if (!storeStatus.persisted) { await requestPersistentStorage(); setStoreStatus(await storageStatus()); }
+  }
+
+  async function upgradeSession(sourceSessionId: string) {
+    if (!snapshot) return;
+    const { session } = await upgradeSessionToSnapshot(sourceSessionId, snapshot.id);
+    setSessions(await listSessions(snapshot.profileId));
+    await openSession(session.id);
+  }
+
+  async function deriveSession(sourceSessionId: string, tagFilter?: SessionTagFilter) {
+    const { session } = await deriveSessionWithTagFilter(sourceSessionId, tagFilter);
+    setSessions(await listSessions(session.profileId));
+    await openSession(session.id);
   }
 
   async function answer(outcome: ComparisonOutcome) {
@@ -776,7 +1092,7 @@ export default function ResorterApp() {
 
   const shellContent = (() => {
     if (!snapshot || !profile) return null;
-    if (view === "library") return <LibraryView snapshot={snapshot} items={items} sessions={sessions} onStart={startSession} onResume={openSession} onDeleteSession={removeSession} onSyncAgain={() => navigate("connect")} />;
+    if (view === "library") return <LibraryView snapshot={snapshot} items={items} sessions={sessions} onStart={startSession} onResume={openSession} onUpgradeSession={upgradeSession} onDeriveSession={deriveSession} onDeleteSession={removeSession} onSyncAgain={() => navigate("connect")} />;
     if (view === "compare" && compare) return <CompareView state={compare} busy={busy} scoresVisible={scoresVisible} onToggleScores={() => setScoresVisible((value) => !value)} onAnswer={answer} onUndo={undo} onPause={() => navigate("library")} onResults={() => navigate("results")} />;
     if (view === "results" && compare) return <ResultsView state={compare} busy={busy} onBack={() => navigate("compare")} onDistribution={changeDistribution} onExportCsv={exportCsv} onAddComparison={addManualComparison} onDeleteComparison={removeComparison} />;
     if (view === "backup") return <BackupView snapshot={snapshot} items={items} profile={profile} sessions={sessions} storage={storeStatus} onImported={async () => { const saved = await latestSnapshot(); if (saved) await loadSnapshot(saved, "backup"); }} />;
