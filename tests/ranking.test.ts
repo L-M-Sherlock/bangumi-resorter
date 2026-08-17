@@ -180,7 +180,7 @@ describe("Bradley–Terry ranking engine", () => {
     expect(Object.values(diagnostics.bucketStability).every((value) => value >= 0 && value <= 1)).toBe(true);
   });
 
-  it("requires the joint all-items bucket event instead of marginal per-item stability", () => {
+  it("stops on the global adjacent-bucket event while retaining exact joint stability", () => {
     const rated = Array.from({ length: 100 }, (_, index) => ({ subjectId: index + 1, rate: 10 - Math.floor(index / 10) }));
     const abilities = Object.fromEntries(rated.map((entry, index) => [entry.subjectId, 100 - index]));
     const stable = new Float64Array(rated.map((_, index) => 100 - index));
@@ -204,6 +204,15 @@ describe("Bradley–Terry ranking engine", () => {
     expect(marginallyStable.minBucketStability).toBeGreaterThan(0.9);
     expect(marginallyStable.jointBucketStability).toBe(0);
     expect(marginallyStable.jointBucketStableSamples).toBe(0);
+    expect(marginallyStable.adjacentBucketStability).toBe(0);
+    expect(Object.values(marginallyStable.adjacentBucketStabilityByItem)
+      .every((value) => value >= 0 && value <= 1)).toBe(true);
+    expect(marginallyStable.expectedCrossTwoBucketCount).toBe(2);
+    expect(marginallyStable.crossTwoBucketCountMedian).toBe(2);
+    expect(marginallyStable.crossTwoBucketCountLow).toBe(2);
+    expect(marginallyStable.crossTwoBucketCountHigh).toBe(2);
+    expect(marginallyStable.maxBucketDisplacementMedian).toBe(5);
+    expect(marginallyStable.maxBucketDisplacementHigh).toBe(5);
     expect(marginallyStable.ready).toBe(false);
 
     const oneMisplacement = stable.slice();
@@ -215,7 +224,33 @@ describe("Bradley–Terry ranking engine", () => {
     }, uniform, evidence, "session");
     expect(finiteSampleDiagnostics.jointBucketStability).toBe(60 / 64);
     expect(finiteSampleDiagnostics.jointBucketStabilityLow).toBeLessThan(0.9);
-    expect(finiteSampleDiagnostics.ready).toBe(false);
+    expect(finiteSampleDiagnostics.adjacentBucketStability).toBe(1);
+    expect(finiteSampleDiagnostics.adjacentBucketStabilityLow).toBeGreaterThan(0.9);
+    expect(finiteSampleDiagnostics.ready).toBe(true);
+
+    const adjacentFit = {
+      ...fit,
+      posteriorSamples: Array.from({ length: 64 }, () => oneMisplacement.slice()),
+    };
+    const adjacentOnly = analyzeRanking(rated, adjacentFit, uniform, evidence, "session");
+    expect(adjacentOnly.jointBucketStability).toBe(0);
+    expect(adjacentOnly.adjacentBucketStability).toBe(1);
+    expect(Object.values(adjacentOnly.adjacentBucketStabilityByItem)
+      .every((value) => value === 1)).toBe(true);
+    expect(adjacentOnly.expectedCrossTwoBucketCount).toBe(0);
+    expect(adjacentOnly.crossTwoBucketCountMedian).toBe(0);
+    expect(adjacentOnly.crossTwoBucketCountLow).toBe(0);
+    expect(adjacentOnly.crossTwoBucketCountHigh).toBe(0);
+    expect(adjacentOnly.maxBucketDisplacementMedian).toBe(1);
+    expect(adjacentOnly.maxBucketDisplacementHigh).toBe(1);
+    expect(adjacentOnly.decisionRiskRatio).toBeLessThanOrEqual(1);
+    expect(adjacentOnly.ready).toBe(true);
+
+    const evidenceLimited = analyzeRanking(rated, adjacentFit, uniform, evidence.slice(0, 9), "session", 100);
+    expect(evidenceLimited.ready).toBe(false);
+    expect(forecastStoppingTime(rated, adjacentFit, uniform, evidence.slice(0, 9), "session", evidenceLimited, {
+      fatigueLimit: 100, randomSeed: 12, forecastEfficiency: 16,
+    }).medianAdditional).toBe(5);
 
     const globallyStable = analyzeRanking(rated, {
       ...fit,
@@ -223,6 +258,10 @@ describe("Bradley–Terry ranking engine", () => {
     }, uniform, evidence, "session");
     expect(globallyStable.jointBucketStability).toBe(1);
     expect(globallyStable.jointBucketStabilityLow).toBeGreaterThan(0.9);
+    expect(globallyStable.adjacentBucketStability).toBe(1);
+    expect(globallyStable.expectedCrossTwoBucketCount).toBe(0);
+    expect(globallyStable.maxBucketDisplacementMedian).toBe(0);
+    expect(globallyStable.maxBucketDisplacementHigh).toBe(0);
     expect(globallyStable.decisionRiskRatio).toBeLessThanOrEqual(1);
     expect(globallyStable.ready).toBe(true);
   });

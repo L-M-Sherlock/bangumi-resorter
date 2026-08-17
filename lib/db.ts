@@ -171,6 +171,7 @@ export async function commitResponse(
   sessionId: string,
   expectedVersion: number,
   pair: {
+    recordId?: string;
     leftSubjectId: number;
     rightSubjectId: number;
     queryKind?: ComparisonRecord["queryKind"];
@@ -183,7 +184,7 @@ export async function commitResponse(
     const session = await db.sessions.get(sessionId);
     if (!session || session.modelVersion !== expectedVersion) throw new Error("排序会话已在其他页面更新，请刷新后继续。");
     const record: ComparisonRecord = {
-      id: id(), profileId: session.profileId, sessionId, subjectType: session.subjectType,
+      id: pair.recordId ?? id(), profileId: session.profileId, sessionId, subjectType: session.subjectType,
       leftSubjectId: pair.leftSubjectId, rightSubjectId: pair.rightSubjectId, outcome,
       queryKind: pair.queryKind ?? "adaptive", calibrationOfComparisonId: pair.calibrationOfComparisonId,
       acceptedCountAtAnswer: nextModel.acceptedComparisons, active: true, createdAt: now(),
@@ -230,6 +231,42 @@ export async function commitUndo(sessionId: string, expectedVersion: number, rec
     await db.models.put({ ...nextModel, sessionId, version: expectedVersion + 1, updatedAt: now() });
     await db.sessions.put(updated);
     return updated;
+  });
+}
+
+export async function commitComparisonDeletion(
+  sessionId: string,
+  expectedVersion: number,
+  recordId: string,
+  nextModel: ModelState,
+) {
+  return db.transaction("rw", db.sessions, db.comparisons, db.models, async () => {
+    const session = await db.sessions.get(sessionId);
+    const record = await db.comparisons.get(recordId);
+    if (!session || session.modelVersion !== expectedVersion) throw new Error("排序会话已在其他页面更新，请刷新后继续。");
+    if (!record?.active || record.sessionId !== sessionId) throw new Error("这条判断记录不存在，或不属于当前会话。");
+    const updated: SortingSession = {
+      ...session,
+      modelVersion: expectedVersion + 1,
+      status: modelMeetsTarget(nextModel) ? "complete" : "active",
+      updatedAt: now(),
+    };
+    await db.comparisons.delete(recordId);
+    await db.models.put({ ...nextModel, sessionId, version: expectedVersion + 1, updatedAt: now() });
+    await db.sessions.put(updated);
+    return updated;
+  });
+}
+
+export async function deleteSession(sessionId: string): Promise<SortingSession> {
+  return db.transaction("rw", [db.sessions, db.sessionItems, db.comparisons, db.models], async () => {
+    const session = await db.sessions.get(sessionId);
+    if (!session) throw new Error("会话不存在，可能已经被删除。");
+    await db.sessionItems.where("sessionId").equals(sessionId).delete();
+    await db.comparisons.where("sessionId").equals(sessionId).delete();
+    await db.models.delete(sessionId);
+    await db.sessions.delete(sessionId);
+    return session;
   });
 }
 

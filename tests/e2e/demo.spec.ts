@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-test("demo project can compare, resume, and show ranked results", async ({ page }) => {
+test("demo project can compare, edit records, and delete a session", async ({ page }) => {
   await page.goto("/");
   await page.locator("html[data-resorter-ready='true']").waitFor();
   await page.getByRole("button", { name: "先用演示数据体验" }).click();
@@ -18,9 +18,12 @@ test("demo project can compare, resume, and show ranked results", async ({ page 
   await page.getByRole("button", { name: /更喜欢这部/ }).first().click();
   await expect(page.getByText(/本次已完成/)).toContainText("1");
   await expect(page.getByText("动态剩余预测")).toBeVisible();
-  await expect(page.getByText(/\d+\/64 · \d+%（90% MC/).first()).toBeVisible();
-  await expect(page.getByText(/全局分桶风险/)).toBeVisible();
-  await expect(page.getByText(/全局分桶可信度/)).toBeVisible();
+  await expect(page.getByText(/预计跨两档/)).toBeVisible();
+  await expect(page.getByText("跨两档作品分布")).toBeVisible();
+  await expect(page.getByText("最坏偏移分布")).toBeVisible();
+  await expect(page.getByText("相邻容差可信度")).toHaveCount(0);
+  await expect(page.getByText("未来 20 次内达标")).toHaveCount(0);
+  await expect(page.getByText("安全余量")).toHaveCount(0);
   await expect(page.getByText(/\/ 参考/)).toHaveCount(0);
   await page.getByRole("button", { name: "撤销上次" }).click();
   await expect(page.getByText(/本次已完成/)).toContainText("0");
@@ -31,16 +34,32 @@ test("demo project can compare, resume, and show ranked results", async ({ page 
   await page.getByRole("button", { name: "查看当前结果" }).click();
   await expect(page.getByRole("heading", { name: "你的偏好序列" })).toBeVisible();
   await expect(page.locator("#result-distribution-preset")).toHaveValue("reverse-j");
-  await expect(page.getByText("全局分桶可信度")).toBeVisible();
-  await expect(page.getByText(/停止要求 90% MC 下界达到 90%/)).toBeVisible();
-  await expect(page.getByText(/全表预期跨桶/)).toBeVisible();
-  await expect(page.getByText(/概率仅代表模型内近似/)).toBeVisible();
+  await expect(page.getByText("预计跨两档作品")).toBeVisible();
+  await expect(page.getByText(/80% 后验区间/)).toBeVisible();
+  await expect(page.getByText("最坏偏移")).toBeVisible();
+  await expect(page.getByText(/目标为不超过 1 档/)).toBeVisible();
+  await expect(page.getByText("完全零错桶概率")).toHaveCount(0);
+  await expect(page.getByText("未来 20 次内达标")).toHaveCount(0);
+  await expect(page.getByText(/区间仅代表模型内近似/)).toBeVisible();
   await expect(page.locator("tbody tr")).toHaveCount(16);
   await expect(page.locator("#stopping-target")).toHaveCount(0);
+  await expect(page.getByText("本会话判断记录（1）")).toBeVisible();
+  await page.getByLabel("手动比较结果").selectOption("tie");
+  await page.getByRole("button", { name: "添加比较" }).click();
+  await expect(page.getByText("本会话判断记录（2）")).toBeVisible();
+  await expect(page.locator(".comparison-record.manual")).toHaveCount(1);
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.locator(".comparison-record.manual").getByRole("button", { name: /删除判断/ }).click();
+  await expect(page.getByText("本会话判断记录（1）")).toBeVisible();
+  await expect(page.locator(".comparison-record.manual")).toHaveCount(0);
   await page.locator("#result-distribution-preset").selectOption("uniform");
   await expect(page.locator("#result-distribution-preset")).toHaveValue("uniform");
   await page.getByRole("button", { name: /两两比较/ }).click();
   await expect(page.getByText(/本次已完成/)).toContainText("1");
   await page.getByRole("button", { name: /备份与导出/ }).click();
   await expect(page.getByRole("button", { name: /下载 JSON 备份/ })).toBeVisible();
+  await page.getByRole("button", { name: /收藏概览/ }).click();
+  page.once("dialog", (dialog) => dialog.accept());
+  await page.getByRole("button", { name: /删除会话/ }).click();
+  await expect(page.getByText("还没有会话，选择范围后开始第一次比较。")).toBeVisible();
 });

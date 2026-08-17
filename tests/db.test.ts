@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { createDemoItems } from "../lib/demo";
 import { fitModel, toModelState } from "../lib/ranking/engine";
 import {
-  commitResponse, commitSessionDistribution, createSession, db, exportProject, getSessionBundle, importProject,
+  commitComparisonDeletion, commitResponse, commitSessionDistribution, createSession, db, deleteSession, exportProject, getSessionBundle, importProject,
   initializeModel, lastActiveResponse, saveSnapshot,
 } from "../lib/db";
 import type { ComparisonRecord } from "../lib/types";
@@ -37,6 +37,52 @@ describe("IndexedDB project persistence", () => {
     expect(bundle?.history).toHaveLength(1);
     expect(bundle?.session.modelVersion).toBe(1);
     expect((await lastActiveResponse(session.id))?.outcome).toBe("left");
+  });
+
+  it("adds manual comparisons and permanently deletes one with a recomputed model", async () => {
+    const snapshotId = crypto.randomUUID();
+    const items = createDemoItems(snapshotId).slice(0, 3);
+    const snapshot = await saveSnapshot({ username: "demo", nickname: "Demo" }, snapshotId, items);
+    const session = await createSession(snapshot, 2, [2], { preset: "uniform", weights: Array(10).fill(10) });
+    const inputs = items.map(({ subjectId, rate }) => ({ subjectId, rate }));
+    const initialFit = fitModel(inputs, []);
+    const initialModel = toModelState(session.id, 0, initialFit);
+    await initializeModel(session.id, initialModel);
+
+    const pair = { recordId: "manual-record", leftSubjectId: items[0].subjectId, rightSubjectId: items[2].subjectId, queryKind: "manual" as const };
+    const answeredFit = fitModel(inputs, [{ ...pair, outcome: "tie" }]);
+    const answeredModel = toModelState(session.id, 1, answeredFit, initialModel.initialMeanUncertainty);
+    await commitResponse(session.id, 0, pair, "tie", answeredModel);
+    expect((await db.comparisons.get("manual-record"))?.queryKind).toBe("manual");
+
+    const recomputedModel = toModelState(session.id, 2, initialFit, initialModel.initialMeanUncertainty);
+    await commitComparisonDeletion(session.id, 1, "manual-record", recomputedModel);
+    expect(await db.comparisons.get("manual-record")).toBeUndefined();
+    const bundle = await getSessionBundle(session.id);
+    expect(bundle?.history).toHaveLength(0);
+    expect(bundle?.session.modelVersion).toBe(2);
+    expect(bundle?.model?.version).toBe(2);
+    await expect(commitComparisonDeletion(session.id, 1, "manual-record", recomputedModel)).rejects.toThrow(/其他页面更新/);
+  });
+
+  it("deletes a session and its dependent data without deleting the collection snapshot", async () => {
+    const snapshotId = crypto.randomUUID();
+    const items = createDemoItems(snapshotId).slice(0, 2);
+    const snapshot = await saveSnapshot({ username: "demo", nickname: "Demo" }, snapshotId, items);
+    const session = await createSession(snapshot, 2, [2], { preset: "uniform", weights: Array(10).fill(10) });
+    const fit = fitModel(items.map(({ subjectId, rate }) => ({ subjectId, rate })), []);
+    const initial = toModelState(session.id, 0, fit);
+    await initializeModel(session.id, initial);
+    const pair = { recordId: "session-record", leftSubjectId: items[0].subjectId, rightSubjectId: items[1].subjectId };
+    await commitResponse(session.id, 0, pair, "left", toModelState(session.id, 1, fit, initial.initialMeanUncertainty));
+
+    await deleteSession(session.id);
+    expect(await db.sessions.get(session.id)).toBeUndefined();
+    expect(await db.sessionItems.where("sessionId").equals(session.id).count()).toBe(0);
+    expect(await db.comparisons.where("sessionId").equals(session.id).count()).toBe(0);
+    expect(await db.models.get(session.id)).toBeUndefined();
+    expect(await db.snapshots.get(snapshot.id)).toBeDefined();
+    expect(await db.items.where("snapshotId").equals(snapshot.id).count()).toBe(items.length);
   });
 
   it("round-trips a backup as a non-destructive new project", async () => {

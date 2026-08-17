@@ -7,7 +7,7 @@ function posteriorSampleCount(request: RankingRequest) {
   const diagnostics = request.previousModel?.diagnostics;
   const currentSessionAnswers = request.history.filter((entry) => entry.sessionId === request.sessionId && entry.outcome !== "skip").length;
   const risk = diagnostics?.decisionRiskRatio;
-  const stability = diagnostics?.jointBucketStability;
+  const stability = diagnostics?.adjacentBucketStability ?? diagnostics?.jointBucketStability;
   if ((risk !== undefined && risk <= 2) || (stability ?? 0) >= 0.75) return 256;
   if (currentSessionAnswers >= 20) return 128;
   return 64;

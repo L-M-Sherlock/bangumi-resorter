@@ -21,7 +21,7 @@ export type SessionStatus = "active" | "complete";
 export type DistributionPreset = "uniform" | "preserve" | "high-tail" | "reverse-j" | "custom";
 export type ComparisonBudgetMode = "quick" | "standard" | "thorough";
 export type ComparisonReusePolicy = "session" | "snapshot" | "profile";
-export type QueryKind = "adaptive" | "exploration" | "calibration";
+export type QueryKind = "adaptive" | "exploration" | "calibration" | "manual";
 
 export interface SubjectImages {
   large?: string;
@@ -157,18 +157,35 @@ export interface StoppingForecast {
 }
 
 export interface RankingDiagnostics {
-  method: "laplace-mc-v1";
+  method: "laplace-mc-v1" | "laplace-mc-v2" | "laplace-mc-v3";
   sampleCount: number;
+  /** Per-item probability of remaining in the exact current bucket. */
   bucketStability: Record<number, number>;
+  /** Per-item probability of remaining within one bucket of the current assignment. */
+  adjacentBucketStabilityByItem: Record<number, number>;
   /** Posterior probability that every item simultaneously remains in its current 1-10 bucket. */
   jointBucketStability: number;
   jointBucketStableSamples: number;
   /** Central 90% Monte Carlo interval for jointBucketStability. */
   jointBucketStabilityLow: number;
   jointBucketStabilityHigh: number;
+  /** Posterior probability that no item moves more than one bucket from the current assignment. */
+  adjacentBucketStability: number;
+  adjacentBucketStableSamples: number;
+  /** Central 90% Monte Carlo interval for adjacentBucketStability. */
+  adjacentBucketStabilityLow: number;
+  adjacentBucketStabilityHigh: number;
+  /** Posterior distribution of items moving more than one bucket: mean and central 80% interval. */
+  expectedCrossTwoBucketCount?: number;
+  crossTwoBucketCountMedian?: number;
+  crossTwoBucketCountLow?: number;
+  crossTwoBucketCountHigh?: number;
+  /** Posterior median and 90th percentile of the largest absolute bucket displacement. */
+  maxBucketDisplacementMedian?: number;
+  maxBucketDisplacementHigh?: number;
   expectedBucketChangeRate: number;
   minBucketStability: number;
-  /** Conservative constraint ratio based on the lower Monte Carlo bound; at or below 1 is acceptable. */
+  /** Conservative adjacent-bucket constraint ratio; at or below 1 is acceptable. */
   decisionRiskRatio: number;
   evidenceCount: number;
   evidenceRequired: number;
@@ -282,4 +299,4 @@ export const DISTRIBUTIONS: Record<Exclude<DistributionPreset, "custom">, number
   "reverse-j": [50, 25, 14, 4, 2, 1, 1, 1, 1, 1],
 };
 
-export const APP_VERSION = "0.6.0";
+export const APP_VERSION = "0.9.0";

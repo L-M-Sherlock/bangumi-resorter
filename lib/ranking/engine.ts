@@ -21,7 +21,7 @@ const GRADIENT_TOLERANCE = 1e-6;
 const PCG_TOLERANCE = 1e-4;
 const POSTERIOR_PCG_TOLERANCE = 1e-3;
 const BUCKET_STABILITY_TARGET = 0.9;
-const BUCKET_ERROR_TOLERANCE = 0.1;
+const STOPPING_EVENT_ERROR_TOLERANCE = 0.1;
 
 interface IndexedComparison {
   left: number;
@@ -462,8 +462,17 @@ function orderBySample(items: RankingItemInput[], sample: Float64Array) {
 
 interface AssignmentMetrics {
   bucketStability: Record<number, number>;
+  adjacentBucketStabilityByItem: Record<number, number>;
   jointBucketStability: number;
   jointBucketStableSamples: number;
+  adjacentBucketStability: number;
+  adjacentBucketStableSamples: number;
+  expectedCrossTwoBucketCount: number;
+  crossTwoBucketCountMedian: number;
+  crossTwoBucketCountLow: number;
+  crossTwoBucketCountHigh: number;
+  maxBucketDisplacementMedian: number;
+  maxBucketDisplacementHigh: number;
   expectedBucketChangeRate: number;
   minBucketStability: number;
 }
@@ -484,45 +493,74 @@ function assignmentMetricsFromRates(
   posteriorRates: Map<number, number>[],
 ): AssignmentMetrics {
   const stableWeights = new Map(items.map((item) => [item.subjectId, 0]));
+  const adjacentStableWeights = new Map(items.map((item) => [item.subjectId, 0]));
   let changedAssignments = 0;
   let jointStableWeight = 0;
+  let adjacentStableWeight = 0;
   let totalWeight = 0;
+  const crossTwoBucketCounts: number[] = [];
+  const maxBucketDisplacements: number[] = [];
   for (let sampleIndex = 0; sampleIndex < posteriorRates.length; sampleIndex += 1) {
     const weight = 1;
     totalWeight += weight;
     const sampleRates = posteriorRates[sampleIndex];
     let jointStable = true;
+    let adjacentStable = true;
+    let crossTwoBucketCount = 0;
+    let maxBucketDisplacement = 0;
     for (const item of items) {
       const referenceRate = referenceRates.get(item.subjectId) ?? item.rate;
       const sampleRate = sampleRates.get(item.subjectId) ?? item.rate;
+      const displacement = Math.abs(referenceRate - sampleRate);
+      maxBucketDisplacement = Math.max(maxBucketDisplacement, displacement);
       if (referenceRate === sampleRate) {
         stableWeights.set(item.subjectId, (stableWeights.get(item.subjectId) ?? 0) + weight);
       } else {
         changedAssignments += weight;
         jointStable = false;
       }
+      if (displacement <= 1) {
+        adjacentStableWeights.set(item.subjectId, (adjacentStableWeights.get(item.subjectId) ?? 0) + weight);
+      } else {
+        crossTwoBucketCount += 1;
+        adjacentStable = false;
+      }
     }
+    crossTwoBucketCounts.push(crossTwoBucketCount);
+    maxBucketDisplacements.push(maxBucketDisplacement);
     if (jointStable) jointStableWeight += weight;
+    if (adjacentStable) adjacentStableWeight += weight;
   }
   const denominator = Math.max(totalWeight, Number.EPSILON);
   const bucketStability: Record<number, number> = {};
+  const adjacentBucketStabilityByItem: Record<number, number> = {};
   let minBucketStability = 1;
   for (const item of items) {
     const stability = (stableWeights.get(item.subjectId) ?? 0) / denominator;
     bucketStability[item.subjectId] = stability;
+    adjacentBucketStabilityByItem[item.subjectId] = (adjacentStableWeights.get(item.subjectId) ?? 0) / denominator;
     minBucketStability = Math.min(minBucketStability, stability);
   }
   return {
     bucketStability,
+    adjacentBucketStabilityByItem,
     jointBucketStability: jointStableWeight / denominator,
     jointBucketStableSamples: jointStableWeight,
+    adjacentBucketStability: adjacentStableWeight / denominator,
+    adjacentBucketStableSamples: adjacentStableWeight,
+    expectedCrossTwoBucketCount: crossTwoBucketCounts.reduce((sum, value) => sum + value, 0) / denominator,
+    crossTwoBucketCountMedian: forecastQuantile(crossTwoBucketCounts, 0.5) ?? 0,
+    crossTwoBucketCountLow: forecastQuantile(crossTwoBucketCounts, 0.1) ?? 0,
+    crossTwoBucketCountHigh: forecastQuantile(crossTwoBucketCounts, 0.9) ?? 0,
+    maxBucketDisplacementMedian: forecastQuantile(maxBucketDisplacements, 0.5) ?? 0,
+    maxBucketDisplacementHigh: forecastQuantile(maxBucketDisplacements, 0.9) ?? 0,
     expectedBucketChangeRate: changedAssignments / (denominator * Math.max(1, items.length)),
     minBucketStability,
   };
 }
 
-function decisionRiskRatio(jointBucketStability: number) {
-  return (1 - jointBucketStability) / BUCKET_ERROR_TOLERANCE;
+function decisionRiskRatio(stoppingEventStability: number) {
+  return (1 - stoppingEventStability) / STOPPING_EVENT_ERROR_TOLERANCE;
 }
 
 export function analyzeRanking(
@@ -536,9 +574,14 @@ export function analyzeRanking(
   if (items.length === 0 || fit.posteriorSamples.length === 0) {
     const calibration = calibrationDiagnostics(history);
     return {
-      method: "laplace-mc-v1", sampleCount: 0, bucketStability: {},
+      method: "laplace-mc-v3", sampleCount: 0, bucketStability: {}, adjacentBucketStabilityByItem: {},
       jointBucketStability: 1, jointBucketStableSamples: 0,
       jointBucketStabilityLow: 1, jointBucketStabilityHigh: 1,
+      adjacentBucketStability: 1, adjacentBucketStableSamples: 0,
+      adjacentBucketStabilityLow: 1, adjacentBucketStabilityHigh: 1,
+      expectedCrossTwoBucketCount: 0,
+      crossTwoBucketCountMedian: 0, crossTwoBucketCountLow: 0, crossTwoBucketCountHigh: 0,
+      maxBucketDisplacementMedian: 0, maxBucketDisplacementHigh: 0,
       expectedBucketChangeRate: 0, minBucketStability: 1,
       decisionRiskRatio: 0, evidenceCount: 0, evidenceRequired: 0,
       fatigueLimit, fatigueReached: fatigueLimit === 0,
@@ -549,17 +592,20 @@ export function analyzeRanking(
   const mapRates = mappedRates(mapOrder, distribution);
   const metrics = assignmentMetrics(items, mapRates, fit.posteriorSamples, distribution);
   const jointInterval = wilsonInterval(metrics.jointBucketStableSamples, fit.posteriorSamples.length);
-  const risk = decisionRiskRatio(jointInterval.low);
+  const adjacentInterval = wilsonInterval(metrics.adjacentBucketStableSamples, fit.posteriorSamples.length);
+  const risk = decisionRiskRatio(adjacentInterval.low);
   const evidenceCount = history.filter((entry) => entry.sessionId === sessionId && entry.outcome !== "skip").length;
   const evidenceRequired = minimumEvidence(items.length);
   const calibration = calibrationDiagnostics(history);
   const evidenceSatisfied = evidenceCount >= evidenceRequired;
   return {
-    method: "laplace-mc-v1",
+    method: "laplace-mc-v3",
     sampleCount: fit.posteriorSamples.length,
     ...metrics,
     jointBucketStabilityLow: jointInterval.low,
     jointBucketStabilityHigh: jointInterval.high,
+    adjacentBucketStabilityLow: adjacentInterval.low,
+    adjacentBucketStabilityHigh: adjacentInterval.high,
     decisionRiskRatio: risk,
     evidenceCount,
     evidenceRequired,
@@ -639,7 +685,7 @@ function globalExplorationPair(
   const indexById = new Map(items.map((item, index) => [item.subjectId, index]));
   const ordered = orderByAbilities(items, fit.abilities);
   const orderedIndex = new Map(ordered.map((item, index) => [item.subjectId, index]));
-  const stabilities = diagnostics.bucketStability;
+  const stabilities = diagnostics.adjacentBucketStabilityByItem ?? diagnostics.bucketStability;
   const unstable = items.filter((item) =>
     (stabilities[item.subjectId] ?? 0) < BUCKET_STABILITY_TARGET - 1e-12);
   const firstPool = unstable.length > 0 ? unstable : items;
@@ -839,11 +885,11 @@ function contractionRiskCurve(
       }
       return output;
     });
-    const jointStability = assignmentMetrics(
+    const adjacentStability = assignmentMetrics(
       items, referenceRates, contracted, distribution,
-    ).jointBucketStability;
+    ).adjacentBucketStability;
     const conservativeStability = wilsonInterval(
-      jointStability * decisionSampleCount,
+      adjacentStability * decisionSampleCount,
       decisionSampleCount,
     ).low;
     const risk = decisionRiskRatio(conservativeStability);

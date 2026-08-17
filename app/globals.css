@@ -130,8 +130,11 @@ input:focus, select:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgb
 .sessions-section { margin-top: 26px; }
 .section-title h2 { margin: 5px 0 12px; font-size: 24px; }
 .session-list { display: grid; border-top: 1px solid var(--line); }
-.session-list > button { min-height: 65px; padding: 10px 6px; display: grid; grid-template-columns: 60px 1fr auto 24px; gap: 12px; align-items: center; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: inherit; text-align: left; }
-.session-list > button:hover { background: rgba(255,255,255,.4); }
+.session-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: stretch; border-bottom: 1px solid var(--line); }
+.session-open { min-height: 65px; padding: 10px 6px; display: grid; grid-template-columns: 60px minmax(0, 1fr) auto 24px; gap: 12px; align-items: center; border: 0; background: transparent; color: inherit; text-align: left; }
+.session-open:hover { background: rgba(255,255,255,.4); }
+.session-delete { align-self: center; min-height: 34px; margin: 8px 6px 8px 10px; padding: 0 10px; border: 1px solid #d7b8b1; border-radius: 6px; color: #9a4738; background: rgba(255,255,255,.35); font-size: 10px; }
+.session-delete:hover:not(:disabled) { border-color: #bd7668; background: #fff0ed; }
 .session-type { width: 48px; padding: 5px; border-radius: 4px; background: #e6e1d7; text-align: center; font-size: 10px; font-weight: 700; }
 .session-list strong, .session-list small { display: block; }
 .session-list strong { font-size: 12px; }
@@ -146,7 +149,7 @@ input:focus, select:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgb
 .progress-track { height: 4px; margin-top: 9px; overflow: hidden; border-radius: 99px; background: #dedad1; }
 .progress-track span { display: block; height: 100%; background: var(--accent); }
 .dynamic-progress .progress-track span { min-width: 2px; transition: width .25s ease; }
-.forecast-row { margin-top: 10px; padding: 10px 12px; display: grid; grid-template-columns: 1.7fr .8fr 1.4fr .55fr; gap: 14px; border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,.38); color: var(--muted); font-size: 10px; }
+.forecast-row { margin-top: 10px; padding: 10px 12px; display: grid; grid-template-columns: 1.5fr .8fr 1fr; gap: 14px; border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,.38); color: var(--muted); font-size: 10px; }
 .forecast-row span { min-width: 0; }
 .forecast-row strong { display: block; margin-top: 3px; color: var(--ink); font-size: 11px; }
 .inline-setting { margin-top: 10px; display: flex; align-items: center; justify-content: flex-end; gap: 8px; color: var(--muted); font-size: 10px; }
@@ -214,6 +217,28 @@ kbd { padding: 2px 5px; border: 1px solid rgba(255,255,255,.35); border-radius: 
 .score-pill.new.changed { color: white; border-color: var(--accent); background: var(--accent); }
 .ranking-table a { color: var(--accent-dark); text-decoration: none; }
 
+.comparison-manager { margin-bottom: 20px; }
+.comparison-manager > p { margin: 8px 0 18px; color: var(--muted); font-size: 11px; line-height: 1.55; }
+.record-count { padding: 5px 8px; border-radius: 20px; color: var(--teal); background: #eaf3f1; font-size: 9px; white-space: nowrap; }
+.manual-comparison-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(135px, .42fr) minmax(0, 1fr) auto; gap: 10px; align-items: end; }
+.manual-comparison-form label { min-width: 0; display: grid; gap: 6px; color: #4f4d48; font-size: 10px; font-weight: 700; }
+.manual-comparison-form select { min-width: 0; font-size: 11px; }
+.manual-comparison-form .primary-button { min-width: 108px; }
+.comparison-form-error { display: block; margin-top: 7px; color: #9a4738; font-size: 9px; }
+.comparison-history { margin-top: 18px; border-top: 1px solid var(--line); }
+.comparison-history summary { padding: 14px 0 10px; color: #4f4d48; cursor: pointer; font-size: 11px; font-weight: 700; }
+.reuse-note { margin: 0 0 10px; color: var(--muted); font-size: 9px; }
+.comparison-records { max-height: 390px; overflow-y: auto; border: 1px solid var(--line); border-radius: 8px; }
+.comparison-record { min-height: 57px; padding: 9px 11px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; border-bottom: 1px solid #e9e5dc; background: #fbfaf6; }
+.comparison-record:last-child { border-bottom: 0; }
+.comparison-record.manual { box-shadow: inset 3px 0 0 var(--accent); }
+.comparison-record strong, .comparison-record small { display: block; }
+.comparison-record strong { overflow: hidden; color: var(--ink); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.comparison-record small { margin-top: 4px; color: var(--muted); font-size: 9px; }
+.record-kind { color: var(--accent-dark); font-weight: 700; }
+.record-delete { min-height: 31px; padding: 0 9px; border: 1px solid #d7b8b1; border-radius: 6px; color: #9a4738; background: transparent; font-size: 9px; }
+.record-delete:hover:not(:disabled) { background: #fff0ed; }
+
 .backup-grid { margin-top: 24px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .backup-card { min-height: 280px; display: flex; flex-direction: column; }
 .backup-card dl { display: grid; grid-template-columns: repeat(3, 1fr); margin: auto 0 18px; }
@@ -277,10 +302,13 @@ kbd { padding: 2px 5px; border: 1px solid rgba(255,255,255,.35); border-radius: 
   .versus span { width: 28px; height: 28px; font-size: 9px; }
   .progress-copy span:last-child, .session-footer > span { display: none; }
   .forecast-row { grid-template-columns: 1fr 1fr; }
-  .forecast-row span:last-child { display: none; }
+  .forecast-row span:last-child { grid-column: 1 / -1; }
   .session-footer { justify-content: flex-end; }
-  .session-list > button { grid-template-columns: 48px 1fr 20px; }
+  .session-open { grid-template-columns: 48px minmax(0, 1fr) 20px; }
   .session-status { display: none; }
+  .session-delete { margin-left: 5px; }
+  .manual-comparison-form { grid-template-columns: 1fr; }
+  .manual-comparison-form .primary-button { width: 100%; }
   .header-actions .outline-button { display: none; }
 }
 
