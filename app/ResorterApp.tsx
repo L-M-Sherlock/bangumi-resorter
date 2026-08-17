@@ -5,6 +5,7 @@ import { FormEvent, ReactNode, useCallback, useEffect, useRef, useState } from "
 import { syncBangumi, SyncProgress } from "@/lib/bangumi";
 import { createDemoItems } from "@/lib/demo";
 import {
+  commitSessionDistribution,
   commitResponse,
   commitUndo,
   createSession,
@@ -19,11 +20,18 @@ import {
   listSessions,
   markExported,
   saveSnapshot,
-  updateSessionDistribution,
 } from "@/lib/db";
 import { downloadJson, downloadText, readBackup, requestPersistentStorage, resultsCsv, storageStatus } from "@/lib/export";
 import { buildRankedItems } from "@/lib/ranking/engine";
-import { BUDGET_MODE_COPY, comparisonBudget, rankingTuning, sessionBudgetMode } from "@/lib/ranking/strategy";
+import {
+  BUDGET_MODE_COPY,
+  comparisonLimit,
+  rankingTuning,
+  recommendedDistribution,
+  sessionBudgetMode,
+  sessionComparisonLimit,
+  sessionReusePolicy,
+} from "@/lib/ranking/strategy";
 import { RankingWorkerClient } from "@/lib/ranking/worker-client";
 import {
   COLLECTION_TYPES,
@@ -32,6 +40,7 @@ import {
   ComparisonBudgetMode,
   ComparisonOutcome,
   ComparisonRecord,
+  ComparisonReusePolicy,
   DISTRIBUTIONS,
   DistributionConfig,
   DistributionPreset,
@@ -39,8 +48,10 @@ import {
   NextPair,
   Profile,
   RankedItem,
+  RankingHistoryInput,
   Snapshot,
   SortingSession,
+  StoppingForecast,
   SUBJECT_TYPES,
   SubjectType,
 } from "@/lib/types";
@@ -64,19 +75,64 @@ function toRankingComparisons(history: ComparisonRecord[]) {
     .map((record) => ({ leftSubjectId: record.leftSubjectId, rightSubjectId: record.rightSubjectId, outcome: record.outcome as "left" | "tie" | "right" }));
 }
 
-function toSkips(history: ComparisonRecord[]) {
+function toRankingHistory(history: ComparisonRecord[]): RankingHistoryInput[] {
   return history
-    .filter((record) => record.active && record.outcome === "skip")
-    .map((record) => ({ leftSubjectId: record.leftSubjectId, rightSubjectId: record.rightSubjectId, acceptedCountAtAnswer: record.acceptedCountAtAnswer }));
-}
-
-function uncertaintyReduction(model: Pick<ModelState, "initialMeanUncertainty" | "currentMeanUncertainty">) {
-  if (model.initialMeanUncertainty <= 0) return 0;
-  return Math.min(1, Math.max(0, 1 - model.currentMeanUncertainty / model.initialMeanUncertainty));
+    .filter((record) => record.active)
+    .map((record) => ({
+      recordId: record.id,
+      sessionId: record.sessionId,
+      leftSubjectId: record.leftSubjectId,
+      rightSubjectId: record.rightSubjectId,
+      outcome: record.outcome,
+      acceptedCountAtAnswer: record.acceptedCountAtAnswer,
+      queryKind: record.queryKind ?? "adaptive",
+      calibrationOfComparisonId: record.calibrationOfComparisonId,
+      createdAt: record.createdAt,
+    }));
 }
 
 function distributionConfig(preset: DistributionPreset, customWeights: number[]): DistributionConfig {
   return { preset, weights: preset === "custom" ? customWeights : DISTRIBUTIONS[preset] };
+}
+
+function percent(value?: number) {
+  return `${Math.round((value ?? 0) * 100)}%`;
+}
+
+function riskMultiple(value?: number) {
+  if (value === undefined || !Number.isFinite(value)) return "—";
+  return value <= 1 ? "已达阈值" : `${value.toFixed(value >= 10 ? 0 : 1)}× 阈值`;
+}
+
+function forecastRange(diagnostics?: ModelState["diagnostics"]) {
+  const forecast = diagnostics?.forecast;
+  if (!forecast) return "正在建立预测";
+  if (forecast.status === "ready") return "无需追加";
+  if (forecast.lowerAdditional !== undefined && forecast.upperAdditional !== undefined) {
+    return `${forecast.lowerAdditional}–${forecast.upperAdditional} 次`;
+  }
+  if (forecast.medianAdditional !== undefined) return `约 ${forecast.medianAdditional} 次，上界未定`;
+  if ((forecast.beforeLimitSuccesses ?? -1) === 0 && forecast.remainingCapacity > 0) return "尚未观察到达标路径";
+  if (forecast.status === "uncertain") return "暂时无法可靠估计";
+  return "已到安全上限";
+}
+
+function forecastProbability(
+  forecast: StoppingForecast | undefined,
+  horizon: "within20" | "beforeLimit" = "within20",
+) {
+  if (!forecast) return "正在估计";
+  const successes = horizon === "within20" ? forecast.within20Successes : forecast.beforeLimitSuccesses;
+  const probability = horizon === "within20" ? forecast.probabilityWithin20 : forecast.probabilityBeforeLimit;
+  const low = horizon === "within20" ? forecast.probabilityWithin20Low : forecast.probabilityBeforeLimitLow;
+  const high = horizon === "within20" ? forecast.probabilityWithin20High : forecast.probabilityBeforeLimitHigh;
+  if (successes === undefined || low === undefined || high === undefined) return percent(probability);
+  return `${successes}/${forecast.rolloutCount} · ${percent(probability)}（90% MC ${percent(low)}–${percent(high)}）`;
+}
+
+function jointStability(diagnostics?: ModelState["diagnostics"]) {
+  if (!diagnostics) return "正在估计";
+  return `${diagnostics.jointBucketStableSamples}/${diagnostics.sampleCount} · ${percent(diagnostics.jointBucketStability)}（90% MC ${percent(diagnostics.jointBucketStabilityLow)}–${percent(diagnostics.jointBucketStabilityHigh)}）`;
 }
 
 function formatDate(date?: string) {
@@ -177,7 +233,7 @@ function ConnectView({ onConnected }: { onConnected: (snapshot: Snapshot) => Pro
         <Brand />
         <span className="hero-kicker">PERSONAL MEDIA RANKING</span>
         <h1>让你的评分，<br />重新变得有意义。</h1>
-        <p>不再纠结“它值 8 分还是 9 分”。只需回答哪一部更喜欢，Resorter 会用 Bradley–Terry 模型逐步还原你的真实偏好。</p>
+        <p>不再纠结“它值 8 分还是 9 分”。只需回答哪一部更喜欢，Resorter 会用 Bradley–Terry 模型得到可检查、逐步稳定的个人偏好顺序。</p>
         <div className="method-steps">
           <span><b>01</b>同步已评分收藏</span><i />
           <span><b>02</b>两两比较</span><i />
@@ -231,25 +287,50 @@ function DistributionWeights({ weights, onChange }: { weights: number[]; onChang
   </div>;
 }
 
+function CustomDistributionEditor({ weights, busy, onApply }: { weights: number[]; busy: boolean; onApply: (weights: number[]) => Promise<void> }) {
+  const [draft, setDraft] = useState([...weights]);
+  return <div className="custom-distribution-editor">
+    <DistributionWeights weights={draft} onChange={setDraft} />
+    <button className="outline-button full" disabled={busy} onClick={() => void onApply(draft)}>应用自定义权重</button>
+  </div>;
+}
+
 function LibraryView({ snapshot, items, sessions, onStart, onResume, onSyncAgain }: {
   snapshot: Snapshot; items: CollectionItem[]; sessions: SortingSession[];
-  onStart: (type: SubjectType, statuses: CollectionType[], distribution: DistributionConfig, budgetMode: ComparisonBudgetMode) => Promise<void>;
+  onStart: (
+    type: SubjectType,
+    statuses: CollectionType[],
+    distribution: DistributionConfig,
+    budgetMode: ComparisonBudgetMode,
+    comparisonReusePolicy: ComparisonReusePolicy,
+  ) => Promise<void>;
   onResume: (sessionId: string) => Promise<void>; onSyncAgain: () => void;
 }) {
   const availableTypes = subjectEntries.filter(([type]) => items.some((item) => item.subjectType === type));
-  const [selectedType, setSelectedType] = useState<SubjectType>(availableTypes[0]?.[0] ?? 2);
+  const initialType = availableTypes[0]?.[0] ?? 2;
+  const [selectedType, setSelectedType] = useState<SubjectType>(initialType);
   const [statuses, setStatuses] = useState<CollectionType[]>(collectionEntries.map(([type]) => type));
-  const [preset, setPreset] = useState<DistributionPreset>("uniform");
+  const [manualPreset, setManualPreset] = useState<DistributionPreset>();
   const [customWeights, setCustomWeights] = useState([...DISTRIBUTIONS.uniform]);
   const [budgetMode, setBudgetMode] = useState<ComparisonBudgetMode>("quick");
+  const [comparisonReusePolicy, setComparisonReusePolicy] = useState<ComparisonReusePolicy>("snapshot");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const selectedItems = items.filter((item) => item.subjectType === selectedType && statuses.includes(item.collectionType));
-  const suggestedComparisons = comparisonBudget(selectedItems.length, budgetMode);
+  const preset = manualPreset ?? recommendedDistribution(selectedItems.length);
+  const maxComparisons = comparisonLimit(selectedItems.length, budgetMode);
 
   async function start() {
     setBusy(true); setError("");
-    try { await onStart(selectedType, statuses, distributionConfig(preset, customWeights), budgetMode); }
+    try {
+      await onStart(
+        selectedType,
+        statuses,
+        distributionConfig(preset, customWeights),
+        budgetMode,
+        comparisonReusePolicy,
+      );
+    }
     catch (cause) { setError(cause instanceof Error ? cause.message : "无法创建会话。"); }
     finally { setBusy(false); }
   }
@@ -263,13 +344,15 @@ function LibraryView({ snapshot, items, sessions, onStart, onResume, onSyncAgain
       <article className="panel distribution-panel"><div className="panel-title"><div><span className="eyebrow">当前评分分布</span><h2>{SUBJECT_TYPES[selectedType]}</h2></div><span className="legend"><i />原评分</span></div><Histogram items={items.filter((item) => item.subjectType === selectedType)} /></article>
       <article className="panel start-panel"><span className="eyebrow">新建排序会话</span><h2>选择本次范围</h2><p>不同媒介会分别建立模型，比较记录可在后续会话中复用。</p>
         <div className="field-group"><span className="field-label" id="collection-status-label">收藏状态</span><div className="chip-row" role="group" aria-labelledby="collection-status-label">{collectionEntries.map(([type, label]) => <button key={type} className={statuses.includes(type) ? "selected" : ""} onClick={() => setStatuses((value) => value.includes(type) ? value.filter((item) => item !== type) : [...value, type])}>{label}</button>)}</div></div>
-        <div className="field-group"><label htmlFor="comparison-budget">比较预算</label><select id="comparison-budget" value={budgetMode} onChange={(event) => setBudgetMode(event.target.value as ComparisonBudgetMode)}><option value="quick">快速（推荐）</option><option value="standard">标准</option><option value="thorough">精细</option></select><small className="field-help">{BUDGET_MODE_COPY[budgetMode].description} · 建议约 {suggestedComparisons} 次</small></div>
-        <div className="field-group"><label htmlFor="distribution-preset">新评分分布</label><select id="distribution-preset" value={preset} onChange={(event) => setPreset(event.target.value as DistributionPreset)}><option value="uniform">均匀 1–10</option><option value="preserve">保持原分布</option><option value="high-tail">高分辨率尾部</option><option value="reverse-j">反 J 分布</option><option value="custom">自定义权重</option></select>{preset === "reverse-j" && <small className="field-help">约 50% 为 1 分、25% 为 2 分，越高分档越稀有；8–10 分各约 1%。</small>}{preset === "custom" && <DistributionWeights weights={customWeights} onChange={setCustomWeights} />}</div>
+        <div className="field-group"><label htmlFor="comparison-budget">推断模式</label><select id="comparison-budget" value={budgetMode} onChange={(event) => setBudgetMode(event.target.value as ComparisonBudgetMode)}><option value="quick">快速（推荐）</option><option value="standard">标准</option><option value="thorough">精细</option></select><small className="field-help">{BUDGET_MODE_COPY[budgetMode].description} · 每次回答后动态重估剩余区间，疲劳安全上限 {maxComparisons} 次</small></div>
+        <div className="field-group"><label htmlFor="distribution-preset">新评分分布</label><select id="distribution-preset" value={preset} onChange={(event) => setManualPreset(event.target.value as DistributionPreset)}><option value="uniform">均匀 1–10</option><option value="preserve">保持原分布</option><option value="high-tail">高分辨率尾部</option><option value="reverse-j">反 J 分布</option><option value="custom">自定义权重</option></select><small className="field-help">{manualPreset === undefined ? `已按 ${selectedItems.length} 个条目的规模自动推荐` : "已使用手动选择"}</small>{preset === "reverse-j" && <small className="field-help">约 50% 为 1 分、25% 为 2 分，越高分档越稀有；8–10 分各约 1%。</small>}{preset === "custom" && <DistributionWeights weights={customWeights} onChange={setCustomWeights} />}</div>
+        <div className="field-group"><label htmlFor="reuse-policy">历史判断</label><select id="reuse-policy" value={comparisonReusePolicy} onChange={(event) => setComparisonReusePolicy(event.target.value as ComparisonReusePolicy)}><option value="snapshot">复用同一快照（推荐）</option><option value="session">本会话从零开始</option><option value="profile">复用所有历史快照</option></select><small className="field-help">新快照默认不继承旧偏好，避免长期漂移被历史判断锁定。</small></div>
+        <div className="field-group"><span className="field-label">停止标准</span><small className="field-help">整套当前 1–10 分桶同时正确的后验概率，其 90% 蒙特卡洛下界达到 90%。评分分布会决定分桶边界。</small></div>
         {error && <Notice tone="error">{error}</Notice>}
-        <button className="primary-button" onClick={start} disabled={busy || selectedItems.length < 2}>{busy ? "正在准备模型…" : `开始${BUDGET_MODE_COPY[budgetMode].label}比较 · 建议 ${suggestedComparisons} 次`}<span>→</span></button>
+        <button className="primary-button" onClick={start} disabled={busy || selectedItems.length < 2}>{busy ? "正在准备模型…" : `开始${BUDGET_MODE_COPY[budgetMode].label}比较 · 动态停止`}<span>→</span></button>
       </article>
     </section>
-    <section className="sessions-section"><div className="section-title"><div><span className="eyebrow">排序会话</span><h2>继续上次的判断</h2></div></div>{sessions.length === 0 ? <div className="empty-row">还没有会话，选择范围后开始第一次比较。</div> : <div className="session-list">{sessions.slice(0, 5).map((session) => <button key={session.id} onClick={() => onResume(session.id)}><span className="session-type">{SUBJECT_TYPES[session.subjectType]}</span><div><strong>{session.title}</strong><small>{BUDGET_MODE_COPY[sessionBudgetMode(session)].label}模式 · 建议 {session.suggestedComparisons} 次 · 更新于 {formatDate(session.updatedAt)}</small></div><span className={`session-status ${session.status}`}>{session.status === "complete" ? "已完成" : "进行中"}</span><b>→</b></button>)}</div>}</section>
+    <section className="sessions-section"><div className="section-title"><div><span className="eyebrow">排序会话</span><h2>继续上次的判断</h2></div></div>{sessions.length === 0 ? <div className="empty-row">还没有会话，选择范围后开始第一次比较。</div> : <div className="session-list">{sessions.slice(0, 5).map((session) => { const sessionItemCount = items.filter((item) => item.subjectType === session.subjectType && session.collectionTypes.includes(item.collectionType)).length; return <button key={session.id} onClick={() => onResume(session.id)}><span className="session-type">{SUBJECT_TYPES[session.subjectType]}</span><div><strong>{session.title}</strong><small>{BUDGET_MODE_COPY[sessionBudgetMode(session)].label}模式 · 动态停止 · 上限 {sessionComparisonLimit(session, sessionItemCount)} 次 · {sessionReusePolicy(session) === "snapshot" ? "同快照复用" : sessionReusePolicy(session) === "session" ? "不复用" : "全历史复用"} · 更新于 {formatDate(session.updatedAt)}</small></div><span className={`session-status ${session.status}`}>{session.status === "complete" ? "已稳定" : "进行中"}</span><b>→</b></button>; })}</div>}</section>
   </>;
 }
 
@@ -280,22 +363,31 @@ function CompareView({ state, busy, scoresVisible, onToggleScores, onAnswer, onU
   const left = state.items.find((item) => item.subjectId === state.nextPair?.leftSubjectId);
   const right = state.items.find((item) => item.subjectId === state.nextPair?.rightSubjectId);
   const currentSessionAccepted = state.history.filter((item) => item.sessionId === state.session.id && item.active && item.outcome !== "skip").length;
-  const progress = Math.min(100, currentSessionAccepted / state.session.suggestedComparisons * 100);
   const budgetMode = sessionBudgetMode(state.session);
-  const uncertaintyDrop = uncertaintyReduction(state.model);
-  if (!left || !right) return <div className="center-message"><h2>暂时没有可比较的条目</h2><p>你可以查看当前结果，或返回收藏调整范围。</p><button className="primary-button" onClick={onResults}>查看结果</button></div>;
+  const diagnostics = state.model.diagnostics;
+  const targetReady = diagnostics?.ready;
+  const targetRisk = diagnostics?.decisionRiskRatio;
+  const riskProgress = targetRisk === undefined ? 0 : Math.min(100, 100 / Math.max(1, targetRisk));
+  const calibrationAvailable = (diagnostics?.calibration.completed ?? 0) > 0;
+  const fatigueLimit = sessionComparisonLimit(state.session, state.items.length);
+  const forecast = diagnostics?.forecast;
+  if (!left || !right) return <div className="center-message"><h2>{diagnostics?.fatigueReached ? "已达到疲劳安全上限" : "暂时没有可比较的条目"}</h2><p>{diagnostics?.fatigueReached ? `本会话已完成 ${currentSessionAccepted} 次有效判断；系统不会用继续疲劳作答换取虚假的确定性。` : "你可以查看当前结果，或返回收藏调整范围。"}</p><button className="primary-button" onClick={onResults}>查看结果</button></div>;
   return <>
-    <header className="topbar"><div><span className="eyebrow">{SUBJECT_TYPES[state.session.subjectType]} · {BUDGET_MODE_COPY[budgetMode].label}模式 · {state.session.title}</span><h1>哪一部更值得你给出高分？</h1></div><button className="ghost-button" onClick={onToggleScores}>{scoresVisible ? "隐藏原评分" : "显示原评分"}</button></header>
-    <div className="progress-row"><div className="progress-copy"><span>本次已完成 <strong>{currentSessionAccepted}</strong> / 建议 {state.session.suggestedComparisons} 次</span><span>不确定性降低 <strong>{Math.round(uncertaintyDrop * 100)}%</strong></span></div><div className="progress-track"><span style={{ width: `${progress}%` }} /></div></div>
+    <header className="topbar"><div><span className="eyebrow">{SUBJECT_TYPES[state.session.subjectType]} · {BUDGET_MODE_COPY[budgetMode].label}模式 · {state.session.title}</span><h1>哪一部在你的偏好中更靠前？</h1></div><button className="ghost-button" onClick={onToggleScores}>{scoresVisible ? "隐藏原评分" : "显示原评分"}</button></header>
+    <div className="progress-row dynamic-progress"><div className="progress-copy"><span>本次已完成 <strong>{currentSessionAccepted}</strong> 次</span><span>全局分桶风险 <strong>{riskMultiple(targetRisk)}</strong></span><span>预期跨桶 <strong>{percent(diagnostics?.expectedBucketChangeRate)}</strong></span></div><div className="progress-track" aria-label={`动态目标进度 ${Math.round(riskProgress)}%`}><span style={{ width: `${riskProgress}%` }} /></div><div className="forecast-row"><span>全局分桶可信度 <strong>{jointStability(diagnostics)}</strong></span><span>动态剩余预测 <strong>{forecastRange(diagnostics)}</strong></span><span>未来 20 次内达标 <strong>{forecastProbability(forecast)}</strong></span><span>安全余量 <strong>{Math.max(0, fatigueLimit - currentSessionAccepted)}</strong> 次</span></div></div>
     {currentSessionAccepted > 0 && currentSessionAccepted % 20 === 0 && <Notice tone="warning">你已经完成 {currentSessionAccepted} 次判断，建议现在下载一次 JSON 备份。</Notice>}
-    {currentSessionAccepted >= state.session.suggestedComparisons && <Notice tone="success">已达到{BUDGET_MODE_COPY[budgetMode].label}模式的建议预算。现在的结果已经可用，也可以继续比较来提高精度。</Notice>}
+    {targetReady && <Notice tone="success">整套当前分桶的后验可信度下界已经达到 90%。可以导出结果，也可以继续比较。</Notice>}
+    {!targetReady && forecast?.beforeLimitSuccesses === 0 && forecast.remainingCapacity > 0 && <Notice>本轮上限前达标模拟为 {forecastProbability(forecast, "beforeLimit")}；未观察到成功不是不可达证明。再完成 {forecast.nextCheckpoint} 次后会用新证据重估。</Notice>}
+    {!targetReady && forecast?.beforeLimitSuccesses !== 0 && forecast?.status !== "limit" && (forecast?.nextCheckpoint ?? 0) > 0 && <Notice>这是模型模拟，不是承诺题量；再完成 {forecast?.nextCheckpoint} 次后系统会用新证据重新估计。</Notice>}
+    {!targetReady && diagnostics && diagnostics.evidenceCount < diagnostics.evidenceRequired && <Notice>至少需要 {diagnostics.evidenceRequired} 次本会话有效判断；目前为 {diagnostics.evidenceCount} 次。</Notice>}
+    {calibrationAvailable && <Notice>复问 {diagnostics?.calibration.consistent}/{diagnostics?.calibration.completed} 次一致；后验一致率 {percent(diagnostics?.calibration.posteriorMean)}，80% 区间 {percent(diagnostics?.calibration.credibleLow)}–{percent(diagnostics?.calibration.credibleHigh)}。该指标仅反映判断波动，不影响停止。</Notice>}
     <section className={`comparison-stage ${busy ? "busy" : ""}`} aria-busy={busy}>
       <MediaCard item={left} side="left" showScore={scoresVisible} disabled={busy} onChoose={() => onAnswer("left")} />
       <div className="versus" aria-hidden="true"><span>{busy ? "…" : "VS"}</span></div>
       <MediaCard item={right} side="right" showScore={scoresVisible} disabled={busy} onChoose={() => onAnswer("right")} />
     </section>
     <div className="secondary-actions"><button disabled={busy} onClick={() => onAnswer("tie")}><span>＝</span>差不多喜欢 <kbd>↑</kbd></button><button disabled={busy} onClick={() => onAnswer("skip")}><span>↷</span>这次跳过 <kbd>↓</kbd></button><button disabled={busy} onClick={onUndo}><span>↶</span>撤销上次</button></div>
-    <footer className="session-footer"><span>{budgetMode === "quick" ? "原评分作为强先验，只重点询问同分作品与相邻分档" : "模型会优先询问最能减少不确定性的相邻条目"}</span><div><button onClick={onResults}>查看当前结果</button><button onClick={onPause}>暂停并返回收藏</button></div></footer>
+    <footer className="session-footer"><span>{budgetMode === "quick" ? "原评分作为强先验；模型按后验信息增益选题，并定期进行覆盖探索" : "模型按后验期望信息增益选题，并定期进行覆盖探索"}</span><div><button onClick={onResults}>查看当前结果</button><button onClick={onPause}>暂停并返回收藏</button></div></footer>
   </>;
 }
 
@@ -303,15 +395,15 @@ function MediaCard({ item, side, showScore, disabled, onChoose }: { item: Collec
   return <article className="media-card"><Poster item={item} wide /><div className="media-copy"><span className="media-kicker">{item.platform || SUBJECT_TYPES[item.subjectType]} · {item.date?.slice(0, 4) || "年份未知"}</span><h2>{primaryName(item)}</h2>{item.nameCn && <p>{item.name}</p>}{showScore && <span className="old-score">原评分 {item.rate}</span>}</div><button className="choice-button" disabled={disabled} onClick={onChoose}>{side === "left" && <span aria-hidden="true">←</span>} 更喜欢这部 {side === "right" && <span aria-hidden="true">→</span>}<kbd>{side === "left" ? "←" : "→"}</kbd></button></article>;
 }
 
-function ResultsView({ state, onBack, onDistribution, onExportCsv }: { state: CompareState; onBack: () => void; onDistribution: (distribution: DistributionConfig) => Promise<void>; onExportCsv: (result: RankedItem[]) => void }) {
+function ResultsView({ state, busy, onBack, onDistribution, onExportCsv }: { state: CompareState; busy: boolean; onBack: () => void; onDistribution: (distribution: DistributionConfig) => Promise<void>; onExportCsv: (result: RankedItem[]) => void }) {
   const comparisons = toRankingComparisons(state.history);
   const result = buildRankedItems(state.items, state.model, comparisons, state.session.distribution);
   const changed = result.filter((item) => item.newRate !== item.rate).length;
-  const uncertaintyDrop = uncertaintyReduction(state.model);
+  const diagnostics = state.model.diagnostics;
   return <>
     <header className="page-header"><div><span className="eyebrow">排序结果 · {BUDGET_MODE_COPY[sessionBudgetMode(state.session)].label}模式</span><h1>你的偏好序列</h1><p>{result.length} 个{SUBJECT_TYPES[state.session.subjectType]}条目 · {changed} 个评分发生变化 · 原评分已作为模型先验</p></div><div className="header-actions"><button className="outline-button" onClick={onBack}>继续比较</button><button className="primary-button compact" onClick={() => onExportCsv(result)}>导出 CSV</button></div></header>
-    <section className="result-summary"><article className="panel"><div className="panel-title"><div><span className="eyebrow">评分分布对比</span><h2>原评分 → 新评分</h2></div><select id="result-distribution-preset" value={state.session.distribution.preset} onChange={(event) => { const preset = event.target.value as DistributionPreset; void onDistribution(distributionConfig(preset, state.session.distribution.weights)); }}><option value="uniform">均匀 1–10</option><option value="preserve">保持原分布</option><option value="high-tail">高分辨率尾部</option><option value="reverse-j">反 J 分布</option><option value="custom">自定义权重</option></select></div>{state.session.distribution.preset === "custom" && <DistributionWeights weights={state.session.distribution.weights} onChange={(weights) => void onDistribution({ preset: "custom", weights })} />}<Histogram items={state.items} result={result} /><div className="chart-legend"><span><i className="old" />原评分</span><span><i className="new" />新评分</span></div></article><article className="summary-stat"><span>不确定性较初始降低</span><strong>{Math.round(uncertaintyDrop * 100)}%</strong><small>当前平均值 {state.model.currentMeanUncertainty.toFixed(2)} · 越低越稳定</small><hr /><span>用于本次排序的人工比较</span><strong>{state.model.acceptedComparisons}</strong><small>不含跳过，可能包含同类旧会话记录</small></article></section>
-    <section className="ranking-table-wrap"><table className="ranking-table"><thead><tr><th>名次</th><th>条目</th><th>原评分</th><th>新评分</th><th>模型分</th><th>不确定性</th><th /></tr></thead><tbody>{result.map((item) => <tr key={item.subjectId}><td><strong>#{item.rank}</strong></td><td><div className="title-cell"><Poster item={item} /><div><strong>{primaryName(item)}</strong><small>{item.nameCn ? item.name : `${item.date?.slice(0, 4) || ""} · ${SUBJECT_TYPES[item.subjectType]}`}</small></div></div></td><td><span className="score-pill old">{item.rate}</span></td><td><span className={`score-pill new ${item.newRate !== item.rate ? "changed" : ""}`}>{item.newRate}</span></td><td>{item.ability.toFixed(3)}</td><td>{item.uncertainty.toFixed(3)}</td><td><a href={`https://bgm.tv/subject/${item.subjectId}`} target="_blank" rel="noreferrer" aria-label={`在 Bangumi 打开 ${primaryName(item)}`}>↗</a></td></tr>)}</tbody></table></section>
+    <section className="result-summary"><article className="panel"><div className="panel-title"><div><span className="eyebrow">评分分布对比</span><h2>原评分 → 新评分</h2></div><select id="result-distribution-preset" value={state.session.distribution.preset} disabled={busy} onChange={(event) => { const preset = event.target.value as DistributionPreset; void onDistribution(distributionConfig(preset, state.session.distribution.weights)); }}><option value="uniform">均匀 1–10</option><option value="preserve">保持原分布</option><option value="high-tail">高分辨率尾部</option><option value="reverse-j">反 J 分布</option><option value="custom">自定义权重</option></select></div>{state.session.distribution.preset === "custom" && <CustomDistributionEditor key={state.session.id} weights={state.session.distribution.weights} busy={busy} onApply={(weights) => onDistribution({ preset: "custom", weights })} />}<Histogram items={state.items} result={result} /><div className="chart-legend"><span><i className="old" />原评分</span><span><i className="new" />新评分</span></div></article><article className="summary-stat"><span>全局分桶可信度</span><strong>{percent(diagnostics?.jointBucketStability)}</strong><small>{jointStability(diagnostics)}；停止要求 90% MC 下界达到 90%</small><div className="summary-forecast"><span>动态剩余预测</span><b>{forecastRange(diagnostics)}</b><small>未来 20 次内达标 {forecastProbability(diagnostics?.forecast)} · 风险 {riskMultiple(diagnostics?.decisionRiskRatio)}</small></div><hr /><span>逐条目最低稳定度</span><strong>{percent(diagnostics?.minBucketStability)}</strong><small>全表预期跨桶 {percent(diagnostics?.expectedBucketChangeRate)} · {diagnostics?.calibration.completed ? `复问 ${diagnostics.calibration.consistent}/${diagnostics.calibration.completed} 次一致，后验 ${percent(diagnostics.calibration.posteriorMean)}（仅作诊断）` : "尚无校准复问；概率仅代表模型内近似"}</small></article></section>
+    <section className="ranking-table-wrap"><table className="ranking-table"><thead><tr><th>名次</th><th>条目</th><th>原评分</th><th>新评分</th><th>分桶稳定度</th><th>模型分</th><th>后验标准差</th><th /></tr></thead><tbody>{result.map((item) => <tr key={item.subjectId}><td><strong>#{item.rank}</strong></td><td><div className="title-cell"><Poster item={item} /><div><strong>{primaryName(item)}</strong><small>{item.nameCn ? item.name : `${item.date?.slice(0, 4) || ""} · ${SUBJECT_TYPES[item.subjectType]}`}</small></div></div></td><td><span className="score-pill old">{item.rate}</span></td><td><span className={`score-pill new ${item.newRate !== item.rate ? "changed" : ""}`}>{item.newRate}</span></td><td>{item.bucketStability === undefined ? "—" : percent(item.bucketStability)}</td><td>{item.ability.toFixed(3)}</td><td>{item.uncertainty.toFixed(3)}</td><td><a href={`https://bgm.tv/subject/${item.subjectId}`} target="_blank" rel="noreferrer" aria-label={`在 Bangumi 打开 ${primaryName(item)}`}>↗</a></td></tr>)}</tbody></table></section>
   </>;
 }
 
@@ -337,7 +429,13 @@ export default function ResorterApp() {
   const [storeStatus, setStoreStatus] = useState({ usage: 0, quota: 0, persisted: false });
   const workerRef = useRef<RankingWorkerClient | null>(null);
 
-  const navigate = useCallback((target: View) => { setGlobalError(""); setView(target); window.location.hash = target; }, []);
+  const navigate = useCallback((target: View) => {
+    setGlobalError("");
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    setView(target);
+    window.history.replaceState(null, "", `#${target}`);
+    window.scrollTo({ top: 0, left: 0 });
+  }, []);
 
   const loadSnapshot = useCallback(async (nextSnapshot: Snapshot, target: View = "library") => {
     const [nextItems, nextSessions, nextProfile] = await Promise.all([getSnapshotItems(nextSnapshot.id), listSessions(nextSnapshot.profileId), db.profiles.get(nextSnapshot.profileId)]);
@@ -354,11 +452,32 @@ export default function ResorterApp() {
     };
   }, [loadSnapshot, navigate]);
 
-  async function calculate(session: SortingSession, sessionItems: CollectionItem[], history: ComparisonRecord[], previousModel?: ModelState, operation: "INIT_SESSION" | "APPLY_RESPONSE" | "UNDO" | "RECOMPUTE" = "RECOMPUTE", version = session.modelVersion) {
+  useEffect(() => {
+    let nestedFrame = 0;
+    const frame = window.requestAnimationFrame(() => {
+      nestedFrame = window.requestAnimationFrame(() => window.scrollTo({ top: 0, left: 0 }));
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.cancelAnimationFrame(nestedFrame);
+    };
+  }, [view]);
+
+  async function calculate(
+    session: SortingSession,
+    sessionItems: CollectionItem[],
+    history: ComparisonRecord[],
+    previousModel?: ModelState,
+    operation: "INIT_SESSION" | "APPLY_RESPONSE" | "UNDO" | "RECOMPUTE" = "RECOMPUTE",
+    version = session.modelVersion,
+    distribution = session.distribution,
+  ) {
     if (!workerRef.current) throw new Error("排序计算尚未就绪。");
     const tuning = rankingTuning(sessionBudgetMode(session));
     return workerRef.current.run({ type: operation, sessionId: session.id, version, randomSeed: session.randomSeed,
-      items: sessionItems.map((item) => ({ subjectId: item.subjectId, rate: item.rate })), comparisons: toRankingComparisons(history), skips: toSkips(history), previousModel, ...tuning });
+      items: sessionItems.map((item) => ({ subjectId: item.subjectId, rate: item.rate })),
+      history: toRankingHistory(history), distribution,
+      maxComparisons: sessionComparisonLimit(session, sessionItems.length), previousModel, ...tuning });
   }
 
   async function openSession(sessionId: string) {
@@ -366,15 +485,27 @@ export default function ResorterApp() {
     try {
       const bundle = await getSessionBundle(sessionId); if (!bundle) throw new Error("会话不存在。");
       const calculated = await calculate(bundle.session, bundle.items, bundle.history, bundle.model, bundle.model ? "RECOMPUTE" : "INIT_SESSION");
-      if (!bundle.model) await initializeModel(sessionId, calculated.model);
-      setCompare({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
+      await initializeModel(sessionId, calculated.model);
+      const refreshed = await getSessionBundle(sessionId); if (!refreshed) throw new Error("会话不存在。");
+      setCompare({ session: refreshed.session, items: refreshed.items, history: refreshed.history, model: calculated.model, nextPair: calculated.nextPair });
+      setSessions(await listSessions(refreshed.session.profileId));
       navigate("compare");
     } catch (cause) { setGlobalError(cause instanceof Error ? cause.message : "无法打开会话。"); }
     finally { setBusy(false); }
   }
 
-  async function startSession(type: SubjectType, statuses: CollectionType[], distribution: DistributionConfig, budgetMode: ComparisonBudgetMode) {
-    if (!snapshot) return; const session = await createSession(snapshot, type, statuses, distribution, budgetMode); setSessions(await listSessions(snapshot.profileId)); await openSession(session.id); if (!storeStatus.persisted) { await requestPersistentStorage(); setStoreStatus(await storageStatus()); }
+  async function startSession(
+    type: SubjectType,
+    statuses: CollectionType[],
+    distribution: DistributionConfig,
+    budgetMode: ComparisonBudgetMode,
+    comparisonReusePolicy: ComparisonReusePolicy,
+  ) {
+    if (!snapshot) return;
+    const session = await createSession(snapshot, type, statuses, distribution, budgetMode, comparisonReusePolicy);
+    setSessions(await listSessions(snapshot.profileId));
+    await openSession(session.id);
+    if (!storeStatus.persisted) { await requestPersistentStorage(); setStoreStatus(await storageStatus()); }
   }
 
   async function answer(outcome: ComparisonOutcome) {
@@ -383,7 +514,20 @@ export default function ResorterApp() {
       const current = compare;
       const pair = current.nextPair;
       if (!pair) return;
-      const provisional: ComparisonRecord = { id: "provisional", profileId: current.session.profileId, sessionId: current.session.id, subjectType: current.session.subjectType, leftSubjectId: pair.leftSubjectId, rightSubjectId: pair.rightSubjectId, outcome, acceptedCountAtAnswer: current.model.acceptedComparisons + (outcome === "skip" ? 0 : 1), active: true, createdAt: new Date().toISOString() };
+      const provisional: ComparisonRecord = {
+        id: "provisional",
+        profileId: current.session.profileId,
+        sessionId: current.session.id,
+        subjectType: current.session.subjectType,
+        leftSubjectId: pair.leftSubjectId,
+        rightSubjectId: pair.rightSubjectId,
+        outcome,
+        queryKind: pair.queryKind,
+        calibrationOfComparisonId: pair.calibrationOfComparisonId,
+        acceptedCountAtAnswer: current.model.acceptedComparisons + (outcome === "skip" ? 0 : 1),
+        active: true,
+        createdAt: new Date().toISOString(),
+      };
       const nextHistory = [...current.history, provisional];
       const calculated = await calculate(current.session, current.items, nextHistory, current.model, "APPLY_RESPONSE", current.session.modelVersion + 1);
       await commitResponse(current.session.id, current.session.modelVersion, pair, outcome, calculated.model);
@@ -408,6 +552,8 @@ export default function ResorterApp() {
         rightSubjectId: record.rightSubjectId,
         modelVersion: calculated.model.version,
         informationScore: 0,
+        queryKind: record.queryKind ?? "adaptive",
+        calibrationOfComparisonId: record.calibrationOfComparisonId,
       };
       setCompare({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: retryPair });
     } catch (cause) { setGlobalError(cause instanceof Error ? cause.message : "无法撤销。"); }
@@ -427,9 +573,18 @@ export default function ResorterApp() {
   });
 
   async function changeDistribution(distribution: DistributionConfig) {
-    if (!compare) return;
-    await updateSessionDistribution(compare.session.id, distribution);
-    setCompare({ ...compare, session: { ...compare.session, distribution } });
+    if (!compare || busy) return;
+    setBusy(true); setGlobalError("");
+    try {
+      const current = compare;
+      const nextVersion = current.session.modelVersion + 1;
+      const calculated = await calculate(current.session, current.items, current.history, current.model, "RECOMPUTE", nextVersion, distribution);
+      await commitSessionDistribution(current.session.id, current.session.modelVersion, distribution, calculated.model);
+      const bundle = await getSessionBundle(current.session.id); if (!bundle) throw new Error("会话保存失败。");
+      setCompare({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
+      setSessions(await listSessions(current.session.profileId));
+    } catch (cause) { setGlobalError(cause instanceof Error ? cause.message : "无法更新评分分布。"); }
+    finally { setBusy(false); }
   }
 
   async function exportCsv(result: RankedItem[]) { if (!snapshot) return; downloadText(downloadName("bangumi-resorter-results", snapshot.username, "csv"), resultsCsv(result), "text/csv;charset=utf-8"); }
@@ -438,7 +593,7 @@ export default function ResorterApp() {
     if (!snapshot || !profile) return null;
     if (view === "library") return <LibraryView snapshot={snapshot} items={items} sessions={sessions} onStart={startSession} onResume={openSession} onSyncAgain={() => navigate("connect")} />;
     if (view === "compare" && compare) return <CompareView state={compare} busy={busy} scoresVisible={scoresVisible} onToggleScores={() => setScoresVisible((value) => !value)} onAnswer={answer} onUndo={undo} onPause={() => navigate("library")} onResults={() => navigate("results")} />;
-    if (view === "results" && compare) return <ResultsView state={compare} onBack={() => navigate("compare")} onDistribution={changeDistribution} onExportCsv={exportCsv} />;
+    if (view === "results" && compare) return <ResultsView state={compare} busy={busy} onBack={() => navigate("compare")} onDistribution={changeDistribution} onExportCsv={exportCsv} />;
     if (view === "backup") return <BackupView snapshot={snapshot} items={items} profile={profile} sessions={sessions} storage={storeStatus} onImported={async () => { const saved = await latestSnapshot(); if (saved) await loadSnapshot(saved, "backup"); }} />;
     return <div className="center-message"><h2>请先选择一个排序会话</h2><button className="primary-button compact" onClick={() => navigate("library")}>返回收藏概览</button></div>;
   })();

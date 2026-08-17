@@ -20,6 +20,8 @@ export type ComparisonOutcome = "left" | "tie" | "right" | "skip";
 export type SessionStatus = "active" | "complete";
 export type DistributionPreset = "uniform" | "preserve" | "high-tail" | "reverse-j" | "custom";
 export type ComparisonBudgetMode = "quick" | "standard" | "thorough";
+export type ComparisonReusePolicy = "session" | "snapshot" | "profile";
+export type QueryKind = "adaptive" | "exploration" | "calibration";
 
 export interface SubjectImages {
   large?: string;
@@ -81,7 +83,14 @@ export interface SortingSession {
   modelVersion: number;
   /** Missing only on backups created before comparison budgets were introduced. */
   budgetMode?: ComparisonBudgetMode;
-  suggestedComparisons: number;
+  /** Missing on pre-0.4 sessions, which retain the legacy profile-wide behavior. */
+  comparisonReusePolicy?: ComparisonReusePolicy;
+  /** @deprecated Pre-0.6 preference; retained only so old backups remain readable. */
+  stoppingTarget?: "top-tail" | "all-buckets";
+  /** Legacy pre-dynamic-budget hint. Kept only so older backups remain readable. */
+  suggestedComparisons?: number;
+  /** Safety stop for fatigue; this is not a completion target. */
+  maxComparisons?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -100,9 +109,74 @@ export interface ComparisonRecord {
   leftSubjectId: number;
   rightSubjectId: number;
   outcome: ComparisonOutcome;
+  /** Missing on pre-0.4 records, which are ordinary adaptive questions. */
+  queryKind?: QueryKind;
+  calibrationOfComparisonId?: string;
   acceptedCountAtAnswer: number;
   active: boolean;
   createdAt: string;
+}
+
+export interface CalibrationDiagnostics {
+  attempted: number;
+  completed: number;
+  consistent: number;
+  consistencyRate?: number;
+  /** Mean of a Beta(1, 1) posterior over repeat consistency. */
+  posteriorMean: number;
+  /** Central 80% credible interval for repeat consistency. */
+  credibleLow: number;
+  credibleHigh: number;
+  /** Posterior probability that repeat consistency is better than chance. */
+  probabilityAboveChance: number;
+  /** @deprecated Diagnostic only; it must not gate stopping or forecasting. */
+  acceptable: boolean;
+}
+
+export type StoppingForecastStatus = "ready" | "forecast" | "uncertain" | "limit";
+
+export interface StoppingForecast {
+  method: "posterior-contraction-mc-v1" | "posterior-contraction-mc-v2";
+  status: StoppingForecastStatus;
+  rolloutCount: number;
+  /** Additional accepted answers at the 10th, 50th, and 90th stopping-time percentiles. */
+  lowerAdditional?: number;
+  medianAdditional?: number;
+  upperAdditional?: number;
+  nextCheckpoint: number;
+  probabilityWithin20: number;
+  probabilityBeforeLimit: number;
+  /** Successful rollouts and central 90% Wilson Monte Carlo interval. */
+  within20Successes?: number;
+  probabilityWithin20Low?: number;
+  probabilityWithin20High?: number;
+  beforeLimitSuccesses?: number;
+  probabilityBeforeLimitLow?: number;
+  probabilityBeforeLimitHigh?: number;
+  remainingCapacity: number;
+}
+
+export interface RankingDiagnostics {
+  method: "laplace-mc-v1";
+  sampleCount: number;
+  bucketStability: Record<number, number>;
+  /** Posterior probability that every item simultaneously remains in its current 1-10 bucket. */
+  jointBucketStability: number;
+  jointBucketStableSamples: number;
+  /** Central 90% Monte Carlo interval for jointBucketStability. */
+  jointBucketStabilityLow: number;
+  jointBucketStabilityHigh: number;
+  expectedBucketChangeRate: number;
+  minBucketStability: number;
+  /** Conservative constraint ratio based on the lower Monte Carlo bound; at or below 1 is acceptable. */
+  decisionRiskRatio: number;
+  evidenceCount: number;
+  evidenceRequired: number;
+  fatigueLimit?: number;
+  fatigueReached?: boolean;
+  ready: boolean;
+  calibration: CalibrationDiagnostics;
+  forecast?: StoppingForecast;
 }
 
 export interface ModelState {
@@ -115,6 +189,7 @@ export interface ModelState {
   currentMeanUncertainty: number;
   converged: boolean;
   iterations: number;
+  diagnostics?: RankingDiagnostics;
   updatedAt: string;
 }
 
@@ -129,6 +204,18 @@ export interface RankingComparisonInput {
   outcome: Exclude<ComparisonOutcome, "skip">;
 }
 
+export interface RankingHistoryInput {
+  recordId: string;
+  sessionId: string;
+  leftSubjectId: number;
+  rightSubjectId: number;
+  outcome: ComparisonOutcome;
+  acceptedCountAtAnswer: number;
+  queryKind: QueryKind;
+  calibrationOfComparisonId?: string;
+  createdAt: string;
+}
+
 export interface PairSkipInput {
   leftSubjectId: number;
   rightSubjectId: number;
@@ -141,6 +228,8 @@ export interface NextPair {
   rightSubjectId: number;
   modelVersion: number;
   informationScore: number;
+  queryKind: QueryKind;
+  calibrationOfComparisonId?: string;
 }
 
 export interface RankedItem extends CollectionItem {
@@ -148,6 +237,7 @@ export interface RankedItem extends CollectionItem {
   ability: number;
   uncertainty: number;
   newRate: number;
+  bucketStability?: number;
   comparisonCount: number;
 }
 
@@ -192,4 +282,4 @@ export const DISTRIBUTIONS: Record<Exclude<DistributionPreset, "custom">, number
   "reverse-j": [50, 25, 14, 4, 2, 1, 1, 1, 1, 1],
 };
 
-export const APP_VERSION = "0.3.0";
+export const APP_VERSION = "0.6.0";
