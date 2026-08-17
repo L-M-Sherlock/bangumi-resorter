@@ -6,6 +6,7 @@ test("demo project can compare, resume, and show ranked results", async ({ page 
   await page.getByRole("button", { name: "先用演示数据体验" }).click();
   await expect(page.getByRole("heading", { name: /demo 的已评分收藏/ })).toBeVisible();
   await expect(page.getByText(/重点比较同分作品和相邻分档/)).toBeVisible();
+  await expect(page.locator("#distribution-preset option")).toHaveText(["均匀 1–10", "保持原分布", "高分辨率尾部", "反 J 分布", "自定义权重"]);
   await page.locator("#distribution-preset").selectOption("reverse-j");
   await expect(page.getByText(/约 50% 为 1 分/)).toBeVisible();
   await page.getByRole("button", { name: /开始快速比较 · 建议 16 次/ }).click();
