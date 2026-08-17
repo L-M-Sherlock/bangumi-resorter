@@ -398,7 +398,14 @@ export default function ResorterApp() {
       const calculated = await calculate(compare.session, compare.items, nextHistory, compare.model, "UNDO", compare.session.modelVersion + 1);
       await commitUndo(compare.session.id, compare.session.modelVersion, record.id, calculated.model);
       const bundle = await getSessionBundle(compare.session.id); if (!bundle) throw new Error("会话保存失败。");
-      setCompare({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
+      const retryPair: NextPair = {
+        pairId: `undo-${calculated.model.version}-${record.id}`,
+        leftSubjectId: record.leftSubjectId,
+        rightSubjectId: record.rightSubjectId,
+        modelVersion: calculated.model.version,
+        informationScore: 0,
+      };
+      setCompare({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: retryPair });
     } catch (cause) { setGlobalError(cause instanceof Error ? cause.message : "无法撤销。"); }
     finally { setBusy(false); }
   }

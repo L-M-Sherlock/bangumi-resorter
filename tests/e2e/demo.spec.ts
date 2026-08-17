@@ -9,6 +9,13 @@ test("demo project can compare, resume, and show ranked results", async ({ page 
   await page.getByRole("button", { name: /开始快速比较 · 建议 16 次/ }).click();
   await expect(page.getByRole("heading", { name: "哪一部更值得你给出高分？" })).toBeVisible();
   await expect(page.getByText(/原评分 \d/)).toHaveCount(0);
+  const originalPair = await page.locator(".media-card h2").allTextContents();
+  await page.getByRole("button", { name: /更喜欢这部/ }).first().click();
+  await expect(page.getByText(/本次已完成/)).toContainText("1");
+  await page.getByRole("button", { name: "撤销上次" }).click();
+  await expect(page.getByText(/本次已完成/)).toContainText("0");
+  await expect(page.locator(".media-card h2").nth(0)).toHaveText(originalPair[0]);
+  await expect(page.locator(".media-card h2").nth(1)).toHaveText(originalPair[1]);
   await page.getByRole("button", { name: /更喜欢这部/ }).first().click();
   await expect(page.getByText(/本次已完成/)).toContainText("1");
   await page.getByRole("button", { name: "查看当前结果" }).click();
