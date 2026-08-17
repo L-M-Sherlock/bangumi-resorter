@@ -24,7 +24,7 @@ describe("IndexedDB project persistence", () => {
     expect(session.comparisonReusePolicy).toBe("snapshot");
     expect(session.stoppingTarget).toBeUndefined();
     expect(session.suggestedComparisons).toBeUndefined();
-    expect(session.maxComparisons).toBe(200);
+    expect(session.maxComparisons).toBeUndefined();
     const fitted = fitModel(items.map(({ subjectId, rate }) => ({ subjectId, rate })), []);
     const model = toModelState(session.id, 0, fitted);
     await initializeModel(session.id, model);
@@ -96,6 +96,7 @@ describe("IndexedDB project persistence", () => {
     const payload = await exportProject("demo");
     payload.sessions.forEach((session) => {
       session.stoppingTarget = "top-tail";
+      session.maxComparisons = 1000;
       session.status = "complete";
     });
     const imported = await importProject(payload);
@@ -106,6 +107,7 @@ describe("IndexedDB project persistence", () => {
     expect(await db.sessions.count()).toBe(6);
     const importedSessions = await db.sessions.where("profileId").equals(imported.id).toArray();
     expect(importedSessions.every((session) => session.stoppingTarget === undefined)).toBe(true);
+    expect(importedSessions.every((session) => session.maxComparisons === undefined)).toBe(true);
     expect(importedSessions.every((session) => session.status === "active")).toBe(true);
     const importedUpgrade = importedSessions.find((session) => session.upgradedFromSessionId);
     expect(importedUpgrade).toBeDefined();
@@ -219,9 +221,33 @@ describe("IndexedDB project persistence", () => {
     const inheritedOriginal = bundle?.history.find((entry) => entry.queryKind === "adaptive");
     expect(inheritedCalibration?.calibrationOfComparisonId).toBe(inheritedOriginal?.id);
     expect(inheritedOriginal?.id).not.toBe("tag-kept");
+    expect(inheritedOriginal?.inheritedFromComparisonId).toBe("tag-kept");
+    expect(inheritedCalibration?.inheritedFromComparisonId).toBe("tag-calibration");
+
+    // The source's snapshot-wide reuse must not count its own answers again via
+    // the materialized child copies.
+    expect((await getSessionBundle(source.id))?.history.map((entry) => entry.id).sort())
+      .toEqual(records.map((entry) => entry.id).sort());
+
+    // Pre-provenance backups have no lineage marker. Their exact copied
+    // judgment is still collapsed by the legacy logical fingerprint.
+    await db.comparisons.update(inheritedOriginal!.id, { inheritedFromComparisonId: undefined });
+    expect((await getSessionBundle(source.id))?.history.map((entry) => entry.id).sort())
+      .toEqual(records.map((entry) => entry.id).sort());
+
+    // A genuinely new judgment made in the child remains reusable once.
+    const childOnly: ComparisonRecord = {
+      id: "tag-child-new", profileId: "demo", sessionId: derived.session.id, subjectType: 2,
+      leftSubjectId: items[3].subjectId, rightSubjectId: items[0].subjectId,
+      outcome: "left", queryKind: "manual", acceptedCountAtAnswer: 3, active: true,
+      createdAt: new Date(5).toISOString(),
+    };
+    await db.comparisons.add(childOnly);
+    expect((await getSessionBundle(source.id))?.history.map((entry) => entry.id).sort())
+      .toEqual([...records.map((entry) => entry.id), childOnly.id].sort());
 
     const broadened = await previewSessionTagDerivation(derived.session.id, undefined);
-    expect(broadened).toMatchObject({ previousItemCount: 2, currentItemCount: 4, inheritedComparisonCount: 2, droppedComparisonCount: 0 });
+    expect(broadened).toMatchObject({ previousItemCount: 2, currentItemCount: 4, inheritedComparisonCount: 3, droppedComparisonCount: 0 });
     expect(broadened.addedSubjectIds).toEqual([items[1].subjectId, items[2].subjectId]);
     await expect(previewSessionTagDerivation(source.id, undefined)).rejects.toThrow(/没有变化/);
     await expect(previewSessionTagDerivation(source.id, { ...tagFilter, tags: ["不存在"] })).rejects.toThrow(/不足两个/);
@@ -300,6 +326,8 @@ describe("IndexedDB project persistence", () => {
     const inheritedOriginal = bundle?.history.find((entry) => entry.queryKind === "adaptive");
     expect(inheritedCalibration?.calibrationOfComparisonId).toBe(inheritedOriginal?.id);
     expect(inheritedOriginal?.id).not.toBe("kept");
+    expect(inheritedOriginal?.inheritedFromComparisonId).toBe("kept");
+    expect(inheritedCalibration?.inheritedFromComparisonId).toBe("calibration");
     await expect(previewSessionUpgrade(upgraded.session.id, secondSnapshot.id)).rejects.toThrow(/已经使用当前收藏/);
   });
 
@@ -341,7 +369,7 @@ describe("IndexedDB project persistence", () => {
       .toEqual([firstItems[3].subjectId, added.subjectId].sort((a, b) => a - b));
   });
 
-  it("remaps calibration references when importing a backup", async () => {
+  it("remaps calibration and inheritance references when importing a backup", async () => {
     const snapshotId = crypto.randomUUID();
     const items = createDemoItems(snapshotId).slice(0, 2);
     const snapshot = await saveSnapshot({ username: "demo", nickname: "Demo" }, snapshotId, items);
@@ -356,13 +384,27 @@ describe("IndexedDB project persistence", () => {
       rightSubjectId: original.leftSubjectId, outcome: "right", queryKind: "calibration",
       calibrationOfComparisonId: original.id, acceptedCountAtAnswer: 2, createdAt: new Date(1000).toISOString(),
     };
-    await db.comparisons.bulkAdd([original, calibration]);
+    const inherited: ComparisonRecord = {
+      ...original, id: "inherited", inheritedFromComparisonId: original.id,
+      acceptedCountAtAnswer: 3, createdAt: new Date(2000).toISOString(),
+    };
+    const orphanedInheritance: ComparisonRecord = {
+      ...original, id: "orphaned-inherited", inheritedFromComparisonId: "deleted-source",
+      acceptedCountAtAnswer: 4, createdAt: new Date(3000).toISOString(),
+    };
+    await db.comparisons.bulkAdd([original, calibration, inherited, orphanedInheritance]);
     await importProject(await exportProject("demo"));
     const imported = (await db.comparisons.toArray()).filter((entry) => entry.profileId !== "demo");
     const importedCalibration = imported.find((entry) => entry.queryKind === "calibration")!;
-    const importedOriginal = imported.find((entry) => entry.queryKind === "adaptive")!;
+    const importedOriginal = imported.find((entry) =>
+      entry.queryKind === "adaptive" && !entry.inheritedFromComparisonId)!;
     expect(importedCalibration.calibrationOfComparisonId).toBe(importedOriginal.id);
     expect(importedCalibration.calibrationOfComparisonId).not.toBe("original");
+    const importedInherited = imported.find((entry) => entry.createdAt === inherited.createdAt)!;
+    expect(importedInherited.inheritedFromComparisonId).toBe(importedOriginal.id);
+    expect(importedInherited.inheritedFromComparisonId).not.toBe("original");
+    expect(imported.find((entry) => entry.createdAt === orphanedInheritance.createdAt)
+      ?.inheritedFromComparisonId).toBe("deleted-source");
   });
 
   it("atomically versions distribution-dependent model diagnostics", async () => {

@@ -11,7 +11,12 @@ import {
   RankingItemInput,
   StoppingForecast,
 } from "../types";
-import { minimumEvidence } from "./strategy";
+import {
+  allowedCrossTwoBucketCount,
+  forecastProjectionHorizon,
+  minimumEvidence,
+  requiredAdjacentStableItemCount,
+} from "./strategy";
 
 const DEFAULT_PRIOR_STRENGTH = 0.25;
 const DEFAULT_PRIOR_SCALE = 0.35;
@@ -52,10 +57,11 @@ export interface PairSelectionOptions {
 }
 
 export interface StoppingForecastOptions {
-  fatigueLimit: number;
   randomSeed: number;
   forecastEfficiency?: number;
   rolloutCount?: number;
+  /** Finite Monte Carlo look-ahead only; never an answering limit. */
+  projectionHorizon?: number;
 }
 
 function sigmoid(value: number) {
@@ -467,6 +473,10 @@ interface AssignmentMetrics {
   jointBucketStableSamples: number;
   adjacentBucketStability: number;
   adjacentBucketStableSamples: number;
+  coverageTargetStability: number;
+  coverageTargetStableSamples: number;
+  requiredAdjacentStableItemCount: number;
+  allowedCrossTwoBucketCount: number;
   expectedCrossTwoBucketCount: number;
   crossTwoBucketCountMedian: number;
   crossTwoBucketCountLow: number;
@@ -497,7 +507,10 @@ function assignmentMetricsFromRates(
   let changedAssignments = 0;
   let jointStableWeight = 0;
   let adjacentStableWeight = 0;
+  let coverageTargetStableWeight = 0;
   let totalWeight = 0;
+  const requiredAdjacentCount = requiredAdjacentStableItemCount(items.length);
+  const allowedCrossCount = allowedCrossTwoBucketCount(items.length);
   const crossTwoBucketCounts: number[] = [];
   const maxBucketDisplacements: number[] = [];
   for (let sampleIndex = 0; sampleIndex < posteriorRates.length; sampleIndex += 1) {
@@ -530,6 +543,7 @@ function assignmentMetricsFromRates(
     maxBucketDisplacements.push(maxBucketDisplacement);
     if (jointStable) jointStableWeight += weight;
     if (adjacentStable) adjacentStableWeight += weight;
+    if (crossTwoBucketCount <= allowedCrossCount) coverageTargetStableWeight += weight;
   }
   const denominator = Math.max(totalWeight, Number.EPSILON);
   const bucketStability: Record<number, number> = {};
@@ -548,6 +562,10 @@ function assignmentMetricsFromRates(
     jointBucketStableSamples: jointStableWeight,
     adjacentBucketStability: adjacentStableWeight / denominator,
     adjacentBucketStableSamples: adjacentStableWeight,
+    coverageTargetStability: coverageTargetStableWeight / denominator,
+    coverageTargetStableSamples: coverageTargetStableWeight,
+    requiredAdjacentStableItemCount: requiredAdjacentCount,
+    allowedCrossTwoBucketCount: allowedCrossCount,
     expectedCrossTwoBucketCount: crossTwoBucketCounts.reduce((sum, value) => sum + value, 0) / denominator,
     crossTwoBucketCountMedian: forecastQuantile(crossTwoBucketCounts, 0.5) ?? 0,
     crossTwoBucketCountLow: forecastQuantile(crossTwoBucketCounts, 0.1) ?? 0,
@@ -569,22 +587,23 @@ export function analyzeRanking(
   distribution: DistributionConfig,
   history: RankingHistoryInput[],
   sessionId: string,
-  fatigueLimit?: number,
 ): RankingDiagnostics {
   if (items.length === 0 || fit.posteriorSamples.length === 0) {
     const calibration = calibrationDiagnostics(history);
     return {
-      method: "laplace-mc-v3", sampleCount: 0, bucketStability: {}, adjacentBucketStabilityByItem: {},
+      method: "laplace-mc-v4", sampleCount: 0, bucketStability: {}, adjacentBucketStabilityByItem: {},
       jointBucketStability: 1, jointBucketStableSamples: 0,
       jointBucketStabilityLow: 1, jointBucketStabilityHigh: 1,
       adjacentBucketStability: 1, adjacentBucketStableSamples: 0,
       adjacentBucketStabilityLow: 1, adjacentBucketStabilityHigh: 1,
+      coverageTargetStability: 1, coverageTargetStableSamples: 0,
+      coverageTargetStabilityLow: 1, coverageTargetStabilityHigh: 1,
+      requiredAdjacentStableItemCount: 0, allowedCrossTwoBucketCount: 0,
       expectedCrossTwoBucketCount: 0,
       crossTwoBucketCountMedian: 0, crossTwoBucketCountLow: 0, crossTwoBucketCountHigh: 0,
       maxBucketDisplacementMedian: 0, maxBucketDisplacementHigh: 0,
       expectedBucketChangeRate: 0, minBucketStability: 1,
       decisionRiskRatio: 0, evidenceCount: 0, evidenceRequired: 0,
-      fatigueLimit, fatigueReached: fatigueLimit === 0,
       ready: true, calibration,
     };
   }
@@ -593,24 +612,25 @@ export function analyzeRanking(
   const metrics = assignmentMetrics(items, mapRates, fit.posteriorSamples, distribution);
   const jointInterval = wilsonInterval(metrics.jointBucketStableSamples, fit.posteriorSamples.length);
   const adjacentInterval = wilsonInterval(metrics.adjacentBucketStableSamples, fit.posteriorSamples.length);
-  const risk = decisionRiskRatio(adjacentInterval.low);
+  const coverageTargetInterval = wilsonInterval(metrics.coverageTargetStableSamples, fit.posteriorSamples.length);
+  const risk = decisionRiskRatio(coverageTargetInterval.low);
   const evidenceCount = history.filter((entry) => entry.sessionId === sessionId && entry.outcome !== "skip").length;
   const evidenceRequired = minimumEvidence(items.length);
   const calibration = calibrationDiagnostics(history);
   const evidenceSatisfied = evidenceCount >= evidenceRequired;
   return {
-    method: "laplace-mc-v3",
+    method: "laplace-mc-v4",
     sampleCount: fit.posteriorSamples.length,
     ...metrics,
     jointBucketStabilityLow: jointInterval.low,
     jointBucketStabilityHigh: jointInterval.high,
     adjacentBucketStabilityLow: adjacentInterval.low,
     adjacentBucketStabilityHigh: adjacentInterval.high,
+    coverageTargetStabilityLow: coverageTargetInterval.low,
+    coverageTargetStabilityHigh: coverageTargetInterval.high,
     decisionRiskRatio: risk,
     evidenceCount,
     evidenceRequired,
-    fatigueLimit,
-    fatigueReached: fatigueLimit !== undefined && evidenceCount >= fatigueLimit,
     ready: evidenceSatisfied && risk <= 1 + 1e-9,
     calibration,
   };
@@ -751,7 +771,7 @@ export function chooseNextPair(
   randomSeed: number,
   options: PairSelectionOptions = {},
 ): NextPair | undefined {
-  if (items.length < 2 || diagnostics.fatigueReached) return undefined;
+  if (items.length < 2) return undefined;
   const calibration = nextCalibrationPair(history, sessionId, version, randomSeed);
   if (calibration) return calibration;
 
@@ -885,11 +905,11 @@ function contractionRiskCurve(
       }
       return output;
     });
-    const adjacentStability = assignmentMetrics(
+    const coverageTargetStability = assignmentMetrics(
       items, referenceRates, contracted, distribution,
-    ).adjacentBucketStability;
+    ).coverageTargetStability;
     const conservativeStability = wilsonInterval(
-      adjacentStability * decisionSampleCount,
+      coverageTargetStability * decisionSampleCount,
       decisionSampleCount,
     ).low;
     const risk = decisionRiskRatio(conservativeStability);
@@ -924,34 +944,32 @@ export function forecastStoppingTime(
 ): StoppingForecast {
   const rolloutCount = Math.max(16, Math.round(options.rolloutCount ?? 64));
   const targetReady = diagnostics.ready;
-  const remainingCapacity = Math.max(0, options.fatigueLimit - diagnostics.evidenceCount);
-  const nextCheckpoint = Math.min(10, remainingCapacity);
+  const projectionHorizon = Math.max(
+    5,
+    Math.round(options.projectionHorizon ?? forecastProjectionHorizon(items.length)),
+  );
+  const nextCheckpoint = 10;
   const base = {
-    method: "posterior-contraction-mc-v2" as const,
+    method: "posterior-contraction-mc-v4" as const,
     rolloutCount,
     nextCheckpoint,
-    remainingCapacity,
+    projectionHorizon,
   };
   if (targetReady) {
     return {
       ...base, status: "ready", lowerAdditional: 0, medianAdditional: 0, upperAdditional: 0,
-      probabilityWithin20: 1, probabilityBeforeLimit: 1,
+      probabilityWithin20: 1, probabilityWithinProjection: 1,
       within20Successes: rolloutCount, probabilityWithin20Low: 1, probabilityWithin20High: 1,
-      beforeLimitSuccesses: rolloutCount, probabilityBeforeLimitLow: 1, probabilityBeforeLimitHigh: 1,
-    };
-  }
-  if (remainingCapacity === 0) {
-    return {
-      ...base, status: "limit", probabilityWithin20: 0, probabilityBeforeLimit: 0,
-      within20Successes: 0, probabilityWithin20Low: 0, probabilityWithin20High: 0,
-      beforeLimitSuccesses: 0, probabilityBeforeLimitLow: 0, probabilityBeforeLimitHigh: 0,
+      withinProjectionSuccesses: rolloutCount,
+      probabilityWithinProjectionLow: 1, probabilityWithinProjectionHigh: 1,
     };
   }
   if (fit.posteriorSamples.length === 0) {
     return {
-      ...base, status: "uncertain", probabilityWithin20: 0, probabilityBeforeLimit: 0,
+      ...base, status: "uncertain", probabilityWithin20: 0, probabilityWithinProjection: 0,
       within20Successes: 0, probabilityWithin20Low: 0, probabilityWithin20High: 1,
-      beforeLimitSuccesses: 0, probabilityBeforeLimitLow: 0, probabilityBeforeLimitHigh: 1,
+      withinProjectionSuccesses: 0,
+      probabilityWithinProjectionLow: 0, probabilityWithinProjectionHigh: 1,
     };
   }
 
@@ -964,15 +982,15 @@ export function forecastStoppingTime(
   const coverage = touched.size / Math.max(1, items.length);
   const baseEfficiency = Math.max(0.15, (options.forecastEfficiency ?? 1) * (0.65 + 0.7 * coverage));
   const effectiveEvidence = Math.max(8, diagnostics.evidenceCount);
-  const random = seededRandom(hash(`${options.randomSeed}:${diagnostics.evidenceCount}:global-buckets:forecast`));
+  const random = seededRandom(hash(`${options.randomSeed}:${diagnostics.evidenceCount}:coverage-90-adjacent:forecast`));
   const normal = normalGenerator(random);
   const stoppingTimes: number[] = [];
   const forecastSampleCount = Math.min(12, fit.posteriorSamples.length);
   const forecastSamples = Array.from({ length: forecastSampleCount }, (_, index) =>
     fit.posteriorSamples[Math.floor(index * fit.posteriorSamples.length / forecastSampleCount)]);
   const horizons: number[] = [];
-  for (let additional = 5; additional <= remainingCapacity; additional += 5) horizons.push(additional);
-  if (horizons[horizons.length - 1] !== remainingCapacity) horizons.push(remainingCapacity);
+  for (let additional = 5; additional <= projectionHorizon; additional += 5) horizons.push(additional);
+  if (horizons[horizons.length - 1] !== projectionHorizon) horizons.push(projectionHorizon);
 
   for (let rollout = 0; rollout < rolloutCount; rollout += 1) {
     const truth = fit.posteriorSamples[Math.floor(random() * fit.posteriorSamples.length)];
@@ -993,11 +1011,11 @@ export function forecastStoppingTime(
   }
 
   const reached = stoppingTimes.filter(Number.isFinite).length;
-  const probabilityBeforeLimit = reached / rolloutCount;
+  const probabilityWithinProjection = reached / rolloutCount;
   const within20Successes = stoppingTimes.filter((value) => value <= 20).length;
   const probabilityWithin20 = within20Successes / rolloutCount;
   const within20Interval = wilsonInterval(within20Successes, rolloutCount);
-  const beforeLimitInterval = wilsonInterval(reached, rolloutCount);
+  const withinProjectionInterval = wilsonInterval(reached, rolloutCount);
   const lowerAdditional = forecastQuantile(stoppingTimes, 0.1);
   const medianAdditional = forecastQuantile(stoppingTimes, 0.5);
   const upperAdditional = forecastQuantile(stoppingTimes, 0.9);
@@ -1012,13 +1030,13 @@ export function forecastStoppingTime(
     medianAdditional,
     upperAdditional,
     probabilityWithin20,
-    probabilityBeforeLimit,
+    probabilityWithinProjection,
     within20Successes,
     probabilityWithin20Low: within20Interval.low,
     probabilityWithin20High: within20Interval.high,
-    beforeLimitSuccesses: reached,
-    probabilityBeforeLimitLow: beforeLimitInterval.low,
-    probabilityBeforeLimitHigh: beforeLimitInterval.high,
+    withinProjectionSuccesses: reached,
+    probabilityWithinProjectionLow: withinProjectionInterval.low,
+    probabilityWithinProjectionHigh: withinProjectionInterval.high,
   };
 }
 

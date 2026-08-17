@@ -21,7 +21,7 @@ import {
   SortingSession,
   SubjectType,
 } from "./types";
-import { comparisonLimit, sessionBudgetMode, sessionReusePolicy } from "./ranking/strategy";
+import { sessionBudgetMode, sessionReusePolicy } from "./ranking/strategy";
 import { collectionTagFilter, filterScopeItems, sameTagFilter } from "./scope";
 
 interface MetaRecord { key: string; value: string; }
@@ -61,6 +61,20 @@ class ResorterDatabase extends Dexie {
       await transaction.table("sessions").toCollection().modify((session: SortingSession) => {
         session.stoppingTarget = undefined;
         session.status = "active";
+      });
+    });
+    this.version(3).stores({
+      profiles: "id, username, updatedAt",
+      snapshots: "id, profileId, syncedAt",
+      items: "[snapshotId+subjectId], snapshotId, subjectId, subjectType, collectionType, rate",
+      sessions: "id, profileId, snapshotId, subjectType, status, updatedAt",
+      sessionItems: "id, sessionId, subjectId, [sessionId+subjectId]",
+      comparisons: "id, profileId, sessionId, subjectType, active, createdAt",
+      models: "sessionId, version, updatedAt",
+      meta: "key",
+    }).upgrade(async (transaction) => {
+      await transaction.table("sessions").toCollection().modify((session: SortingSession) => {
+        session.maxComparisons = undefined;
       });
     });
   }
@@ -119,7 +133,7 @@ async function reusableHistory(session: SortingSession, allowed: Set<number>) {
   } else {
     reusableSessionIds = new Set((await db.sessions.where("profileId").equals(session.profileId).toArray()).map((entry) => entry.id));
   }
-  return db.comparisons
+  const candidates = await db.comparisons
     .where("profileId").equals(session.profileId)
     .filter((entry) => entry.subjectType === session.subjectType
       && entry.active
@@ -127,6 +141,39 @@ async function reusableHistory(session: SortingSession, allowed: Set<number>) {
       && allowed.has(entry.leftSubjectId)
       && allowed.has(entry.rightSubjectId))
     .toArray();
+
+  // A derived/upgraded session materializes inherited judgments so it remains
+  // self-contained. Those copies belong to that child only: allowing another
+  // session to reuse them would count one human answer twice.
+  const outwardSafe = candidates.filter((entry) =>
+    entry.sessionId === session.id || !entry.inheritedFromComparisonId);
+
+  // Backups created before provenance was recorded still contain byte-for-byte
+  // logical copies (apart from IDs/session/count and calibration references).
+  // Collapse only exact cross-session matches, preferring the current session,
+  // so existing browser data is repaired without a destructive migration.
+  const byFingerprint = new Map<string, ComparisonRecord[]>();
+  for (const entry of outwardSafe) {
+    const fingerprint = [
+      entry.leftSubjectId,
+      entry.rightSubjectId,
+      entry.outcome,
+      entry.queryKind ?? "adaptive",
+      entry.createdAt,
+    ].join("\u001f");
+    const group = byFingerprint.get(fingerprint) ?? [];
+    group.push(entry);
+    byFingerprint.set(fingerprint, group);
+  }
+  return [...byFingerprint.values()].flatMap((group) => {
+    if (new Set(group.map((entry) => entry.sessionId)).size === 1) return group;
+    const local = group.filter((entry) => entry.sessionId === session.id);
+    if (local.length > 0) return local;
+    return [group.sort((left, right) =>
+      left.createdAt.localeCompare(right.createdAt)
+      || left.sessionId.localeCompare(right.sessionId)
+      || left.id.localeCompare(right.id))[0]];
+  }).sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
 }
 
 export async function createSession(
@@ -148,7 +195,7 @@ export async function createSession(
     title: `${snapshot.username} 的排序`, status: "active", distribution,
     randomSeed: crypto.getRandomValues(new Uint32Array(1))[0], modelVersion: 0,
     budgetMode, comparisonReusePolicy, tagFilter: normalizedTagFilter,
-    maxComparisons: comparisonLimit(selected.length, budgetMode), createdAt: timestamp, updatedAt: timestamp,
+    createdAt: timestamp, updatedAt: timestamp,
   };
   const links = selected.map<SessionItem>((item) => ({ id: `${session.id}:${item.subjectId}`, sessionId: session.id, subjectId: item.subjectId }));
   await db.transaction("rw", db.sessions, db.sessionItems, async () => {
@@ -262,6 +309,7 @@ function cloneRetainedComparisons(
     calibrationOfComparisonId: entry.calibrationOfComparisonId
       ? clonedIds.get(entry.calibrationOfComparisonId)
       : undefined,
+    inheritedFromComparisonId: entry.inheritedFromComparisonId ?? entry.id,
     acceptedCountAtAnswer: index + 1,
     active: true,
   }));
@@ -300,7 +348,6 @@ export async function upgradeSessionToSnapshot(sourceSessionId: string, targetSn
         modelVersion: 0,
         budgetMode: sessionBudgetMode(state.source),
         comparisonReusePolicy: "session",
-        maxComparisons: comparisonLimit(state.currentItems.length, sessionBudgetMode(state.source)),
         upgradedFromSessionId: state.source.id,
         tagFilter: collectionTagFilter(state.source.tagFilter?.tags ?? []),
         createdAt: timestamp,
@@ -393,7 +440,6 @@ export async function deriveSessionWithTagFilter(
         modelVersion: 0,
         budgetMode: sessionBudgetMode(state.source),
         comparisonReusePolicy: "session",
-        maxComparisons: comparisonLimit(state.currentItems.length, sessionBudgetMode(state.source)),
         derivedFromSessionId: state.source.id,
         tagFilter: state.tagFilter,
         createdAt: timestamp,
@@ -590,6 +636,7 @@ export async function importProject(payload: ExportV1): Promise<Profile> {
       : undefined,
     tagFilter: collectionTagFilter(item.tagFilter?.tags ?? []),
     stoppingTarget: undefined,
+    maxComparisons: undefined,
     status: "active" as const,
     updatedAt: now(),
   }));
@@ -601,6 +648,9 @@ export async function importProject(payload: ExportV1): Promise<Profile> {
     sessionId: mapSession.get(item.sessionId)!,
     calibrationOfComparisonId: item.calibrationOfComparisonId
       ? mapComparison.get(item.calibrationOfComparisonId)
+      : undefined,
+    inheritedFromComparisonId: item.inheritedFromComparisonId
+      ? mapComparison.get(item.inheritedFromComparisonId) ?? item.inheritedFromComparisonId
       : undefined,
   }));
   const models = payload.models.map((item) => ({ ...item, sessionId: mapSession.get(item.sessionId)! }));

@@ -138,10 +138,10 @@ describe("ranking strategy simulation", () => {
       const fit = fitModel(rated, comparisons(entries), undefined, {
         priorStrength: 0.8, priorScale: 0.65, posteriorSampleCount: 32, randomSeed: 1000 + question,
       });
-      const diagnostics = analyzeRanking(rated, fit, distribution, entries, "session", 300);
+      const diagnostics = analyzeRanking(rated, fit, distribution, entries, "session");
       if (question === checkpoint) {
         checkpointForecast = forecastStoppingTime(rated, fit, distribution, entries, "session", diagnostics, {
-          fatigueLimit: 300, randomSeed: 3, forecastEfficiency: 16,
+          projectionHorizon: 300, randomSeed: 3, forecastEfficiency: 16,
         });
       }
       if (diagnostics.ready) { stoppedAt = question; break; }
@@ -161,7 +161,7 @@ describe("ranking strategy simulation", () => {
     }
     expect(checkpointForecast).toBeDefined();
     expect(checkpointForecast?.rolloutCount).toBe(64);
-    expect(checkpointForecast?.method).toBe("posterior-contraction-mc-v2");
+    expect(checkpointForecast?.method).toBe("posterior-contraction-mc-v4");
     expect(stoppedAt).toBeDefined();
     const actualAdditional = Math.ceil((stoppedAt! - checkpoint) / 5) * 5;
     if (checkpointForecast?.lowerAdditional !== undefined && checkpointForecast.upperAdditional !== undefined) {
@@ -169,7 +169,7 @@ describe("ranking strategy simulation", () => {
       expect(checkpointForecast.upperAdditional).toBeGreaterThanOrEqual(actualAdditional);
     } else {
       expect(checkpointForecast?.status).toBe("uncertain");
-      expect(checkpointForecast?.probabilityBeforeLimitHigh).toBeGreaterThan(0);
+      expect(checkpointForecast?.probabilityWithinProjectionHigh).toBeGreaterThan(0);
     }
   });
 });

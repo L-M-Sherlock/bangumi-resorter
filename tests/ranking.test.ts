@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { analyzeRanking, buildRankedItems, calibrationPosterior, chooseNextPair, fitModel, forecastStoppingTime } from "../lib/ranking/engine";
-import { comparisonBudget, comparisonLimit, rankingTuning, recommendedDistribution } from "../lib/ranking/strategy";
+import {
+  allowedCrossTwoBucketCount,
+  comparisonBudget,
+  forecastProjectionHorizon,
+  rankingTuning,
+  recommendedDistribution,
+  requiredAdjacentStableItemCount,
+} from "../lib/ranking/strategy";
 import type { CollectionItem, DistributionConfig, RankingComparisonInput, RankingHistoryInput } from "../lib/types";
 
 const inputs = [
@@ -91,15 +98,15 @@ describe("Bradley–Terry ranking engine", () => {
     expect(nextPairFor([{ subjectId: 1, rate: 10 }, { subjectId: 2, rate: 1 }], [], 9, 0, uniform, tuning)).toBeDefined();
   });
 
-  it("caps quick mode for large libraries", () => {
+  it("retains legacy budget hints while using a non-blocking forecast horizon", () => {
     expect(comparisonBudget(1, "quick")).toBe(0);
     expect(comparisonBudget(16, "quick")).toBe(16);
     expect(comparisonBudget(400, "quick")).toBe(80);
     expect(comparisonBudget(400, "standard")).toBe(400);
     expect(comparisonBudget(400, "thorough")).toBe(800);
-    expect(comparisonLimit(16, "quick")).toBe(480);
-    expect(comparisonLimit(400, "quick")).toBe(1000);
-    expect(comparisonLimit(400, "standard")).toBe(3000);
+    expect(forecastProjectionHorizon(16)).toBe(1000);
+    expect(forecastProjectionHorizon(400)).toBe(4000);
+    expect(forecastProjectionHorizon(1000)).toBe(5000);
   });
 
   it("uses a Beta posterior instead of a raw calibration cutoff", () => {
@@ -180,7 +187,7 @@ describe("Bradley–Terry ranking engine", () => {
     expect(Object.values(diagnostics.bucketStability).every((value) => value >= 0 && value <= 1)).toBe(true);
   });
 
-  it("stops on the global adjacent-bucket event while retaining exact joint stability", () => {
+  it("stops when 90% of items stay within one bucket while retaining stricter diagnostics", () => {
     const rated = Array.from({ length: 100 }, (_, index) => ({ subjectId: index + 1, rate: 10 - Math.floor(index / 10) }));
     const abilities = Object.fromEntries(rated.map((entry, index) => [entry.subjectId, 100 - index]));
     const stable = new Float64Array(rated.map((_, index) => 100 - index));
@@ -205,6 +212,10 @@ describe("Bradley–Terry ranking engine", () => {
     expect(marginallyStable.jointBucketStability).toBe(0);
     expect(marginallyStable.jointBucketStableSamples).toBe(0);
     expect(marginallyStable.adjacentBucketStability).toBe(0);
+    expect(marginallyStable.coverageTargetStability).toBe(1);
+    expect(marginallyStable.coverageTargetStabilityLow).toBeGreaterThan(0.9);
+    expect(marginallyStable.requiredAdjacentStableItemCount).toBe(90);
+    expect(marginallyStable.allowedCrossTwoBucketCount).toBe(10);
     expect(Object.values(marginallyStable.adjacentBucketStabilityByItem)
       .every((value) => value >= 0 && value <= 1)).toBe(true);
     expect(marginallyStable.expectedCrossTwoBucketCount).toBe(2);
@@ -213,7 +224,22 @@ describe("Bradley–Terry ranking engine", () => {
     expect(marginallyStable.crossTwoBucketCountHigh).toBe(2);
     expect(marginallyStable.maxBucketDisplacementMedian).toBe(5);
     expect(marginallyStable.maxBucketDisplacementHigh).toBe(5);
-    expect(marginallyStable.ready).toBe(false);
+    expect(marginallyStable.ready).toBe(true);
+
+    const twelveMisplacements = stable.slice();
+    for (let index = 0; index < 6; index += 1) {
+      [twelveMisplacements[index], twelveMisplacements[index + 50]] = [
+        twelveMisplacements[index + 50],
+        twelveMisplacements[index],
+      ];
+    }
+    const overTolerance = analyzeRanking(rated, {
+      ...fit,
+      posteriorSamples: Array.from({ length: 64 }, () => twelveMisplacements.slice()),
+    }, uniform, evidence, "session");
+    expect(overTolerance.expectedCrossTwoBucketCount).toBe(12);
+    expect(overTolerance.coverageTargetStability).toBe(0);
+    expect(overTolerance.ready).toBe(false);
 
     const oneMisplacement = stable.slice();
     [oneMisplacement[9], oneMisplacement[10]] = [oneMisplacement[10], oneMisplacement[9]];
@@ -226,6 +252,7 @@ describe("Bradley–Terry ranking engine", () => {
     expect(finiteSampleDiagnostics.jointBucketStabilityLow).toBeLessThan(0.9);
     expect(finiteSampleDiagnostics.adjacentBucketStability).toBe(1);
     expect(finiteSampleDiagnostics.adjacentBucketStabilityLow).toBeGreaterThan(0.9);
+    expect(finiteSampleDiagnostics.coverageTargetStability).toBe(1);
     expect(finiteSampleDiagnostics.ready).toBe(true);
 
     const adjacentFit = {
@@ -235,6 +262,7 @@ describe("Bradley–Terry ranking engine", () => {
     const adjacentOnly = analyzeRanking(rated, adjacentFit, uniform, evidence, "session");
     expect(adjacentOnly.jointBucketStability).toBe(0);
     expect(adjacentOnly.adjacentBucketStability).toBe(1);
+    expect(adjacentOnly.coverageTargetStability).toBe(1);
     expect(Object.values(adjacentOnly.adjacentBucketStabilityByItem)
       .every((value) => value === 1)).toBe(true);
     expect(adjacentOnly.expectedCrossTwoBucketCount).toBe(0);
@@ -246,10 +274,10 @@ describe("Bradley–Terry ranking engine", () => {
     expect(adjacentOnly.decisionRiskRatio).toBeLessThanOrEqual(1);
     expect(adjacentOnly.ready).toBe(true);
 
-    const evidenceLimited = analyzeRanking(rated, adjacentFit, uniform, evidence.slice(0, 9), "session", 100);
+    const evidenceLimited = analyzeRanking(rated, adjacentFit, uniform, evidence.slice(0, 9), "session");
     expect(evidenceLimited.ready).toBe(false);
     expect(forecastStoppingTime(rated, adjacentFit, uniform, evidence.slice(0, 9), "session", evidenceLimited, {
-      fatigueLimit: 100, randomSeed: 12, forecastEfficiency: 16,
+      projectionHorizon: 100, randomSeed: 12, forecastEfficiency: 16,
     }).medianAdditional).toBe(5);
 
     const globallyStable = analyzeRanking(rated, {
@@ -259,11 +287,19 @@ describe("Bradley–Terry ranking engine", () => {
     expect(globallyStable.jointBucketStability).toBe(1);
     expect(globallyStable.jointBucketStabilityLow).toBeGreaterThan(0.9);
     expect(globallyStable.adjacentBucketStability).toBe(1);
+    expect(globallyStable.coverageTargetStability).toBe(1);
     expect(globallyStable.expectedCrossTwoBucketCount).toBe(0);
     expect(globallyStable.maxBucketDisplacementMedian).toBe(0);
     expect(globallyStable.maxBucketDisplacementHigh).toBe(0);
     expect(globallyStable.decisionRiskRatio).toBeLessThanOrEqual(1);
     expect(globallyStable.ready).toBe(true);
+  });
+
+  it("rounds the 90% item-coverage threshold conservatively", () => {
+    expect(requiredAdjacentStableItemCount(58)).toBe(53);
+    expect(allowedCrossTwoBucketCount(58)).toBe(5);
+    expect(requiredAdjacentStableItemCount(283)).toBe(255);
+    expect(allowedCrossTwoBucketCount(283)).toBe(28);
   });
 
   it("changes adaptive questions when the target distribution changes", () => {
@@ -307,11 +343,11 @@ describe("Bradley–Terry ranking engine", () => {
     expect(diagnostics.calibration.acceptable).toBe(false);
     expect(diagnostics.ready).toBe(true);
     expect(forecastStoppingTime(rated, fit, uniform, entries, "session", diagnostics, {
-      fatigueLimit: 100, randomSeed: 4,
+      projectionHorizon: 100, randomSeed: 4,
     }).status).toBe("ready");
   });
 
-  it("returns a dynamic ready forecast and enforces the fatigue safety ceiling", () => {
+  it("returns a ready forecast without blocking further comparisons", () => {
     const rated = Array.from({ length: 4 }, (_, index) => ({ subjectId: index + 1, rate: 10 - index }));
     const abilities = Object.fromEntries(rated.map((entry, index) => [entry.subjectId, 3 - index]));
     const stableSample = new Float64Array([3, 2, 1, 0]);
@@ -329,24 +365,24 @@ describe("Bradley–Terry ranking engine", () => {
       history("b", 2, 3, "left", 1),
       history("c", 3, 4, "left", 2),
     ];
-    const diagnostics = analyzeRanking(rated, fit, uniform, entries, "session", 3);
+    const diagnostics = analyzeRanking(rated, fit, uniform, entries, "session");
     expect(diagnostics.ready).toBe(true);
-    expect(diagnostics.fatigueReached).toBe(true);
-    expect(chooseNextPair(rated, entries, fit, diagnostics, uniform, "session", 3, 9)).toBeUndefined();
+    expect(diagnostics.fatigueReached).toBeUndefined();
+    expect(chooseNextPair(rated, entries, fit, { ...diagnostics, fatigueReached: true }, uniform, "session", 3, 9)).toBeDefined();
     expect(forecastStoppingTime(rated, fit, uniform, entries, "session", diagnostics, {
-      fatigueLimit: 3, randomSeed: 9,
-    })).toMatchObject({ status: "ready", medianAdditional: 0, probabilityWithin20: 1 });
+      projectionHorizon: 5, randomSeed: 9,
+    })).toMatchObject({ status: "ready", medianAdditional: 0, probabilityWithin20: 1, projectionHorizon: 5 });
   });
 
   it("keeps an early stopping forecast explicitly uncertain", () => {
     const rated = Array.from({ length: 8 }, (_, index) => ({ subjectId: index + 1, rate: 7 }));
     const fit = fitModel(rated, [], undefined, { posteriorSampleCount: 64, randomSeed: 7 });
-    const diagnostics = analyzeRanking(rated, fit, uniform, [], "session", 240);
+    const diagnostics = analyzeRanking(rated, fit, uniform, [], "session");
     const first = forecastStoppingTime(rated, fit, uniform, [], "session", diagnostics, {
-      fatigueLimit: 240, randomSeed: 7,
+      projectionHorizon: 240, randomSeed: 7,
     });
     const second = forecastStoppingTime(rated, fit, uniform, [], "session", diagnostics, {
-      fatigueLimit: 240, randomSeed: 7,
+      projectionHorizon: 240, randomSeed: 7,
     });
     expect(first).toEqual(second);
     expect(first.status).toBe("uncertain");
@@ -362,19 +398,14 @@ describe("Bradley–Terry ranking engine", () => {
   it("does not turn zero successful rollouts into an impossibility claim", () => {
     const rated = Array.from({ length: 12 }, (_, index) => ({ subjectId: index + 1, rate: 7 }));
     const fit = fitModel(rated, [], undefined, { posteriorSampleCount: 64, randomSeed: 19 });
-    const diagnostics = analyzeRanking(rated, fit, uniform, [], "session", 1);
+    const diagnostics = analyzeRanking(rated, fit, uniform, [], "session");
     const forecast = forecastStoppingTime(rated, fit, uniform, [], "session", diagnostics, {
-      fatigueLimit: 1, randomSeed: 19,
+      projectionHorizon: 5, randomSeed: 19,
     });
     expect(forecast.status).toBe("uncertain");
-    expect(forecast.beforeLimitSuccesses).toBe(0);
-    expect(forecast.probabilityBeforeLimit).toBe(0);
-    expect(forecast.probabilityBeforeLimitHigh).toBeGreaterThan(0);
-
-    const atLimit = forecastStoppingTime(rated, fit, uniform, [], "session", diagnostics, {
-      fatigueLimit: 0, randomSeed: 19,
-    });
-    expect(atLimit.status).toBe("limit");
-    expect(atLimit.probabilityBeforeLimitHigh).toBe(0);
+    expect(forecast.withinProjectionSuccesses).toBe(0);
+    expect(forecast.probabilityWithinProjection).toBe(0);
+    expect(forecast.probabilityWithinProjectionHigh).toBeGreaterThan(0);
+    expect(forecast.projectionHorizon).toBe(5);
   });
 });

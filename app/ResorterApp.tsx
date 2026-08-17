@@ -31,11 +31,10 @@ import { downloadJson, downloadText, readBackup, requestPersistentStorage, resul
 import { buildRankedItems } from "@/lib/ranking/engine";
 import {
   BUDGET_MODE_COPY,
-  comparisonLimit,
+  allowedCrossTwoBucketCount,
   rankingTuning,
   recommendedDistribution,
   sessionBudgetMode,
-  sessionComparisonLimit,
   sessionReusePolicy,
 } from "@/lib/ranking/strategy";
 import { RankingWorkerClient } from "@/lib/ranking/worker-client";
@@ -160,40 +159,43 @@ function forecastRange(diagnostics?: ModelState["diagnostics"]) {
     return `${forecast.lowerAdditional}–${forecast.upperAdditional} 次`;
   }
   if (forecast.medianAdditional !== undefined) return `约 ${forecast.medianAdditional} 次，上界未定`;
-  if ((forecast.beforeLimitSuccesses ?? -1) === 0 && forecast.remainingCapacity > 0) return "尚未观察到达标路径";
+  if ((forecast.withinProjectionSuccesses ?? forecast.beforeLimitSuccesses ?? -1) === 0) return "尚未观察到达标路径";
   if (forecast.status === "uncertain") return "暂时无法可靠估计";
-  return "已到安全上限";
+  return "正在扩大预测窗口";
 }
 
-function forecastProbability(
-  forecast: StoppingForecast | undefined,
-  horizon: "within20" | "beforeLimit" = "within20",
-) {
+function forecastProjectionProbability(forecast: StoppingForecast | undefined) {
   if (!forecast) return "正在估计";
-  const successes = horizon === "within20" ? forecast.within20Successes : forecast.beforeLimitSuccesses;
-  const probability = horizon === "within20" ? forecast.probabilityWithin20 : forecast.probabilityBeforeLimit;
-  const low = horizon === "within20" ? forecast.probabilityWithin20Low : forecast.probabilityBeforeLimitLow;
-  const high = horizon === "within20" ? forecast.probabilityWithin20High : forecast.probabilityBeforeLimitHigh;
+  const successes = forecast.withinProjectionSuccesses ?? forecast.beforeLimitSuccesses;
+  const probability = forecast.probabilityWithinProjection ?? forecast.probabilityBeforeLimit;
+  const low = forecast.probabilityWithinProjectionLow ?? forecast.probabilityBeforeLimitLow;
+  const high = forecast.probabilityWithinProjectionHigh ?? forecast.probabilityBeforeLimitHigh;
   if (successes === undefined || low === undefined || high === undefined) return percent(probability);
   return `${successes}/${forecast.rolloutCount} · ${percent(probability)}（90% MC ${percent(low)}–${percent(high)}）`;
 }
 
 function stoppingStability(diagnostics?: ModelState["diagnostics"]) {
   if (!diagnostics) return "正在估计";
-  const successes = diagnostics.adjacentBucketStableSamples ?? diagnostics.jointBucketStableSamples;
-  const probability = diagnostics.adjacentBucketStability ?? diagnostics.jointBucketStability;
-  const low = diagnostics.adjacentBucketStabilityLow ?? diagnostics.jointBucketStabilityLow;
-  const high = diagnostics.adjacentBucketStabilityHigh ?? diagnostics.jointBucketStabilityHigh;
+  const successes = diagnostics.coverageTargetStableSamples
+    ?? diagnostics.adjacentBucketStableSamples
+    ?? diagnostics.jointBucketStableSamples;
+  const probability = diagnostics.coverageTargetStability
+    ?? diagnostics.adjacentBucketStability
+    ?? diagnostics.jointBucketStability;
+  const low = diagnostics.coverageTargetStabilityLow
+    ?? diagnostics.adjacentBucketStabilityLow
+    ?? diagnostics.jointBucketStabilityLow;
+  const high = diagnostics.coverageTargetStabilityHigh
+    ?? diagnostics.adjacentBucketStabilityHigh
+    ?? diagnostics.jointBucketStabilityHigh;
   return `${successes}/${diagnostics.sampleCount} · ${percent(probability)}（90% MC ${percent(low)}–${percent(high)}）`;
 }
 
 function stoppingCriterionDetail(diagnostics?: ModelState["diagnostics"]) {
   if (!diagnostics) return "正在估计停止条件";
-  const probability = diagnostics.adjacentBucketStability ?? diagnostics.jointBucketStability;
-  if (!diagnostics.ready && probability < 0.05) {
-    return "停止条件：所有作品最多偏移一档；接近达标时显示联合概率";
-  }
-  return `全局达标 ${stoppingStability(diagnostics)}；停止要求 90% MC 下界达到 90%`;
+  const allowance = diagnostics.allowedCrossTwoBucketCount;
+  const allowanceCopy = allowance === undefined ? "至多 10% 作品" : `最多 ${allowance} 部作品`;
+  return `达标样本 ${stoppingStability(diagnostics)}；每个样本允许${allowanceCopy}跨两档，停止要求 90% MC 下界达到 90%`;
 }
 
 function formatDate(date?: string) {
@@ -462,7 +464,6 @@ function LibraryView({ snapshot, items, sessions, onStart, onResume, onUpgradeSe
   const tagFilter = collectionTagFilter(selectedTags);
   const selectedItems = filterScopeItems({ subjectType: selectedType, collectionTypes: statuses, tagFilter }, items);
   const preset = manualPreset ?? recommendedDistribution(selectedItems.length);
-  const maxComparisons = comparisonLimit(selectedItems.length, budgetMode);
   const derivationTagFilter = collectionTagFilter(derivationDraft?.selectedTags ?? []);
   const derivationItems = derivationDraft
     ? filterScopeItems({ ...derivationDraft.session, tagFilter: derivationTagFilter }, derivationDraft.baseItems)
@@ -564,16 +565,15 @@ function LibraryView({ snapshot, items, sessions, onStart, onResume, onUpgradeSe
       <article className="panel start-panel"><span className="eyebrow">新建排序会话</span><h2>选择本次范围</h2><p>不同媒介会分别建立模型，比较记录可在后续会话中复用。</p>
         <div className="field-group"><span className="field-label" id="collection-status-label">收藏状态</span><div className="chip-row" role="group" aria-labelledby="collection-status-label">{collectionEntries.map(([type, label]) => <button key={type} className={statuses.includes(type) ? "selected" : ""} onClick={() => setStatuses((value) => value.includes(type) ? value.filter((item) => item !== type) : [...value, type])}>{label}</button>)}</div></div>
         <div className="field-group"><label htmlFor="new-session-tag-search">个人标签（全部匹配）</label><TagFilterSelector id="new-session-tag-search" items={baseItems} selectedTags={selectedTags} onChange={setSelectedTags} /><small className="field-help">标签来自你的 Bangumi 收藏；选择多个标签时，作品必须同时包含全部标签。</small></div>
-        <div className="field-group"><label htmlFor="comparison-budget">推断模式</label><select id="comparison-budget" value={budgetMode} onChange={(event) => setBudgetMode(event.target.value as ComparisonBudgetMode)}><option value="quick">快速（推荐）</option><option value="standard">标准</option><option value="thorough">精细</option></select><small className="field-help">{BUDGET_MODE_COPY[budgetMode].description} · 每次回答后动态重估剩余区间，疲劳安全上限 {maxComparisons} 次</small></div>
+        <div className="field-group"><label htmlFor="comparison-budget">推断模式</label><select id="comparison-budget" value={budgetMode} onChange={(event) => setBudgetMode(event.target.value as ComparisonBudgetMode)}><option value="quick">快速（推荐）</option><option value="standard">标准</option><option value="thorough">精细</option></select><small className="field-help">{BUDGET_MODE_COPY[budgetMode].description} · 每次回答后动态重估剩余区间</small></div>
         <div className="field-group"><label htmlFor="distribution-preset">新评分分布</label><select id="distribution-preset" value={preset} onChange={(event) => setManualPreset(event.target.value as DistributionPreset)}><option value="uniform">均匀 1–10</option><option value="preserve">保持原分布</option><option value="high-tail">高分辨率尾部</option><option value="reverse-j">反 J 分布</option><option value="custom">自定义权重</option></select><small className="field-help">{manualPreset === undefined ? `已按 ${selectedItems.length} 个条目的规模自动推荐` : "已使用手动选择"}</small>{preset === "reverse-j" && <small className="field-help">约 50% 为 1 分、25% 为 2 分，越高分档越稀有；8–10 分各约 1%。</small>}{preset === "custom" && <DistributionWeights weights={customWeights} onChange={setCustomWeights} />}</div>
         <div className="field-group"><label htmlFor="reuse-policy">历史判断</label><select id="reuse-policy" value={comparisonReusePolicy} onChange={(event) => setComparisonReusePolicy(event.target.value as ComparisonReusePolicy)}><option value="snapshot">复用同一快照（推荐）</option><option value="session">本会话从零开始</option><option value="profile">复用所有历史快照</option></select><small className="field-help">新快照默认不继承旧偏好，避免长期漂移被历史判断锁定。</small></div>
-        <div className="field-group"><span className="field-label">停止标准</span><small className="field-help">所有作品相对当前 1–10 分桶最多偏移一档的后验概率，其 90% 蒙特卡洛下界达到 90%。评分分布会决定分桶边界。</small></div>
+        <div className="field-group"><span className="field-label">停止标准</span><small className="field-help">至少 90% 的作品相对当前 1–10 分桶最多偏移一档；在当前 {selectedItems.length} 部作品中，允许最多 {allowedCrossTwoBucketCount(selectedItems.length)} 部跨两档。该事件的后验概率之 90% 蒙特卡洛下界须达到 90%。</small></div>
         {error && <Notice tone="error">{error}</Notice>}
         <button className="primary-button" onClick={start} disabled={busy || selectedItems.length < 2}>{busy ? "正在准备模型…" : `开始${BUDGET_MODE_COPY[budgetMode].label}比较 · 动态停止`}<span>→</span></button>
       </article>
     </section>
     <section className="sessions-section"><div className="section-title"><div><span className="eyebrow">排序会话</span><h2>继续或管理已有判断</h2></div></div>{sessions.length === 0 ? <div className="empty-row">还没有会话，选择范围后开始第一次比较。</div> : <div className="session-list">{sessions.map((session) => {
-      const sessionItemCount = filterScopeItems(session, items).length;
       const usesCurrentSnapshot = session.snapshotId === snapshot.id;
       const upgradedAlready = sessions.some((candidate) =>
         candidate.snapshotId === snapshot.id && candidate.upgradedFromSessionId === session.id);
@@ -586,7 +586,7 @@ function LibraryView({ snapshot, items, sessions, onStart, onResume, onUpgradeSe
       return <article className="session-row" key={session.id}>
         <button className="session-open" disabled={actionBusy} onClick={() => onResume(session.id)}>
           <span className="session-type">{SUBJECT_TYPES[session.subjectType]}</span>
-          <div><strong>{session.title}</strong><small>{BUDGET_MODE_COPY[sessionBudgetMode(session)].label}模式 · {usesCurrentSnapshot ? "当前收藏" : "旧收藏"} · {historyLabel} · 上限 {sessionComparisonLimit(session, sessionItemCount)} 次 · 更新于 {formatDate(session.updatedAt)}</small><small>标签范围：{tagFilterSummary(session.tagFilter)}</small></div>
+          <div><strong>{session.title}</strong><small>{BUDGET_MODE_COPY[sessionBudgetMode(session)].label}模式 · {usesCurrentSnapshot ? "当前收藏" : "旧收藏"} · {historyLabel} · 更新于 {formatDate(session.updatedAt)}</small><small>标签范围：{tagFilterSummary(session.tagFilter)}</small></div>
           <span className={`session-status ${session.status}`}>{session.status === "complete" ? "已稳定" : "进行中"}</span><b>→</b>
         </button>
         <div className="session-actions">
@@ -626,14 +626,15 @@ function CompareView({ state, busy, scoresVisible, onToggleScores, onAnswer, onU
     : 100 * (1 - expectedViolations / Math.max(1, state.items.length));
   const calibrationAvailable = (diagnostics?.calibration.completed ?? 0) > 0;
   const forecast = diagnostics?.forecast;
-  if (!left || !right) return <div className="center-message"><h2>{diagnostics?.fatigueReached ? "已达到疲劳安全上限" : "暂时没有可比较的条目"}</h2><p>{diagnostics?.fatigueReached ? `本会话已完成 ${currentSessionAccepted} 次有效判断；系统不会用继续疲劳作答换取虚假的确定性。` : "你可以查看当前结果，或返回收藏调整范围。"}</p><button className="primary-button" onClick={onResults}>查看结果</button></div>;
+  const projectionSuccesses = forecast?.withinProjectionSuccesses ?? forecast?.beforeLimitSuccesses;
+  if (!left || !right) return <div className="center-message"><h2>暂时没有可比较的条目</h2><p>你可以查看当前结果，或返回收藏调整范围。</p><button className="primary-button" onClick={onResults}>查看结果</button></div>;
   return <>
     <header className="topbar"><div><span className="eyebrow">{SUBJECT_TYPES[state.session.subjectType]} · {BUDGET_MODE_COPY[budgetMode].label}模式 · {state.session.title}</span><h1>哪一部在你的偏好中更靠前？</h1></div><button className="ghost-button" onClick={onToggleScores}>{scoresVisible ? "隐藏原评分" : "显示原评分"}</button></header>
     <div className="progress-row dynamic-progress"><div className="progress-copy"><span>本次已完成 <strong>{currentSessionAccepted}</strong> 次</span><span>预计跨两档 <strong>{crossTwoBucketValue(diagnostics)}</strong></span><span>最坏偏移中位数 <strong>{maxBucketDisplacementValue(diagnostics)}</strong></span></div><div className="progress-track" aria-label={`相邻容差平均覆盖 ${Math.round(toleranceCoverage)}%`}><span style={{ width: `${toleranceCoverage}%` }} /></div><div className="forecast-row"><span>跨两档作品分布 <strong>{crossTwoBucketInterval(diagnostics)}</strong></span><span>最坏偏移分布 <strong>{maxBucketDisplacementInterval(diagnostics)}</strong></span><span>动态剩余预测 <strong>{forecastRange(diagnostics)}</strong></span></div></div>
     {currentSessionAccepted > 0 && currentSessionAccepted % 20 === 0 && <Notice tone="warning">你已经完成 {currentSessionAccepted} 次判断，建议现在下载一次 JSON 备份。</Notice>}
-    {targetReady && <Notice tone="success">“所有作品最多偏移一档”的后验可信度下界已经达到 90%。可以导出结果，也可以继续比较。</Notice>}
-    {!targetReady && forecast?.beforeLimitSuccesses === 0 && forecast.remainingCapacity > 0 && <Notice>本轮上限前达标模拟为 {forecastProbability(forecast, "beforeLimit")}；未观察到成功不是不可达证明。再完成 {forecast.nextCheckpoint} 次后会用新证据重估。</Notice>}
-    {!targetReady && forecast?.beforeLimitSuccesses !== 0 && forecast?.status !== "limit" && (forecast?.nextCheckpoint ?? 0) > 0 && <Notice>这是模型模拟，不是承诺题量；再完成 {forecast?.nextCheckpoint} 次后系统会用新证据重新估计。</Notice>}
+    {targetReady && <Notice tone="success">“至少 90% 的作品最多偏移一档”的后验可信度下界已经达到 90%。可以导出结果，也可以继续比较。</Notice>}
+    {!targetReady && projectionSuccesses === 0 && <Notice>本轮预测窗口内达标模拟为 {forecastProjectionProbability(forecast)}；未观察到成功不是不可达证明。再完成 {forecast?.nextCheckpoint} 次后会用新证据重估。</Notice>}
+    {!targetReady && projectionSuccesses !== 0 && (forecast?.nextCheckpoint ?? 0) > 0 && <Notice>这是模型模拟，不是承诺题量；再完成 {forecast?.nextCheckpoint} 次后系统会用新证据重新估计。</Notice>}
     {!targetReady && diagnostics && diagnostics.evidenceCount < diagnostics.evidenceRequired && <Notice>至少需要 {diagnostics.evidenceRequired} 次本会话有效判断；目前为 {diagnostics.evidenceCount} 次。</Notice>}
     {calibrationAvailable && <Notice>复问 {diagnostics?.calibration.consistent}/{diagnostics?.calibration.completed} 次一致；后验一致率 {percent(diagnostics?.calibration.posteriorMean)}，80% 区间 {percent(diagnostics?.calibration.credibleLow)}–{percent(diagnostics?.calibration.credibleHigh)}。该指标仅反映判断波动，不影响停止。</Notice>}
     <section className={`comparison-stage ${busy ? "busy" : ""}`} aria-busy={busy}>
@@ -827,7 +828,7 @@ function ResultsView({ state, busy, onBack, onDistribution, onExportCsv, onAddCo
   const diagnostics = state.model.diagnostics;
   return <>
     <header className="page-header"><div><span className="eyebrow">排序结果 · {BUDGET_MODE_COPY[sessionBudgetMode(state.session)].label}模式</span><h1>你的偏好序列</h1><p>{result.length} 个{SUBJECT_TYPES[state.session.subjectType]}条目 · {changed} 个评分发生变化 · 原评分已作为模型先验</p></div><div className="header-actions"><button className="outline-button" onClick={onBack}>继续比较</button><button className="primary-button compact" onClick={() => onExportCsv(result)}>导出 CSV</button></div></header>
-    <section className="result-summary"><article className="panel"><div className="panel-title"><div><span className="eyebrow">评分分布对比</span><h2>原评分 → 新评分</h2></div><select id="result-distribution-preset" value={state.session.distribution.preset} disabled={busy} onChange={(event) => { const preset = event.target.value as DistributionPreset; void onDistribution(distributionConfig(preset, state.session.distribution.weights)); }}><option value="uniform">均匀 1–10</option><option value="preserve">保持原分布</option><option value="high-tail">高分辨率尾部</option><option value="reverse-j">反 J 分布</option><option value="custom">自定义权重</option></select></div>{state.session.distribution.preset === "custom" && <CustomDistributionEditor key={state.session.id} weights={state.session.distribution.weights} busy={busy} onApply={(weights) => onDistribution({ preset: "custom", weights })} />}<Histogram items={state.items} result={result} /><div className="chart-legend"><span><i className="old" />原评分</span><span><i className="new" />新评分</span></div></article><article className="summary-stat"><span>预计跨两档作品</span><strong>{crossTwoBucketValue(diagnostics)}</strong><small>{crossTwoBucketInterval(diagnostics)}</small><div className="summary-forecast"><span>动态剩余预测</span><b>{forecastRange(diagnostics)}</b><small>{stoppingCriterionDetail(diagnostics)}</small></div><hr /><span>最坏偏移</span><strong>{maxBucketDisplacementValue(diagnostics)}</strong><small>{maxBucketDisplacementInterval(diagnostics)}；目标为不超过 1 档。{diagnostics?.calibration.completed ? `复问 ${diagnostics.calibration.consistent}/${diagnostics.calibration.completed} 次一致，后验 ${percent(diagnostics.calibration.posteriorMean)}（仅作诊断）` : "尚无校准复问；区间仅代表模型内近似"}</small></article></section>
+    <section className="result-summary"><article className="panel"><div className="panel-title"><div><span className="eyebrow">评分分布对比</span><h2>原评分 → 新评分</h2></div><select id="result-distribution-preset" value={state.session.distribution.preset} disabled={busy} onChange={(event) => { const preset = event.target.value as DistributionPreset; void onDistribution(distributionConfig(preset, state.session.distribution.weights)); }}><option value="uniform">均匀 1–10</option><option value="preserve">保持原分布</option><option value="high-tail">高分辨率尾部</option><option value="reverse-j">反 J 分布</option><option value="custom">自定义权重</option></select></div>{state.session.distribution.preset === "custom" && <CustomDistributionEditor key={state.session.id} weights={state.session.distribution.weights} busy={busy} onApply={(weights) => onDistribution({ preset: "custom", weights })} />}<Histogram items={state.items} result={result} /><div className="chart-legend"><span><i className="old" />原评分</span><span><i className="new" />新评分</span></div></article><article className="summary-stat"><span>预计跨两档作品</span><strong>{crossTwoBucketValue(diagnostics)}</strong><small>{crossTwoBucketInterval(diagnostics)}</small><div className="summary-forecast"><span>动态剩余预测</span><b>{forecastRange(diagnostics)}</b><small>{stoppingCriterionDetail(diagnostics)}</small></div><hr /><span>最坏偏移</span><strong>{maxBucketDisplacementValue(diagnostics)}</strong><small>{maxBucketDisplacementInterval(diagnostics)}；仅作尾部诊断，停止条件允许最多 10% 的作品跨两档。{diagnostics?.calibration.completed ? `复问 ${diagnostics.calibration.consistent}/${diagnostics.calibration.completed} 次一致，后验 ${percent(diagnostics.calibration.posteriorMean)}（仅作诊断）` : "尚无校准复问；区间仅代表模型内近似"}</small></article></section>
     <ComparisonManager key={state.session.id} items={result} history={state.history} sessionId={state.session.id} busy={busy} onAdd={onAddComparison} onDelete={onDeleteComparison} />
     <section className="ranking-table-wrap"><table className="ranking-table"><thead><tr><th>名次</th><th>条目</th><th>原评分</th><th>新评分</th><th>精确分桶稳定度</th><th>模型分</th><th>后验标准差</th><th /></tr></thead><tbody>{result.map((item) => <tr key={item.subjectId}><td><strong>#{item.rank}</strong></td><td><div className="title-cell"><Poster item={item} /><div><strong>{primaryName(item)}</strong><small>{item.nameCn ? item.name : `${item.date?.slice(0, 4) || ""} · ${SUBJECT_TYPES[item.subjectType]}`}</small></div></div></td><td><span className="score-pill old">{item.rate}</span></td><td><span className={`score-pill new ${item.newRate !== item.rate ? "changed" : ""}`}>{item.newRate}</span></td><td>{item.bucketStability === undefined ? "—" : percent(item.bucketStability)}</td><td>{item.ability.toFixed(3)}</td><td>{item.uncertainty.toFixed(3)}</td><td><a href={`https://bgm.tv/subject/${item.subjectId}`} target="_blank" rel="noreferrer" aria-label={`在 Bangumi 打开 ${primaryName(item)}`}>↗</a></td></tr>)}</tbody></table></section>
   </>;
@@ -903,7 +904,7 @@ export default function ResorterApp() {
     return workerRef.current.run({ type: operation, sessionId: session.id, version, randomSeed: session.randomSeed,
       items: sessionItems.map((item) => ({ subjectId: item.subjectId, rate: item.rate })),
       history: toRankingHistory(history), distribution,
-      maxComparisons: sessionComparisonLimit(session, sessionItems.length), previousModel, ...tuning });
+      previousModel, ...tuning });
   }
 
   async function openSession(sessionId: string) {

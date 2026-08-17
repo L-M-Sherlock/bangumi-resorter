@@ -95,7 +95,7 @@ export interface SortingSession {
   stoppingTarget?: "top-tail" | "all-buckets";
   /** Legacy pre-dynamic-budget hint. Kept only so older backups remain readable. */
   suggestedComparisons?: number;
-  /** Safety stop for fatigue; this is not a completion target. */
+  /** @deprecated Pre-0.13 hard cap; ignored and removed during database upgrade/import. */
   maxComparisons?: number;
   /** Set when this session was forked onto a newer collection snapshot. */
   upgradedFromSessionId?: string;
@@ -139,6 +139,12 @@ export interface ComparisonRecord {
   /** Missing on pre-0.4 records, which are ordinary adaptive questions. */
   queryKind?: QueryKind;
   calibrationOfComparisonId?: string;
+  /**
+   * Canonical source judgment when this record was materialized into a derived
+   * or upgraded session. Inherited copies are local to their child session and
+   * must not be reused outward as additional evidence.
+   */
+  inheritedFromComparisonId?: string;
   acceptedCountAtAnswer: number;
   active: boolean;
   createdAt: string;
@@ -163,7 +169,7 @@ export interface CalibrationDiagnostics {
 export type StoppingForecastStatus = "ready" | "forecast" | "uncertain" | "limit";
 
 export interface StoppingForecast {
-  method: "posterior-contraction-mc-v1" | "posterior-contraction-mc-v2";
+  method: "posterior-contraction-mc-v1" | "posterior-contraction-mc-v2" | "posterior-contraction-mc-v3" | "posterior-contraction-mc-v4";
   status: StoppingForecastStatus;
   rolloutCount: number;
   /** Additional accepted answers at the 10th, 50th, and 90th stopping-time percentiles. */
@@ -172,19 +178,25 @@ export interface StoppingForecast {
   upperAdditional?: number;
   nextCheckpoint: number;
   probabilityWithin20: number;
-  probabilityBeforeLimit: number;
+  projectionHorizon: number;
+  probabilityWithinProjection: number;
   /** Successful rollouts and central 90% Wilson Monte Carlo interval. */
   within20Successes?: number;
   probabilityWithin20Low?: number;
   probabilityWithin20High?: number;
+  withinProjectionSuccesses?: number;
+  probabilityWithinProjectionLow?: number;
+  probabilityWithinProjectionHigh?: number;
+  /** @deprecated Pre-0.13 forecast fields retained for old serialized models. */
+  probabilityBeforeLimit?: number;
   beforeLimitSuccesses?: number;
   probabilityBeforeLimitLow?: number;
   probabilityBeforeLimitHigh?: number;
-  remainingCapacity: number;
+  remainingCapacity?: number;
 }
 
 export interface RankingDiagnostics {
-  method: "laplace-mc-v1" | "laplace-mc-v2" | "laplace-mc-v3";
+  method: "laplace-mc-v1" | "laplace-mc-v2" | "laplace-mc-v3" | "laplace-mc-v4";
   sampleCount: number;
   /** Per-item probability of remaining in the exact current bucket. */
   bucketStability: Record<number, number>;
@@ -202,6 +214,15 @@ export interface RankingDiagnostics {
   /** Central 90% Monte Carlo interval for adjacentBucketStability. */
   adjacentBucketStabilityLow: number;
   adjacentBucketStabilityHigh: number;
+  /** Posterior probability that at least 90% of items remain within one bucket. */
+  coverageTargetStability: number;
+  coverageTargetStableSamples: number;
+  /** Central 90% Monte Carlo interval for coverageTargetStability. */
+  coverageTargetStabilityLow: number;
+  coverageTargetStabilityHigh: number;
+  /** Integer form of the 90%-of-items stopping event for this collection size. */
+  requiredAdjacentStableItemCount: number;
+  allowedCrossTwoBucketCount: number;
   /** Posterior distribution of items moving more than one bucket: mean and central 80% interval. */
   expectedCrossTwoBucketCount?: number;
   crossTwoBucketCountMedian?: number;
@@ -212,11 +233,13 @@ export interface RankingDiagnostics {
   maxBucketDisplacementHigh?: number;
   expectedBucketChangeRate: number;
   minBucketStability: number;
-  /** Conservative adjacent-bucket constraint ratio; at or below 1 is acceptable. */
+  /** Conservative 90%-coverage stopping-event risk ratio; at or below 1 is acceptable. */
   decisionRiskRatio: number;
   evidenceCount: number;
   evidenceRequired: number;
+  /** @deprecated Pre-0.13 diagnostics; no longer used to block comparisons. */
   fatigueLimit?: number;
+  /** @deprecated Pre-0.13 diagnostics; no longer used to block comparisons. */
   fatigueReached?: boolean;
   ready: boolean;
   calibration: CalibrationDiagnostics;
@@ -326,4 +349,4 @@ export const DISTRIBUTIONS: Record<Exclude<DistributionPreset, "custom">, number
   "reverse-j": [50, 25, 14, 4, 2, 1, 1, 1, 1, 1],
 };
 
-export const APP_VERSION = "0.11.0";
+export const APP_VERSION = "0.13.0";

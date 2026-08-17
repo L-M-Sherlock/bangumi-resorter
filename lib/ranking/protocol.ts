@@ -11,7 +11,6 @@ export interface RankingRequest {
   items: RankingItemInput[];
   history: RankingHistoryInput[];
   distribution: DistributionConfig;
-  maxComparisons: number;
   previousModel?: ModelState;
   priorStrength?: number;
   priorScale?: number;
