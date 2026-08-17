@@ -12,6 +12,10 @@ export interface RankingRequest {
   comparisons: RankingComparisonInput[];
   skips: PairSkipInput[];
   previousModel?: ModelState;
+  priorStrength?: number;
+  priorScale?: number;
+  maxRateGap?: number;
+  maxRankDistance?: number;
 }
 
 export interface RankingSuccess {

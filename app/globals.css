@@ -118,6 +118,7 @@ input:focus, select:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgb
 .bar-new { right: 8%; background: var(--accent); }
 .start-panel { display: flex; flex-direction: column; }
 .field-group { margin: 4px 0 16px; display: grid; gap: 8px; }
+.field-help { color: var(--muted); font-size: 9px; line-height: 1.5; }
 .weight-editor { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; }
 .weight-editor label { gap: 4px; color: var(--muted); font-size: 8px; text-align: center; }
 .weight-editor input { min-height: 32px; padding: 0 4px; text-align: center; font-size: 10px; }

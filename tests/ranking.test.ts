@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildRankedItems, chooseNextPair, fitModel, toModelState } from "../lib/ranking/engine";
+import { comparisonBudget, rankingTuning } from "../lib/ranking/strategy";
 import type { CollectionItem, RankingComparisonInput } from "../lib/types";
 
 const inputs = [
@@ -49,6 +50,25 @@ describe("Bradley–Terry ranking engine", () => {
       acceptedCountAtAnswer: model.acceptedComparisons,
     }], model, 42);
     expect(new Set([cooled!.leftSubjectId, cooled!.rightSubjectId])).not.toEqual(new Set([first!.leftSubjectId, first!.rightSubjectId]));
+  });
+
+  it("uses a strong score prior and focuses quick questions within score buckets", () => {
+    const rated = [{ subjectId: 1, rate: 9 }, { subjectId: 2, rate: 9 }, { subjectId: 3, rate: 6 }];
+    const tuning = rankingTuning("quick");
+    const fit = fitModel(rated, [], undefined, tuning);
+    expect(fit.abilities[1] - fit.abilities[3]).toBeCloseTo(1.95, 8);
+    const model = toModelState("quick", 0, fit);
+    const pair = chooseNextPair(rated, [], [], model, 9, tuning);
+    expect(new Set([pair?.leftSubjectId, pair?.rightSubjectId])).toEqual(new Set([1, 2]));
+    expect(chooseNextPair([{ subjectId: 1, rate: 10 }, { subjectId: 2, rate: 1 }], [], [], model, 9, tuning)).toBeDefined();
+  });
+
+  it("caps quick mode for large libraries", () => {
+    expect(comparisonBudget(1, "quick")).toBe(0);
+    expect(comparisonBudget(16, "quick")).toBe(16);
+    expect(comparisonBudget(400, "quick")).toBe(80);
+    expect(comparisonBudget(400, "standard")).toBe(400);
+    expect(comparisonBudget(400, "thorough")).toBe(800);
   });
 
   it("maps scores to uniform, preserved, and zero-safe custom distributions", () => {

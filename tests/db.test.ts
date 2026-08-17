@@ -19,6 +19,8 @@ describe("IndexedDB project persistence", () => {
     const items = createDemoItems(snapshotId).slice(0, 3);
     const snapshot = await saveSnapshot({ username: "demo", nickname: "Demo" }, snapshotId, items);
     const session = await createSession(snapshot, 2, [2], { preset: "uniform", weights: Array(10).fill(10) });
+    expect(session.budgetMode).toBe("quick");
+    expect(session.suggestedComparisons).toBe(7);
     const fitted = fitModel(items.map(({ subjectId, rate }) => ({ subjectId, rate })), []);
     const model = toModelState(session.id, 0, fitted);
     await initializeModel(session.id, model);

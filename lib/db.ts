@@ -5,6 +5,7 @@ import {
   APP_VERSION,
   CollectionItem,
   CollectionType,
+  ComparisonBudgetMode,
   ComparisonOutcome,
   ComparisonRecord,
   DistributionConfig,
@@ -16,6 +17,7 @@ import {
   SortingSession,
   SubjectType,
 } from "./types";
+import { comparisonBudget } from "./ranking/strategy";
 
 interface MetaRecord { key: string; value: string; }
 
@@ -92,6 +94,7 @@ export async function createSession(
   subjectType: SubjectType,
   collectionTypes: CollectionType[],
   distribution: DistributionConfig,
+  budgetMode: ComparisonBudgetMode = "quick",
 ): Promise<SortingSession> {
   const all = await getSnapshotItems(snapshot.id);
   const selected = all.filter((item) => item.subjectType === subjectType && collectionTypes.includes(item.collectionType));
@@ -101,7 +104,7 @@ export async function createSession(
     id: id(), profileId: snapshot.profileId, snapshotId: snapshot.id, subjectType, collectionTypes,
     title: `${snapshot.username} 的排序`, status: "active", distribution,
     randomSeed: crypto.getRandomValues(new Uint32Array(1))[0], modelVersion: 0,
-    suggestedComparisons: selected.length, createdAt: timestamp, updatedAt: timestamp,
+    budgetMode, suggestedComparisons: comparisonBudget(selected.length, budgetMode), createdAt: timestamp, updatedAt: timestamp,
   };
   const links = selected.map<SessionItem>((item) => ({ id: `${session.id}:${item.subjectId}`, sessionId: session.id, subjectId: item.subjectId }));
   await db.transaction("rw", db.sessions, db.sessionItems, async () => {

@@ -9,7 +9,8 @@ import {
   RankingItemInput,
 } from "../types";
 
-const LAMBDA = 0.25;
+const DEFAULT_PRIOR_STRENGTH = 0.25;
+const DEFAULT_PRIOR_SCALE = 0.35;
 const MAX_OUTER = 50;
 const GRADIENT_TOLERANCE = 1e-6;
 const PCG_TOLERANCE = 1e-4;
@@ -27,6 +28,16 @@ export interface FitResult {
   converged: boolean;
   iterations: number;
   acceptedComparisons: number;
+}
+
+export interface FitOptions {
+  priorStrength?: number;
+  priorScale?: number;
+}
+
+export interface PairSelectionOptions {
+  maxRateGap?: number;
+  maxRankDistance?: number;
 }
 
 function sigmoid(value: number) {
@@ -48,16 +59,16 @@ function dot(a: Float64Array, b: Float64Array) {
   return sum;
 }
 
-function evaluate(theta: Float64Array, prior: Float64Array, comparisons: IndexedComparison[]) {
+function evaluate(theta: Float64Array, prior: Float64Array, comparisons: IndexedComparison[], priorStrength: number) {
   const gradient = new Float64Array(theta.length);
   const diagonal = new Float64Array(theta.length);
-  diagonal.fill(LAMBDA);
+  diagonal.fill(priorStrength);
   let objective = 0;
 
   for (let i = 0; i < theta.length; i += 1) {
     const diff = theta[i] - prior[i];
-    objective -= 0.5 * LAMBDA * diff * diff;
-    gradient[i] -= LAMBDA * diff;
+    objective -= 0.5 * priorStrength * diff * diff;
+    gradient[i] -= priorStrength * diff;
   }
 
   const weights = new Float64Array(comparisons.length);
@@ -81,9 +92,10 @@ function hessianProduct(
   vector: Float64Array,
   comparisons: IndexedComparison[],
   weights: Float64Array,
+  priorStrength: number,
 ) {
   const output = new Float64Array(vector.length);
-  for (let i = 0; i < vector.length; i += 1) output[i] = LAMBDA * vector[i];
+  for (let i = 0; i < vector.length; i += 1) output[i] = priorStrength * vector[i];
   for (let k = 0; k < comparisons.length; k += 1) {
     const { left, right } = comparisons[k];
     const weightedDifference = weights[k] * (vector[left] - vector[right]);
@@ -98,6 +110,7 @@ function solvePcg(
   diagonal: Float64Array,
   comparisons: IndexedComparison[],
   weights: Float64Array,
+  priorStrength: number,
 ) {
   const size = gradient.length;
   const solution = new Float64Array(size);
@@ -110,7 +123,7 @@ function solvePcg(
   const maxIterations = Math.max(1, Math.min(200, size));
 
   for (let iteration = 0; iteration < maxIterations; iteration += 1) {
-    const product = hessianProduct(direction, comparisons, weights);
+    const product = hessianProduct(direction, comparisons, weights, priorStrength);
     const denominator = dot(direction, product);
     if (!Number.isFinite(denominator) || denominator <= 0) break;
     const alpha = residualDotZ / denominator;
@@ -132,6 +145,7 @@ export function fitModel(
   items: RankingItemInput[],
   comparisonsInput: RankingComparisonInput[],
   previousAbilities?: Record<number, number>,
+  options: FitOptions = {},
 ): FitResult {
   if (items.length === 0) {
     return { abilities: {}, uncertainty: {}, meanUncertainty: 0, converged: true, iterations: 0, acceptedComparisons: 0 };
@@ -145,7 +159,9 @@ export function fitModel(
     comparisons.push({ left, right, y: comparison.outcome === "left" ? 1 : comparison.outcome === "right" ? 0 : 0.5 });
   }
 
-  const prior = new Float64Array(items.map((item) => 0.35 * (item.rate - 5.5)));
+  const priorStrength = Math.max(1e-6, options.priorStrength ?? DEFAULT_PRIOR_STRENGTH);
+  const priorScale = Math.max(0, options.priorScale ?? DEFAULT_PRIOR_SCALE);
+  const prior = new Float64Array(items.map((item) => priorScale * (item.rate - 5.5)));
   let theta = new Float64Array(items.map((item, index) => {
     const previous = previousAbilities?.[item.subjectId];
     return previous !== undefined && Number.isFinite(previous) ? previous : prior[index];
@@ -154,14 +170,14 @@ export function fitModel(
   let iterations = 0;
 
   for (iterations = 0; iterations < MAX_OUTER; iterations += 1) {
-    const current = evaluate(theta, prior, comparisons);
+    const current = evaluate(theta, prior, comparisons, priorStrength);
     let gradientInfinityNorm = 0;
     for (const value of current.gradient) gradientInfinityNorm = Math.max(gradientInfinityNorm, Math.abs(value));
     if (gradientInfinityNorm < GRADIENT_TOLERANCE) {
       converged = true;
       break;
     }
-    let step = solvePcg(current.gradient, current.diagonal, comparisons, current.weights);
+    let step = solvePcg(current.gradient, current.diagonal, comparisons, current.weights, priorStrength);
     let directionalDerivative = dot(current.gradient, step);
     if (!Number.isFinite(directionalDerivative) || directionalDerivative <= 0) {
       step = new Float64Array(step.length);
@@ -173,7 +189,7 @@ export function fitModel(
     for (let lineIteration = 0; lineIteration < 20; lineIteration += 1) {
       const candidate = new Float64Array(theta.length);
       for (let i = 0; i < theta.length; i += 1) candidate[i] = theta[i] + scale * step[i];
-      const candidateObjective = evaluate(candidate, prior, comparisons).objective;
+      const candidateObjective = evaluate(candidate, prior, comparisons, priorStrength).objective;
       if (Number.isFinite(candidateObjective) && candidateObjective >= current.objective + 1e-4 * scale * directionalDerivative) {
         theta = candidate;
         accepted = true;
@@ -184,7 +200,7 @@ export function fitModel(
     if (!accepted) break;
   }
 
-  const finalEvaluation = evaluate(theta, prior, comparisons);
+  const finalEvaluation = evaluate(theta, prior, comparisons, priorStrength);
   const abilities: Record<number, number> = {};
   const uncertainty: Record<number, number> = {};
   let meanUncertainty = 0;
@@ -215,6 +231,7 @@ export function chooseNextPair(
   skips: PairSkipInput[],
   model: Pick<ModelState, "abilities" | "uncertainty" | "acceptedComparisons" | "version">,
   randomSeed: number,
+  options: PairSelectionOptions = {},
 ): NextPair | undefined {
   if (items.length < 2) return undefined;
   const ordered = [...items].sort((a, b) =>
@@ -226,24 +243,32 @@ export function chooseNextPair(
     .filter((entry) => model.acceptedComparisons - entry.acceptedCountAtAnswer < 20)
     .map((entry) => pairKey(entry.leftSubjectId, entry.rightSubjectId)));
 
-  function select(ignoreCooldown: boolean) {
+  const maxRankDistance = Math.max(1, options.maxRankDistance ?? 3);
+  const maxRateGap = Math.max(0, options.maxRateGap ?? 10);
+
+  function select(ignoreCooldown: boolean, ignoreRateGap: boolean) {
     let best: { first: number; second: number; score: number } | undefined;
-    for (let distance = 1; distance <= Math.min(3, ordered.length - 1); distance += 1) {
+    for (let distance = 1; distance <= Math.min(maxRankDistance, ordered.length - 1); distance += 1) {
       for (let i = 0; i + distance < ordered.length; i += 1) {
-        const first = ordered[i].subjectId;
-        const second = ordered[i + distance].subjectId;
+        const firstItem = ordered[i];
+        const secondItem = ordered[i + distance];
+        const first = firstItem.subjectId;
+        const second = secondItem.subjectId;
         const key = pairKey(first, second);
         if (!ignoreCooldown && cooled.has(key)) continue;
+        const rateGap = Math.abs(firstItem.rate - secondItem.rate);
+        if (!ignoreRateGap && rateGap > maxRateGap) continue;
         const probability = sigmoid((model.abilities[first] ?? 0) - (model.abilities[second] ?? 0));
         const variance = (model.uncertainty[first] ?? 2) ** 2 + (model.uncertainty[second] ?? 2) ** 2;
-        const score = probability * (1 - probability) * variance / (1 + (counts.get(key) ?? 0));
+        const bucketFocus = rateGap === 0 ? 1.2 : rateGap === 1 ? 1.05 : 1;
+        const score = probability * (1 - probability) * variance * bucketFocus / (1 + (counts.get(key) ?? 0));
         if (!best || score > best.score || (score === best.score && key < pairKey(best.first, best.second))) best = { first, second, score };
       }
     }
     return best;
   }
 
-  const best = select(false) ?? select(true);
+  const best = select(false, false) ?? select(false, true) ?? select(true, false) ?? select(true, true);
   if (!best) return undefined;
   const flip = hash(`${randomSeed}:${model.version}:${pairKey(best.first, best.second)}`) % 2 === 1;
   const leftSubjectId = flip ? best.second : best.first;

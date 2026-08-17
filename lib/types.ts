@@ -19,6 +19,7 @@ export type CollectionType = keyof typeof COLLECTION_TYPES;
 export type ComparisonOutcome = "left" | "tie" | "right" | "skip";
 export type SessionStatus = "active" | "complete";
 export type DistributionPreset = "uniform" | "preserve" | "high-tail" | "custom";
+export type ComparisonBudgetMode = "quick" | "standard" | "thorough";
 
 export interface SubjectImages {
   large?: string;
@@ -78,6 +79,8 @@ export interface SortingSession {
   distribution: DistributionConfig;
   randomSeed: number;
   modelVersion: number;
+  /** Missing only on backups created before comparison budgets were introduced. */
+  budgetMode?: ComparisonBudgetMode;
   suggestedComparisons: number;
   createdAt: string;
   updatedAt: string;
@@ -188,4 +191,4 @@ export const DISTRIBUTIONS: Record<Exclude<DistributionPreset, "custom">, number
   "high-tail": [3, 5, 8, 14, 20, 20, 12, 8, 6, 4],
 };
 
-export const APP_VERSION = "0.1.0";
+export const APP_VERSION = "0.2.0";
