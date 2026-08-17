@@ -87,6 +87,7 @@ input:focus, select:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgb
 .page-header h1, .topbar h1 { margin: 8px 0 0; font: 700 clamp(27px, 3vw, 40px)/1.12 Georgia, "Songti SC", serif; letter-spacing: -.02em; }
 .page-header p { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
 .header-actions { display: flex; gap: 8px; }
+.header-select { width: auto; min-height: 40px; padding: 0 30px 0 12px; border-color: var(--line); background-color: rgba(255,255,255,.45); font-size: 11px; }
 .ghost-button { padding: 9px 13px; color: var(--muted); border: 1px solid var(--line); border-radius: 7px; background: transparent; font-size: 12px; }
 .ghost-button:hover { color: var(--ink); background: var(--panel); }
 .notice { margin-bottom: 16px; padding: 12px 14px; border: 1px solid; border-radius: 8px; font-size: 12px; line-height: 1.5; }

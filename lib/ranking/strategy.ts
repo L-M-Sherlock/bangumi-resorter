@@ -21,6 +21,7 @@ export const BUDGET_MODE_COPY: Record<ComparisonBudgetMode, { label: string; des
 };
 
 export const STOPPING_STABLE_ITEM_FRACTION = 0.9;
+export const STOPPING_PROBABILITY_TARGET = 0.9;
 
 /** Minimum number of items that must remain within one score bucket in a posterior draw. */
 export function requiredAdjacentStableItemCount(itemCount: number) {

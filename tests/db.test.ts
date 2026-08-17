@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { createDemoItems } from "../lib/demo";
 import { fitModel, toModelState } from "../lib/ranking/engine";
 import {
-  commitComparisonDeletion, commitResponse, commitSessionDistribution, createSession, db, deleteSession, deriveSessionWithTagFilter, exportProject, getSessionBundle, importProject,
+  commitComparisonDeletion, commitResponse, commitSessionBudgetMode, commitSessionDistribution, createSession, db, deleteSession, deriveSessionWithTagFilter, exportProject, getSessionBundle, importProject,
   initializeModel, lastActiveResponse, previewSessionTagDerivation, previewSessionUpgrade, saveSnapshot, upgradeSessionToSnapshot,
 } from "../lib/db";
 import type { ComparisonRecord } from "../lib/types";
@@ -422,6 +422,27 @@ describe("IndexedDB project persistence", () => {
     const bundle = await getSessionBundle(session.id);
     expect(bundle?.session.modelVersion).toBe(1);
     expect(bundle?.session.distribution.preset).toBe("reverse-j");
+    expect(bundle?.model?.version).toBe(1);
+  });
+
+  it("atomically changes inference mode without replacing session history", async () => {
+    const snapshotId = crypto.randomUUID();
+    const items = createDemoItems(snapshotId).slice(0, 2);
+    const snapshot = await saveSnapshot({ username: "demo", nickname: "Demo" }, snapshotId, items);
+    const session = await createSession(snapshot, 2, [2], { preset: "uniform", weights: Array(10).fill(10) });
+    const fit = fitModel(items.map(({ subjectId, rate }) => ({ subjectId, rate })), []);
+    const initial = toModelState(session.id, 0, fit);
+    await initializeModel(session.id, initial);
+    const next = toModelState(session.id, 1, fit, initial.initialMeanUncertainty);
+
+    await commitSessionBudgetMode(session.id, 0, "thorough", next);
+    await expect(commitSessionBudgetMode(session.id, 0, "standard", next)).rejects.toThrow(/其他页面更新/);
+
+    const bundle = await getSessionBundle(session.id);
+    expect(bundle?.session.id).toBe(session.id);
+    expect(bundle?.session.budgetMode).toBe("thorough");
+    expect(bundle?.session.modelVersion).toBe(1);
+    expect(bundle?.history).toHaveLength(0);
     expect(bundle?.model?.version).toBe(1);
   });
 });

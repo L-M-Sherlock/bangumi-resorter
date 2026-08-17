@@ -16,6 +16,7 @@ import {
   forecastProjectionHorizon,
   minimumEvidence,
   requiredAdjacentStableItemCount,
+  STOPPING_PROBABILITY_TARGET,
 } from "./strategy";
 
 const DEFAULT_PRIOR_STRENGTH = 0.25;
@@ -25,8 +26,8 @@ const MAX_OUTER = 50;
 const GRADIENT_TOLERANCE = 1e-6;
 const PCG_TOLERANCE = 1e-4;
 const POSTERIOR_PCG_TOLERANCE = 1e-3;
-const BUCKET_STABILITY_TARGET = 0.9;
-const STOPPING_EVENT_ERROR_TOLERANCE = 0.1;
+const BUCKET_STABILITY_TARGET = STOPPING_PROBABILITY_TARGET;
+const STOPPING_EVENT_ERROR_TOLERANCE = 1 - STOPPING_PROBABILITY_TARGET;
 
 interface IndexedComparison {
   left: number;

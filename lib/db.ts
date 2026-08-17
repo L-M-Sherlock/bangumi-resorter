@@ -591,6 +591,28 @@ export async function commitSessionDistribution(
   });
 }
 
+export async function commitSessionBudgetMode(
+  sessionId: string,
+  expectedVersion: number,
+  budgetMode: ComparisonBudgetMode,
+  nextModel: ModelState,
+) {
+  return db.transaction("rw", db.sessions, db.models, async () => {
+    const session = await db.sessions.get(sessionId);
+    if (!session || session.modelVersion !== expectedVersion) throw new Error("排序会话已在其他页面更新，请刷新后继续。");
+    const updated: SortingSession = {
+      ...session,
+      budgetMode,
+      modelVersion: expectedVersion + 1,
+      status: modelMeetsTarget(nextModel) ? "complete" : "active",
+      updatedAt: now(),
+    };
+    await db.models.put({ ...nextModel, sessionId, version: expectedVersion + 1, updatedAt: now() });
+    await db.sessions.put(updated);
+    return updated;
+  });
+}
+
 export async function setSessionComplete(sessionId: string, complete: boolean) {
   await db.sessions.update(sessionId, { status: complete ? "complete" : "active", updatedAt: now() });
 }
