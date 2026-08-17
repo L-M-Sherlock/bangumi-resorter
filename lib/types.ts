@@ -18,7 +18,7 @@ export type SubjectType = keyof typeof SUBJECT_TYPES;
 export type CollectionType = keyof typeof COLLECTION_TYPES;
 export type ComparisonOutcome = "left" | "tie" | "right" | "skip";
 export type SessionStatus = "active" | "complete";
-export type DistributionPreset = "uniform" | "preserve" | "high-tail" | "custom";
+export type DistributionPreset = "uniform" | "preserve" | "high-tail" | "reverse-j" | "custom";
 export type ComparisonBudgetMode = "quick" | "standard" | "thorough";
 
 export interface SubjectImages {
@@ -189,6 +189,7 @@ export const DISTRIBUTIONS: Record<Exclude<DistributionPreset, "custom">, number
   uniform: [10, 10, 10, 10, 10, 10, 10, 10, 10, 10],
   preserve: [10, 10, 10, 10, 10, 10, 10, 10, 10, 10],
   "high-tail": [3, 5, 8, 14, 20, 20, 12, 8, 6, 4],
+  "reverse-j": [50, 25, 14, 4, 2, 1, 1, 1, 1, 1],
 };
 
-export const APP_VERSION = "0.2.0";
+export const APP_VERSION = "0.3.0";

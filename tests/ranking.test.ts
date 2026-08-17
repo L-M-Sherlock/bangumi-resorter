@@ -71,11 +71,15 @@ describe("Bradley–Terry ranking engine", () => {
     expect(comparisonBudget(400, "thorough")).toBe(800);
   });
 
-  it("maps scores to uniform, preserved, and zero-safe custom distributions", () => {
+  it("maps scores to uniform, reverse-J, preserved, and zero-safe custom distributions", () => {
     const items = Array.from({ length: 20 }, (_, index) => item(index + 1, index < 5 ? 10 : index < 12 ? 7 : 4));
     const fit = fitModel(items, []);
     const uniform = buildRankedItems(items, fit, [], { preset: "uniform", weights: Array(10).fill(10) });
     expect(new Set(uniform.map((entry) => entry.newRate))).toEqual(new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]));
+    const reverseItems = Array.from({ length: 100 }, (_, index) => item(index + 1, 7));
+    const reverseFit = fitModel(reverseItems, []);
+    const reverseJ = buildRankedItems(reverseItems, reverseFit, [], { preset: "reverse-j", weights: [50, 25, 14, 4, 2, 1, 1, 1, 1, 1] });
+    expect(Array.from({ length: 10 }, (_, index) => reverseJ.filter((entry) => entry.newRate === index + 1).length)).toEqual([50, 25, 14, 4, 2, 1, 1, 1, 1, 1]);
     const preserved = buildRankedItems(items, fit, [], { preset: "preserve", weights: Array(10).fill(10) });
     for (let score = 1; score <= 10; score += 1) {
       expect(preserved.filter((entry) => entry.newRate === score)).toHaveLength(items.filter((entry) => entry.rate === score).length);
