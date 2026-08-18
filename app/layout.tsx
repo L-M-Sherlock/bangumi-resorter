@@ -36,6 +36,10 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="zh-CN">
+      <head>
+        <link rel="preconnect" href="https://lain.bgm.tv" />
+        <link rel="dns-prefetch" href="//lain.bgm.tv" />
+      </head>
       <body>{children}</body>
     </html>
   );

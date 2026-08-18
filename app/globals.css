@@ -189,8 +189,14 @@ input:focus, select:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgb
 .comparison-stage { display: grid; grid-template-columns: minmax(0, 1fr) 48px minmax(0, 1fr); align-items: center; gap: 16px; transition: opacity .2s ease; }
 .comparison-stage.busy { opacity: .64; }
 .media-card { min-width: 0; padding: 13px; border: 1px solid var(--line); border-radius: 13px; background: var(--panel); box-shadow: 0 10px 30px rgba(64,53,39,.07); }
-.poster-image, .poster-fallback { width: 48px; aspect-ratio: .72 / 1; object-fit: cover; border-radius: 5px; background: #ddd6c9; }
-.poster-image.wide, .poster-fallback.wide { width: 100%; aspect-ratio: 1.68 / 1; border-radius: 8px; }
+.poster-image, .poster-fallback, .poster-frame { width: 48px; aspect-ratio: .72 / 1; object-fit: cover; border-radius: 5px; background: #ddd6c9; }
+.poster-image { display: block; }
+.poster-image.wide, .poster-fallback.wide, .poster-frame.wide { width: 100%; aspect-ratio: 1.68 / 1; border-radius: 8px; }
+.poster-frame { position: relative; overflow: hidden; }
+.poster-frame .poster-image { position: absolute; inset: 0; width: 100%; height: 100%; aspect-ratio: auto; border-radius: inherit; }
+.poster-frame .poster-placeholder { filter: blur(7px); transform: scale(1.035); }
+.poster-frame .poster-full { opacity: 0; transition: opacity .18s ease; }
+.poster-frame.loaded .poster-full { opacity: 1; }
 .poster-fallback { display: grid; place-items: center; color: white; overflow: hidden; }
 .poster-fallback span { font: 700 20px Georgia, "Songti SC", serif; }
 .poster-fallback.wide span { font-size: clamp(46px, 6vw, 82px); text-shadow: 0 4px 12px rgba(0,0,0,.24); }
@@ -337,7 +343,7 @@ kbd { padding: 2px 5px; border: 1px solid rgba(255,255,255,.35); border-radius: 
   .metric-grid { grid-template-columns: repeat(2, 1fr); }
   .comparison-stage { grid-template-columns: 1fr 28px 1fr; gap: 6px; }
   .media-card { padding: 7px; }
-  .poster-image.wide, .poster-fallback.wide { aspect-ratio: .78 / 1; }
+  .poster-image.wide, .poster-fallback.wide, .poster-frame.wide { aspect-ratio: .78 / 1; }
   .media-copy { min-height: 96px; padding: 11px 2px 8px; }
   .media-copy h2 { font-size: 17px; }
   .media-copy p { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

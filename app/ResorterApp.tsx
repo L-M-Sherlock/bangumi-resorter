@@ -29,6 +29,7 @@ import {
   upgradeSessionToSnapshot,
 } from "@/lib/db";
 import { downloadJson, downloadText, readBackup, requestPersistentStorage, resultsCsv, storageStatus } from "@/lib/export";
+import { bangumiCoverVariant } from "@/lib/images";
 import { buildRankedItems } from "@/lib/ranking/engine";
 import {
   BUDGET_MODE_COPY,
@@ -231,8 +232,50 @@ function downloadName(prefix: string, username: string, extension: string) {
   return `${prefix}-${username}-${date}.${extension}`;
 }
 
+const pendingImageWarmups = new Map<string, HTMLImageElement>();
+
+function warmImage(source: string) {
+  if (typeof Image === "undefined" || pendingImageWarmups.has(source)) return;
+  const image = new Image();
+  pendingImageWarmups.set(source, image);
+  const release = () => pendingImageWarmups.delete(source);
+  image.addEventListener("load", release, { once: true });
+  image.addEventListener("error", release, { once: true });
+  image.decoding = "async";
+  image.fetchPriority = "high";
+  image.src = source;
+}
+
+function warmComparisonImages(items: CollectionItem[], pair?: NextPair) {
+  if (!pair) return;
+  for (const subjectId of [pair.leftSubjectId, pair.rightSubjectId]) {
+    const source = items.find((item) => item.subjectId === subjectId)?.image;
+    if (!source) continue;
+    warmImage(bangumiCoverVariant(source, "c"));
+    warmImage(source);
+  }
+}
+
+function WidePoster({ item, source }: { item: CollectionItem; source: string }) {
+  const [loadedSource, setLoadedSource] = useState("");
+  const placeholder = bangumiCoverVariant(source, "c");
+  if (placeholder === source) {
+    return <img className="poster-image wide" src={source} alt={`${primaryName(item)} 封面`} loading="eager" decoding="async" fetchPriority="high" />;
+  }
+  return <div className={`poster-frame wide ${loadedSource === source ? "loaded" : ""}`}>
+    <img key={`placeholder-${placeholder}`} className="poster-image poster-placeholder" src={placeholder} alt="" aria-hidden="true" loading="eager" decoding="async" fetchPriority="high" />
+    <img key={source} className="poster-image poster-full" src={source} alt={`${primaryName(item)} 封面`} loading="eager" decoding="async" fetchPriority="high" onLoad={() => setLoadedSource(source)} />
+  </div>;
+}
+
 function Poster({ item, wide = false }: { item: CollectionItem; wide?: boolean }) {
-  if (item.image) return <img className={wide ? "poster-image wide" : "poster-image"} src={item.image} alt={`${primaryName(item)} 封面`} />;
+  if (item.image && wide) return <WidePoster item={item} source={item.image} />;
+  if (item.image) {
+    const medium = bangumiCoverVariant(item.image, "m");
+    const common = bangumiCoverVariant(item.image, "c");
+    const hasResponsiveVariants = medium !== item.image || common !== item.image;
+    return <img className="poster-image" src={hasResponsiveVariants ? common : item.image} srcSet={hasResponsiveVariants ? `${medium} 100w, ${common} 150w` : undefined} sizes="48px" alt={`${primaryName(item)} 封面`} loading="lazy" decoding="async" fetchPriority="low" />;
+  }
   return <div className={`poster-fallback tone-${item.subjectId % 4} ${wide ? "wide" : ""}`} aria-label={`${primaryName(item)} 无封面`}><span>{primaryName(item).slice(0, 1)}</span></div>;
 }
 
@@ -926,10 +969,12 @@ export default function ResorterApp() {
   ) {
     if (!workerRef.current) throw new Error("排序计算尚未就绪。");
     const tuning = rankingTuning(sessionBudgetMode(session));
-    return workerRef.current.run({ type: operation, sessionId: session.id, version, randomSeed: session.randomSeed,
+    const result = await workerRef.current.run({ type: operation, sessionId: session.id, version, randomSeed: session.randomSeed,
       items: sessionItems.map((item) => ({ subjectId: item.subjectId, rate: item.rate })),
       history: toRankingHistory(history), distribution, budgetMode: sessionBudgetMode(session),
       previousModel, ...tuning });
+    warmComparisonImages(sessionItems, result.nextPair);
+    return result;
   }
 
   async function openSession(sessionId: string) {

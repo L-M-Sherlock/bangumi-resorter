@@ -9,6 +9,7 @@ test("static export contains the complete first screen and metadata", async () =
   assert.match(html, /让你的评分/);
   assert.match(html, /先用演示数据体验/);
   assert.match(html, /og:image/);
+  assert.match(html, /rel="preconnect" href="https:\/\/lain\.bgm\.tv"/);
   assert.doesNotMatch(html, /SkeletonPreview|react-loading-skeleton|Starter Project/);
 });
 
