@@ -1,12 +1,14 @@
 import { expect, test, type Page } from "@playwright/test";
 
-async function expectInferenceMode(page: Page, id: string, value: string) {
+async function expectThemedSelect(page: Page, id: string, value: string) {
   await expect(page.locator(`#${id}`)).toHaveAttribute("data-value", value);
 }
 
-async function selectInferenceMode(page: Page, id: string, label: string) {
-  await page.locator(`#${id}`).click();
-  await page.getByRole("listbox", { name: "推断模式选项" }).getByRole("option", { name: label, exact: true }).click();
+async function selectThemedOption(page: Page, id: string, label: string) {
+  const root = page.locator(`[data-themed-select="${id}"]`);
+  const menu = root.getByRole("listbox");
+  if (!await menu.isVisible()) await page.locator(`#${id}`).click();
+  await menu.getByRole("option", { name: label, exact: true }).click();
 }
 
 test("demo project can filter, compare, derive, upgrade, edit records, and delete sessions", async ({ page }) => {
@@ -25,12 +27,14 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await expect(page.getByText(/疲劳安全上限/)).toHaveCount(0);
   await expect(page.locator(".distribution-panel .distribution-stats")).toHaveCount(1);
   await expect(page.locator(".distribution-panel .distribution-stats")).toContainText(/平均值 .*标准差/);
-  await expect(page.locator("#score-level-count")).toHaveValue("10");
-  await expect(page.locator("#distribution-preset option")).toHaveText(["均匀 10 档", "保持原分布", "高分辨率尾部", "反 J 分布", "自定义权重"]);
-  await expect(page.locator("#distribution-preset")).toHaveValue("high-tail");
-  await page.locator("#score-level-count").selectOption("5");
-  await expect(page.locator("#distribution-preset option").first()).toHaveText("均匀 5 档");
-  await page.locator("#distribution-preset").selectOption("reverse-j");
+  await expectThemedSelect(page, "score-level-count", "10");
+  await page.locator("#distribution-preset").click();
+  await expect(page.locator('[data-themed-select="distribution-preset"]').getByRole("option")).toHaveText(["均匀 10 档", "保持原分布", "高分辨率尾部✓", "反 J 分布", "自定义权重"]);
+  await expectThemedSelect(page, "distribution-preset", "high-tail");
+  await selectThemedOption(page, "score-level-count", "5 档");
+  await page.locator("#distribution-preset").click();
+  await expect(page.locator('[data-themed-select="distribution-preset"]').getByRole("option").first()).toHaveText("均匀 5 档");
+  await selectThemedOption(page, "distribution-preset", "反 J 分布");
   await expect(page.getByText(/把最多作品放在低分档.*保持累计分布形状/)).toBeVisible();
   await page.locator("#new-session-tag-search").fill("经典");
   await page.getByRole("option", { name: /经典/ }).click();
@@ -59,9 +63,9 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   expect(Math.abs(buttonBottoms[0] - buttonBottoms[1])).toBeLessThan(1);
   await page.getByRole("button", { name: /更喜欢这部/ }).first().click();
   await expect(page.getByText(/本次已完成/)).toContainText("1");
-  await expectInferenceMode(page, "compare-budget-mode", "quick");
-  await selectInferenceMode(page, "compare-budget-mode", "标准模式");
-  await expectInferenceMode(page, "compare-budget-mode", "standard");
+  await expectThemedSelect(page, "compare-budget-mode", "quick");
+  await selectThemedOption(page, "compare-budget-mode", "标准模式");
+  await expectThemedSelect(page, "compare-budget-mode", "standard");
   await expect(page.locator(".topbar .eyebrow")).toContainText("标准模式");
   await expect(page.getByText(/本次已完成/)).toContainText("1");
   await expect(page.getByText("动态剩余预测")).toBeVisible();
@@ -82,13 +86,13 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await expect(page.getByText(/本次已完成/)).toContainText("1");
   await page.getByRole("button", { name: "查看当前结果" }).click();
   await expect(page.getByRole("heading", { name: "你的偏好序列" })).toBeVisible();
-  await expectInferenceMode(page, "result-budget-mode", "standard");
-  await selectInferenceMode(page, "result-budget-mode", "精细模式");
-  await expectInferenceMode(page, "result-budget-mode", "thorough");
+  await expectThemedSelect(page, "result-budget-mode", "standard");
+  await selectThemedOption(page, "result-budget-mode", "精细模式");
+  await expectThemedSelect(page, "result-budget-mode", "thorough");
   await expect(page.locator(".page-header .eyebrow")).toContainText("精细模式");
   await expect(page.getByText("本会话判断记录（1）")).toBeVisible();
-  await expect(page.locator("#result-distribution-preset")).toHaveValue("reverse-j");
-  await expect(page.locator("#result-score-level-count")).toHaveValue("5");
+  await expectThemedSelect(page, "result-distribution-preset", "reverse-j");
+  await expectThemedSelect(page, "result-score-level-count", "5");
   await expect(page.locator('.distribution-chart .histogram[data-level-count="10"]')).toHaveCount(1);
   await expect(page.locator('.distribution-chart .histogram[data-level-count="5"]')).toHaveCount(1);
   await expect(page.locator('.distribution-chart .distribution-stats[data-series="原评分"]')).toHaveCount(1);
@@ -111,15 +115,15 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await expect(dangerZone.getByText(/当前结果是 5 档/)).toBeVisible();
   await expect(dangerZone.getByRole("button", { name: "检查写回变更" })).toHaveCount(0);
   await dangerZone.locator(":scope > summary").click();
-  await page.locator("#result-score-level-count").selectOption("12");
-  await expect(page.locator("#result-score-level-count")).toHaveValue("12");
+  await selectThemedOption(page, "result-score-level-count", "12 档");
+  await expectThemedSelect(page, "result-score-level-count", "12");
   await expect(page.getByText("本会话判断记录（1）")).toBeVisible();
   await expect(page.locator('.distribution-chart .histogram[data-level-count="12"]')).toHaveCount(1);
   await expect(page.getByRole("columnheader", { name: "新评分（12 档）" })).toBeVisible();
   await expect(page.locator(".score-pill.new.changed")).toHaveCount(0);
   expect(await page.getByRole("columnheader", { name: "精确分桶稳定度" }).evaluate((header) => getComputedStyle(header).whiteSpace)).toBe("nowrap");
-  await page.locator("#result-score-level-count").selectOption("10");
-  await expect(page.locator("#result-score-level-count")).toHaveValue("10");
+  await selectThemedOption(page, "result-score-level-count", "10 档");
+  await expectThemedSelect(page, "result-score-level-count", "10");
   await expect(page.getByRole("heading", { name: "原评分 → 新评分" })).toBeVisible();
   await expect(page.locator('.result-summary .histogram[data-level-count="10"]')).toHaveCount(1);
   await expect(page.locator('.comparison-histogram .distribution-stats')).toHaveCount(2);
@@ -190,19 +194,19 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   expect(patchedSubjectIds).not.toContain(conflictCandidate.subjectId);
   expect(patchedSubjectIds).not.toContain(missingCandidate.subjectId);
   await expect(dangerZone.getByLabel(/Bangumi 个人令牌/)).toHaveValue("");
-  await page.locator("#result-score-level-count").selectOption("12");
-  await expect(page.locator("#result-score-level-count")).toHaveValue("12");
+  await selectThemedOption(page, "result-score-level-count", "12 档");
+  await expectThemedSelect(page, "result-score-level-count", "12");
   await expect(page.locator(".rating-write-danger")).not.toHaveAttribute("open", "");
   await expect(page.getByRole("heading", { name: "写回预览" })).toHaveCount(0);
-  await selectInferenceMode(page, "result-budget-mode", "快速模式");
-  await expectInferenceMode(page, "result-budget-mode", "quick");
+  await selectThemedOption(page, "result-budget-mode", "快速模式");
+  await expectThemedSelect(page, "result-budget-mode", "quick");
   const quickSummary = await page.locator(".summary-stat").textContent();
-  await selectInferenceMode(page, "result-budget-mode", "标准模式");
-  await expectInferenceMode(page, "result-budget-mode", "standard");
-  await selectInferenceMode(page, "result-budget-mode", "精细模式");
-  await expectInferenceMode(page, "result-budget-mode", "thorough");
-  await selectInferenceMode(page, "result-budget-mode", "快速模式");
-  await expectInferenceMode(page, "result-budget-mode", "quick");
+  await selectThemedOption(page, "result-budget-mode", "标准模式");
+  await expectThemedSelect(page, "result-budget-mode", "standard");
+  await selectThemedOption(page, "result-budget-mode", "精细模式");
+  await expectThemedSelect(page, "result-budget-mode", "thorough");
+  await selectThemedOption(page, "result-budget-mode", "快速模式");
+  await expectThemedSelect(page, "result-budget-mode", "quick");
   await expect(page.locator(".summary-stat")).toHaveText(quickSummary ?? "");
   await expect(page.locator("tbody tr")).toHaveCount(6);
   await expect(page.locator("#stopping-target")).toHaveCount(0);
@@ -212,7 +216,7 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await expect(page.getByRole("option", { name: /电脑线圈/ })).toBeVisible();
   await rightItemPicker.press("Enter");
   await expect(rightItemPicker).toHaveValue(/电脑线圈/);
-  await page.getByLabel("手动比较结果").selectOption("tie");
+  await selectThemedOption(page, "manual-comparison-outcome", "差不多喜欢");
   await page.getByRole("button", { name: "添加比较" }).click();
   await expect(page.getByText("本会话判断记录（2）")).toBeVisible();
   await expect(page.locator(".comparison-record.manual")).toHaveCount(1);
@@ -220,8 +224,8 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await page.locator(".comparison-record.manual").getByRole("button", { name: /删除判断/ }).click();
   await expect(page.getByText("本会话判断记录（1）")).toBeVisible();
   await expect(page.locator(".comparison-record.manual")).toHaveCount(0);
-  await page.locator("#result-distribution-preset").selectOption("uniform");
-  await expect(page.locator("#result-distribution-preset")).toHaveValue("uniform");
+  await selectThemedOption(page, "result-distribution-preset", "均匀 12 档");
+  await expectThemedSelect(page, "result-distribution-preset", "uniform");
   await page.getByRole("button", { name: /两两比较/ }).click();
   await expect(page.getByText(/本次已完成/)).toContainText("1");
   await page.getByRole("button", { name: /收藏概览/ }).click();

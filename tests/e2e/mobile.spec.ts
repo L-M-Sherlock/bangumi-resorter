@@ -14,6 +14,49 @@ async function expectNoHorizontalOverflow(page: Page) {
   expect(metrics.scrollWidth).toBeLessThanOrEqual(metrics.clientWidth);
 }
 
+async function themedSelectAppearance(page: Page, id: string) {
+  return page.locator(`[data-themed-select="${id}"]`).evaluate((root) => {
+    const triggerElement = root.querySelector<HTMLElement>(".themed-select-trigger")!;
+    const menuElement = root.querySelector<HTMLElement>(".themed-select-menu")!;
+    const menuStyle = getComputedStyle(menuElement);
+    const parseColor = (color: string) => {
+      const channels = color.match(/[\d.]+/g)?.map(Number) ?? [];
+      return { rgb: channels.slice(0, 3), alpha: channels[3] ?? 1 };
+    };
+    const luminance = (rgb: number[]) => {
+      const channels = rgb.map((value) => {
+        const channel = value / 255;
+        return channel <= .04045 ? channel / 12.92 : ((channel + .055) / 1.055) ** 2.4;
+      });
+      return .2126 * channels[0] + .7152 * channels[1] + .0722 * channels[2];
+    };
+    const contrast = (foreground: string, background: string) => {
+      const foregroundLuminance = luminance(parseColor(foreground).rgb);
+      const backgroundLuminance = luminance(parseColor(background).rgb);
+      return (Math.max(foregroundLuminance, backgroundLuminance) + .05)
+        / (Math.min(foregroundLuminance, backgroundLuminance) + .05);
+    };
+    return {
+      triggerRadius: getComputedStyle(triggerElement).borderRadius,
+      menuRadius: menuStyle.borderRadius,
+      menuBackground: menuStyle.backgroundColor,
+      menuShadow: menuStyle.boxShadow,
+      optionContrasts: [...menuElement.querySelectorAll<HTMLElement>("[role='option']")].map((option) => {
+        const style = getComputedStyle(option);
+        const optionBackground = parseColor(style.backgroundColor);
+        return contrast(style.color, optionBackground.alpha === 0 ? menuStyle.backgroundColor : style.backgroundColor);
+      }),
+    };
+  });
+}
+
+function expectReadableThemedMenu(appearance: Awaited<ReturnType<typeof themedSelectAppearance>>) {
+  expect(appearance.triggerRadius).toBe(appearance.menuRadius);
+  expect(appearance.menuBackground).not.toBe("rgb(255, 255, 255)");
+  expect(appearance.menuShadow).not.toBe("none");
+  for (const ratio of appearance.optionContrasts) expect(ratio).toBeGreaterThanOrEqual(4.5);
+}
+
 test.describe("移动端 UI/UX", () => {
   test("连接首屏在常见窄视口可操作", async ({ page }) => {
     await page.goto("/");
@@ -44,13 +87,22 @@ test.describe("移动端 UI/UX", () => {
     }
   });
 
-  test("夜间模式的推断模式菜单风格统一且选项清晰", async ({ page }) => {
+  test("夜间模式的所有下拉菜单风格统一且选项清晰", async ({ page }) => {
     await page.emulateMedia({ colorScheme: "dark" });
     await page.goto("/");
     await page.locator("html[data-resorter-ready='true']").waitFor();
     await page.getByRole("button", { name: "先用演示数据体验" }).click();
-    await page.getByRole("button", { name: /开始快速比较 · 动态停止/ }).click();
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+    await expect(page.locator("select")).toHaveCount(0);
+
+    for (const id of ["comparison-budget", "score-level-count", "distribution-preset", "reuse-policy"]) {
+      await page.locator(`#${id}`).click();
+      await expect(page.locator(`[data-themed-select="${id}"]`).getByRole("listbox")).toBeVisible();
+      expectReadableThemedMenu(await themedSelectAppearance(page, id));
+      await page.keyboard.press("Escape");
+    }
+
+    await page.getByRole("button", { name: /开始快速比较 · 动态停止/ }).click();
 
     const trigger = page.locator("#compare-budget-mode");
     await trigger.click();
@@ -58,43 +110,7 @@ test.describe("移动端 UI/UX", () => {
     await expect(menu).toBeVisible();
     await expect(menu.getByRole("option")).toHaveText(["快速模式✓", "标准模式", "精细模式"]);
 
-    const appearance = await page.evaluate(() => {
-      const triggerElement = document.querySelector<HTMLElement>("#compare-budget-mode")!;
-      const menuElement = document.querySelector<HTMLElement>(".inference-mode-menu")!;
-      const menuStyle = getComputedStyle(menuElement);
-      const parseColor = (color: string) => {
-        const channels = color.match(/[\d.]+/g)?.map(Number) ?? [];
-        return { rgb: channels.slice(0, 3), alpha: channels[3] ?? 1 };
-      };
-      const luminance = (rgb: number[]) => {
-        const channels = rgb.map((value) => {
-          const channel = value / 255;
-          return channel <= .04045 ? channel / 12.92 : ((channel + .055) / 1.055) ** 2.4;
-        });
-        return .2126 * channels[0] + .7152 * channels[1] + .0722 * channels[2];
-      };
-      const contrast = (foreground: string, background: string) => {
-        const foregroundLuminance = luminance(parseColor(foreground).rgb);
-        const backgroundLuminance = luminance(parseColor(background).rgb);
-        return (Math.max(foregroundLuminance, backgroundLuminance) + .05)
-          / (Math.min(foregroundLuminance, backgroundLuminance) + .05);
-      };
-      return {
-        triggerRadius: getComputedStyle(triggerElement).borderRadius,
-        menuRadius: menuStyle.borderRadius,
-        menuBackground: menuStyle.backgroundColor,
-        menuShadow: menuStyle.boxShadow,
-        optionContrasts: [...menuElement.querySelectorAll<HTMLElement>("[role='option']")].map((option) => {
-          const style = getComputedStyle(option);
-          const optionBackground = parseColor(style.backgroundColor);
-          return contrast(style.color, optionBackground.alpha === 0 ? menuStyle.backgroundColor : style.backgroundColor);
-        }),
-      };
-    });
-    expect(appearance.triggerRadius).toBe(appearance.menuRadius);
-    expect(appearance.menuBackground).not.toBe("rgb(255, 255, 255)");
-    expect(appearance.menuShadow).not.toBe("none");
-    for (const ratio of appearance.optionContrasts) expect(ratio).toBeGreaterThanOrEqual(4.5);
+    expectReadableThemedMenu(await themedSelectAppearance(page, "compare-budget-mode"));
 
     const quickOption = menu.getByRole("option", { name: "快速模式", exact: true });
     const standardOption = menu.getByRole("option", { name: "标准模式", exact: true });
@@ -105,6 +121,37 @@ test.describe("移动端 UI/UX", () => {
     await expect(trigger).toHaveAttribute("data-value", "standard");
     await expect(menu).toBeHidden();
     await expect(page.getByRole("button", { name: /已完成 0 次/ })).toBeVisible();
+
+    await page.getByRole("button", { name: /更喜欢这部/ }).first().click();
+    await page.getByRole("button", { name: "查看当前结果" }).click();
+    await expect(page.getByRole("heading", { name: "你的偏好序列" })).toBeVisible();
+    await expect(page.locator("select")).toHaveCount(0);
+
+    const scoreTrigger = page.locator("#result-score-level-count");
+    await scoreTrigger.click();
+    const scoreMenu = page.getByRole("listbox", { name: "评分档数选项" });
+    await expect(scoreMenu).toBeVisible();
+    await expect(scoreMenu.getByRole("option")).toHaveCount(18);
+    expectReadableThemedMenu(await themedSelectAppearance(page, "result-score-level-count"));
+    await page.keyboard.press("Escape");
+    await expect(scoreMenu).toBeHidden();
+
+    const presetTrigger = page.locator("#result-distribution-preset");
+    await presetTrigger.click();
+    const presetMenu = page.getByRole("listbox", { name: "评分分布预设选项" });
+    await expect(presetMenu).toBeVisible();
+    await expect(presetMenu.getByRole("option")).toHaveText(["均匀 10 档", "保持原分布", "高分辨率尾部✓", "反 J 分布", "自定义权重"]);
+    expectReadableThemedMenu(await themedSelectAppearance(page, "result-distribution-preset"));
+
+    const highTailOption = presetMenu.getByRole("option", { name: "高分辨率尾部", exact: true });
+    const reverseJOption = presetMenu.getByRole("option", { name: "反 J 分布", exact: true });
+    await expect(highTailOption).toBeFocused();
+    await highTailOption.press("ArrowDown");
+    await expect(reverseJOption).toBeFocused();
+    await reverseJOption.press("Enter");
+    await expect(presetTrigger).toHaveAttribute("data-value", "reverse-j");
+    await expect(presetMenu).toBeHidden();
+    await expectNoHorizontalOverflow(page);
   });
 
   test("导航、比较和结果在移动端保持可达", async ({ page }) => {

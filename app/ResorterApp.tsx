@@ -561,23 +561,220 @@ const SCORE_LEVEL_OPTIONS = Array.from(
   (_, index) => MIN_SCORE_LEVELS + index,
 );
 
-function ScoreLevelSelect({ id, value, disabled, className, onChange }: {
+interface ThemedSelectOption<Value extends string> {
+  value: Value;
+  label: string;
+}
+
+function ThemedSelect<Value extends string>({
+  id,
+  value,
+  options,
+  ariaLabel,
+  menuLabel,
+  disabled = false,
+  compact = false,
+  alignMenu = "start",
+  rootClassName,
+  triggerClassName,
+  title,
+  onChange,
+}: {
+  id: string;
+  value: Value;
+  options: readonly ThemedSelectOption<Value>[];
+  ariaLabel: string;
+  menuLabel?: string;
+  disabled?: boolean;
+  compact?: boolean;
+  alignMenu?: "start" | "end";
+  rootClassName?: string;
+  triggerClassName?: string;
+  title?: string;
+  onChange: (value: Value) => void | Promise<void>;
+}) {
+  const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value));
+  const selectedOption = options[selectedIndex];
+  const [open, setOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(selectedIndex);
+  const [opensUpward, setOpensUpward] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const listboxId = `${id}-options`;
+
+  useEffect(() => {
+    if (!open) return;
+    const frame = requestAnimationFrame(() => optionRefs.current[activeIndex]?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [activeIndex, open]);
+
+  useEffect(() => {
+    if (!open) return;
+    function handlePointerDown(event: PointerEvent) {
+      if (event.target instanceof Node && !rootRef.current?.contains(event.target)) setOpen(false);
+    }
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => document.removeEventListener("pointerdown", handlePointerDown);
+  }, [open]);
+
+  function normalizedIndex(index: number) {
+    return (index + options.length) % options.length;
+  }
+
+  function focusOption(index: number) {
+    setActiveIndex(normalizedIndex(index));
+  }
+
+  function openMenu(index = selectedIndex) {
+    if (disabled || options.length === 0) return;
+    const bounds = rootRef.current?.getBoundingClientRect();
+    if (bounds) {
+      const estimatedHeight = Math.min(360, options.length * 44 + 12);
+      const spaceBelow = window.innerHeight - bounds.bottom - 12;
+      const spaceAbove = bounds.top - 12;
+      setOpensUpward(spaceBelow < estimatedHeight && spaceAbove > spaceBelow);
+    }
+    setActiveIndex(normalizedIndex(index));
+    setOpen(true);
+  }
+
+  function closeMenu(restoreFocus = false) {
+    setOpen(false);
+    if (restoreFocus) requestAnimationFrame(() => triggerRef.current?.focus());
+  }
+
+  function choose(option: ThemedSelectOption<Value>) {
+    closeMenu(true);
+    if (option.value !== value) void onChange(option.value);
+  }
+
+  function handleTriggerKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>) {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      if (open) focusOption(activeIndex + (event.key === "ArrowDown" ? 1 : -1));
+      else openMenu(selectedIndex);
+    } else if ((event.key === "Enter" || event.key === " ") && !open) {
+      event.preventDefault();
+      openMenu(selectedIndex);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      openMenu(0);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      openMenu(options.length - 1);
+    } else if (event.key === "Escape" && open) {
+      event.preventDefault();
+      closeMenu();
+    }
+  }
+
+  function handleOptionKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>, index: number) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      focusOption(index + 1);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      focusOption(index - 1);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      focusOption(0);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      focusOption(options.length - 1);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      closeMenu(true);
+    } else if (event.key === "Tab") {
+      closeMenu();
+    }
+  }
+
+  if (!selectedOption) return null;
+
+  const rootClasses = [
+    "themed-select",
+    compact ? "compact" : "",
+    alignMenu === "end" ? "align-end" : "",
+    opensUpward ? "opens-upward" : "",
+    open ? "open" : "",
+    rootClassName ?? "",
+  ].filter(Boolean).join(" ");
+
+  return <div
+    ref={rootRef}
+    className={rootClasses}
+    data-themed-select={id}
+    onBlur={(event) => {
+      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) closeMenu();
+    }}
+  >
+    <button
+      id={id}
+      ref={triggerRef}
+      className={`themed-select-trigger${triggerClassName ? ` ${triggerClassName}` : ""}`}
+      type="button"
+      data-value={value}
+      aria-label={ariaLabel}
+      aria-haspopup="listbox"
+      aria-expanded={open}
+      aria-controls={listboxId}
+      disabled={disabled}
+      title={title}
+      onClick={() => open ? closeMenu() : openMenu()}
+      onKeyDown={handleTriggerKeyDown}
+    >
+      <span className="themed-select-value">{selectedOption.label}</span>
+      <span className="themed-select-chevron" aria-hidden="true">⌄</span>
+    </button>
+    {open && <div id={listboxId} className="themed-select-menu" role="listbox" aria-label={menuLabel ?? `${ariaLabel}选项`}>
+      {options.map((option, index) => <button
+        key={option.value}
+        ref={(element) => { optionRefs.current[index] = element; }}
+        className={`themed-select-option${activeIndex === index ? " active" : ""}`}
+        type="button"
+        data-value={option.value}
+        role="option"
+        aria-selected={option.value === value}
+        tabIndex={activeIndex === index ? 0 : -1}
+        onMouseEnter={() => setActiveIndex(index)}
+        onClick={() => choose(option)}
+        onKeyDown={(event) => handleOptionKeyDown(event, index)}
+      >
+        <span>{option.label}</span>
+        <span className="themed-select-check" aria-hidden="true">{option.value === value ? "✓" : ""}</span>
+      </button>)}
+    </div>}
+  </div>;
+}
+
+const SCORE_LEVEL_SELECT_OPTIONS = SCORE_LEVEL_OPTIONS.map((levelCount) => ({
+  value: String(levelCount),
+  label: `${levelCount} 档`,
+}));
+
+function ScoreLevelSelect({ id, value, disabled, compact, alignMenu, className, onChange }: {
   id: string;
   value: number;
   disabled?: boolean;
+  compact?: boolean;
+  alignMenu?: "start" | "end";
   className?: string;
   onChange: (levelCount: number) => void;
 }) {
-  return <select
+  return <ThemedSelect
     id={id}
-    className={className}
-    aria-label="评分档数"
-    value={normalizeScoreLevelCount(value)}
+    value={String(normalizeScoreLevelCount(value))}
+    options={SCORE_LEVEL_SELECT_OPTIONS}
+    ariaLabel="评分档数"
+    menuLabel="评分档数选项"
     disabled={disabled}
-    onChange={(event) => onChange(normalizeScoreLevelCount(event.target.value))}
-  >
-    {SCORE_LEVEL_OPTIONS.map((levelCount) => <option value={levelCount} key={levelCount}>{levelCount} 档</option>)}
-  </select>;
+    compact={compact}
+    alignMenu={alignMenu}
+    rootClassName="score-level-select"
+    triggerClassName={className}
+    onChange={(nextValue) => onChange(normalizeScoreLevelCount(nextValue))}
+  />;
 }
 
 const TAG_OPTION_LIMIT = 50;
@@ -643,6 +840,34 @@ interface TagDerivationDraft {
   baseItems: CollectionItem[];
   previousItemCount: number;
   selectedTags: string[];
+}
+
+const NEW_SESSION_INFERENCE_OPTIONS: Array<ThemedSelectOption<ComparisonBudgetMode>> = [
+  { value: "quick", label: "快速（推荐）" },
+  { value: "standard", label: "标准" },
+  { value: "thorough", label: "精细" },
+];
+
+const COMPARISON_REUSE_OPTIONS: Array<ThemedSelectOption<ComparisonReusePolicy>> = [
+  { value: "snapshot", label: "复用同一快照（推荐）" },
+  { value: "session", label: "本会话从零开始" },
+  { value: "profile", label: "复用所有历史快照" },
+];
+
+const MANUAL_OUTCOME_OPTIONS: Array<ThemedSelectOption<Exclude<ComparisonOutcome, "skip">>> = [
+  { value: "left", label: "更喜欢左侧" },
+  { value: "tie", label: "差不多喜欢" },
+  { value: "right", label: "更喜欢右侧" },
+];
+
+function distributionPresetOptions(levelCount: number): Array<ThemedSelectOption<DistributionPreset>> {
+  return [
+    { value: "uniform", label: `均匀 ${levelCount} 档` },
+    { value: "preserve", label: "保持原分布" },
+    { value: "high-tail", label: "高分辨率尾部" },
+    { value: "reverse-j", label: "反 J 分布" },
+    { value: "custom", label: "自定义权重" },
+  ];
 }
 
 function LibraryView({ snapshot, items, sessions, onStart, onResume, onUpgradeSession, onDeriveSession, onDeleteSession, onSyncAgain, onSwitchAccount }: {
@@ -783,10 +1008,10 @@ function LibraryView({ snapshot, items, sessions, onStart, onResume, onUpgradeSe
       <article className="panel start-panel"><span className="eyebrow">新建排序会话</span><h2>选择本次范围</h2><p>不同媒介会分别建立模型，比较记录可通过<Term term="history-reuse">历史判断复用</Term>进入后续会话。</p>
         <div className="field-group"><span className="field-label" id="collection-status-label">收藏状态</span><div className="chip-row" role="group" aria-labelledby="collection-status-label">{collectionEntries.map(([type, label]) => <button key={type} className={statuses.includes(type) ? "selected" : ""} onClick={() => setStatuses((value) => value.includes(type) ? value.filter((item) => item !== type) : [...value, type])}>{label}</button>)}</div></div>
         <div className="field-group"><label htmlFor="new-session-tag-search">个人标签（全部匹配）</label><TagFilterSelector id="new-session-tag-search" items={baseItems} selectedTags={selectedTags} onChange={setSelectedTags} /><small className="field-help">标签来自你的 Bangumi 收藏；选择多个标签时，作品必须同时包含全部标签。</small></div>
-        <div className="field-group"><label htmlFor="comparison-budget">推断模式</label><select id="comparison-budget" value={budgetMode} onChange={(event) => setBudgetMode(event.target.value as ComparisonBudgetMode)}><option value="quick">快速（推荐）</option><option value="standard">标准</option><option value="thorough">精细</option></select><small className="field-help"><Term term="inference-mode">模式说明</Term>：{BUDGET_MODE_COPY[budgetMode].description} · 每次回答后<Term term="dynamic-forecast">动态重估剩余区间</Term></small></div>
+        <div className="field-group"><label htmlFor="comparison-budget">推断模式</label><ThemedSelect id="comparison-budget" value={budgetMode} options={NEW_SESSION_INFERENCE_OPTIONS} ariaLabel="推断模式" menuLabel="推断模式选项" onChange={setBudgetMode} /><small className="field-help"><Term term="inference-mode">模式说明</Term>：{BUDGET_MODE_COPY[budgetMode].description} · 每次回答后<Term term="dynamic-forecast">动态重估剩余区间</Term></small></div>
         <div className="field-group"><label htmlFor="score-level-count">评分档数</label><ScoreLevelSelect id="score-level-count" value={scoreLevelCount} onChange={(nextLevelCount) => { setScoreLevelCount(nextLevelCount); setCustomWeights((weights) => resampleDistributionWeights(weights, nextLevelCount)); }} /><small className="field-help">可选择 <Term term="score-bucket">3–20 档</Term>；档数越多，一档越窄，通常需要更多判断才能稳定。</small></div>
-        <div className="field-group"><label htmlFor="distribution-preset">新评分分布</label><select id="distribution-preset" value={preset} onChange={(event) => setManualPreset(event.target.value as DistributionPreset)}><option value="uniform">均匀 {scoreLevelCount} 档</option><option value="preserve">保持原分布</option><option value="high-tail">高分辨率尾部</option><option value="reverse-j">反 J 分布</option><option value="custom">自定义权重</option></select><small className="field-help"><Term term="score-distribution">目标分布</Term> · {manualPreset === undefined ? `已按 ${selectedItems.length} 个条目的规模自动推荐` : "已使用手动选择"}</small>{preset === "reverse-j" && <small className="field-help"><Term term="reverse-j">反 J 分布</Term>把最多作品放在低分档，越高分档越稀疏；系统会按当前档数保持累计分布形状。</small>}{preset === "high-tail" && <small className="field-help"><Term term="high-tail">高分辨率尾部</Term>会把高分区域切得更细，方便区分真正偏爱的作品。</small>}{preset === "custom" && <DistributionWeights weights={customWeights} onChange={setCustomWeights} />}</div>
-        <div className="field-group"><label htmlFor="reuse-policy">历史判断</label><select id="reuse-policy" value={comparisonReusePolicy} onChange={(event) => setComparisonReusePolicy(event.target.value as ComparisonReusePolicy)}><option value="snapshot">复用同一快照（推荐）</option><option value="session">本会话从零开始</option><option value="profile">复用所有历史快照</option></select><small className="field-help"><Term term="history-reuse">历史判断复用</Term>默认限制在同一<Term term="snapshot">收藏快照</Term>，避免长期偏移被旧判断锁定。</small></div>
+        <div className="field-group"><label htmlFor="distribution-preset">新评分分布</label><ThemedSelect id="distribution-preset" value={preset} options={distributionPresetOptions(scoreLevelCount)} ariaLabel="新评分分布" menuLabel="新评分分布选项" onChange={(nextPreset) => setManualPreset(nextPreset)} /><small className="field-help"><Term term="score-distribution">目标分布</Term> · {manualPreset === undefined ? `已按 ${selectedItems.length} 个条目的规模自动推荐` : "已使用手动选择"}</small>{preset === "reverse-j" && <small className="field-help"><Term term="reverse-j">反 J 分布</Term>把最多作品放在低分档，越高分档越稀疏；系统会按当前档数保持累计分布形状。</small>}{preset === "high-tail" && <small className="field-help"><Term term="high-tail">高分辨率尾部</Term>会把高分区域切得更细，方便区分真正偏爱的作品。</small>}{preset === "custom" && <DistributionWeights weights={customWeights} onChange={setCustomWeights} />}</div>
+        <div className="field-group"><label htmlFor="reuse-policy">历史判断</label><ThemedSelect id="reuse-policy" value={comparisonReusePolicy} options={COMPARISON_REUSE_OPTIONS} ariaLabel="历史判断" menuLabel="历史判断选项" onChange={setComparisonReusePolicy} /><small className="field-help"><Term term="history-reuse">历史判断复用</Term>默认限制在同一<Term term="snapshot">收藏快照</Term>，避免长期偏移被旧判断锁定。</small></div>
         <div className="field-group"><span className="field-label">停止标准</span><small className="field-help">至少 90% 的作品相对当前 <Term term="score-bucket">{scoreLevelCount} 档分桶</Term>最多偏移一档；在当前 {selectedItems.length} 部作品中，允许最多 {allowedCrossTwoBucketCount(selectedItems.length)} 部<Term term="cross-two-buckets">跨两档</Term>。该事件的<Term term="posterior">后验概率</Term>之 <Term term="mc-lower-bound">90% MC 下界</Term>须达到 90%。</small></div>
         {error && <Notice tone="error">{error}</Notice>}
         <button className="primary-button" onClick={start} disabled={busy || selectedItems.length < 2}>{busy ? "正在准备模型…" : `开始${BUDGET_MODE_COPY[budgetMode].label}比较 · 动态停止`}<span>→</span></button>
@@ -829,7 +1054,7 @@ function LibraryView({ snapshot, items, sessions, onStart, onResume, onUpgradeSe
   </>;
 }
 
-const INFERENCE_MODE_OPTIONS: Array<{ value: ComparisonBudgetMode; label: string }> = [
+const INFERENCE_MODE_OPTIONS: Array<ThemedSelectOption<ComparisonBudgetMode>> = [
   { value: "quick", label: "快速模式" },
   { value: "standard", label: "标准模式" },
   { value: "thorough", label: "精细模式" },
@@ -841,115 +1066,20 @@ function InferenceModeSelect({ id, value, busy, onChange }: {
   busy: boolean;
   onChange: (mode: ComparisonBudgetMode) => Promise<void>;
 }) {
-  const [open, setOpen] = useState(false);
-  const selectedIndex = INFERENCE_MODE_OPTIONS.findIndex((option) => option.value === value);
-  const [activeIndex, setActiveIndex] = useState(selectedIndex);
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const listboxId = `${id}-options`;
-
-  useEffect(() => {
-    if (!open) return;
-    const frame = requestAnimationFrame(() => optionRefs.current[selectedIndex]?.focus());
-    return () => cancelAnimationFrame(frame);
-  }, [open, selectedIndex]);
-
-  function focusOption(index: number) {
-    const nextIndex = (index + INFERENCE_MODE_OPTIONS.length) % INFERENCE_MODE_OPTIONS.length;
-    setActiveIndex(nextIndex);
-    if (open) optionRefs.current[nextIndex]?.focus();
-  }
-
-  function openMenu(index = selectedIndex) {
-    setOpen(true);
-    focusOption(index);
-  }
-
-  function closeMenu(restoreFocus = false) {
-    setOpen(false);
-    if (restoreFocus) requestAnimationFrame(() => triggerRef.current?.focus());
-  }
-
-  function choose(mode: ComparisonBudgetMode) {
-    closeMenu(true);
-    if (mode !== value) void onChange(mode);
-  }
-
-  function handleTriggerKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>) {
-    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-      event.preventDefault();
-      if (open) focusOption(activeIndex + (event.key === "ArrowDown" ? 1 : -1));
-      else openMenu(selectedIndex);
-    } else if (event.key === "Escape" && open) {
-      event.preventDefault();
-      closeMenu();
-    }
-  }
-
-  function handleOptionKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>, index: number) {
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      focusOption(index + 1);
-    } else if (event.key === "ArrowUp") {
-      event.preventDefault();
-      focusOption(index - 1);
-    } else if (event.key === "Home") {
-      event.preventDefault();
-      focusOption(0);
-    } else if (event.key === "End") {
-      event.preventDefault();
-      focusOption(INFERENCE_MODE_OPTIONS.length - 1);
-    } else if (event.key === "Escape") {
-      event.preventDefault();
-      closeMenu(true);
-    } else if (event.key === "Tab") {
-      closeMenu();
-    }
-  }
-
-  return <div
-    className={`inference-mode-select${open ? " open" : ""}`}
-    onBlur={(event) => {
-      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) closeMenu();
-    }}
-  >
-    <button
-      id={id}
-      ref={triggerRef}
-      className="header-select inference-mode-trigger"
-      type="button"
-      data-value={value}
-      aria-label={`当前推断模式：${INFERENCE_MODE_OPTIONS[selectedIndex].label}`}
-      aria-haspopup="listbox"
-      aria-expanded={open}
-      aria-controls={listboxId}
-      disabled={busy}
-      title={BUDGET_MODE_COPY[value].description}
-      onClick={() => open ? closeMenu() : openMenu()}
-      onKeyDown={handleTriggerKeyDown}
-    >
-      <span>{INFERENCE_MODE_OPTIONS[selectedIndex].label}</span>
-      <span className="inference-mode-chevron" aria-hidden="true">⌄</span>
-    </button>
-    {open && <div id={listboxId} className="inference-mode-menu" role="listbox" aria-label="推断模式选项">
-      {INFERENCE_MODE_OPTIONS.map((option, index) => <button
-        key={option.value}
-        ref={(element) => { optionRefs.current[index] = element; }}
-        className={`inference-mode-option${activeIndex === index ? " active" : ""}`}
-        type="button"
-        data-value={option.value}
-        role="option"
-        aria-selected={option.value === value}
-        tabIndex={activeIndex === index ? 0 : -1}
-        onMouseEnter={() => setActiveIndex(index)}
-        onClick={(event) => choose(event.currentTarget.dataset.value as ComparisonBudgetMode)}
-        onKeyDown={(event) => handleOptionKeyDown(event, index)}
-      >
-        <span>{option.label}</span>
-        <span className="inference-mode-check" aria-hidden="true">{option.value === value ? "✓" : ""}</span>
-      </button>)}
-    </div>}
-  </div>;
+  return <ThemedSelect
+    id={id}
+    value={value}
+    options={INFERENCE_MODE_OPTIONS}
+    ariaLabel={`当前推断模式：${INFERENCE_MODE_OPTIONS.find((option) => option.value === value)?.label ?? value}`}
+    menuLabel="推断模式选项"
+    disabled={busy}
+    compact
+    alignMenu="end"
+    rootClassName="inference-mode-select"
+    triggerClassName="header-select"
+    title={BUDGET_MODE_COPY[value].description}
+    onChange={onChange}
+  />;
 }
 
 function CompareView({ state, busy, scoresVisible, onToggleScores, onMode, onAnswer, onUndo, onPause, onResults }: {
@@ -1152,7 +1282,7 @@ function ComparisonManager({ items, history, sessionId, busy, onAdd, onDelete }:
     <p>搜索并选择当前会话中的两个条目；可按中文标题、原名、当前排名或 Bangumi ID 查找。保存后，排名、可信度与<Term term="dynamic-forecast">动态剩余预测</Term>都会立即重算。</p>
     <form className="manual-comparison-form" onSubmit={(event) => { event.preventDefault(); if (leftSubjectId !== rightSubjectId) void onAdd(leftSubjectId, rightSubjectId, outcome); }}>
       <SearchableItemPicker id="manual-left-item" label="左侧条目" items={items} value={leftSubjectId} excludeSubjectId={rightSubjectId} disabled={busy} onChange={setLeftSubjectId} />
-      <label><span>判断</span><select aria-label="手动比较结果" value={outcome} disabled={busy} onChange={(event) => setOutcome(event.target.value as Exclude<ComparisonOutcome, "skip">)}><option value="left">更喜欢左侧</option><option value="tie">差不多喜欢</option><option value="right">更喜欢右侧</option></select></label>
+      <div className="manual-comparison-field"><label htmlFor="manual-comparison-outcome"><span>判断</span></label><ThemedSelect id="manual-comparison-outcome" value={outcome} options={MANUAL_OUTCOME_OPTIONS} ariaLabel="手动比较结果" menuLabel="手动比较结果选项" disabled={busy} onChange={setOutcome} /></div>
       <SearchableItemPicker id="manual-right-item" label="右侧条目" items={items} value={rightSubjectId} excludeSubjectId={leftSubjectId} disabled={busy} onChange={setRightSubjectId} />
       <button className="primary-button compact" type="submit" disabled={busy || !leftSubjectId || !rightSubjectId || leftSubjectId === rightSubjectId}>{busy ? "正在重算…" : "添加比较"}</button>
     </form>
@@ -1383,7 +1513,7 @@ function ResultsView({ state, username, busy, onBack, onMode, onDistribution, on
       : "模型未采用原评分顺序先验";
   return <>
     <header className="page-header results-header"><div><span className="eyebrow">排序结果 · {BUDGET_MODE_COPY[budgetMode].label}模式 · <Term term="score-bucket">{scoreLevelCount} 档</Term></span><h1>你的偏好序列</h1><p>{result.length} 个{SUBJECT_TYPES[state.session.subjectType]}条目 · 当前输出 <Term term="score-bucket">{scoreLevelCount} 档评分</Term> · <Term term="prior">{priorCopy}</Term></p></div><div className="header-actions"><InferenceModeSelect id="result-budget-mode" value={budgetMode} busy={busy} onChange={onMode} /><button className="outline-button" onClick={onBack}>继续比较</button><button className="primary-button compact" onClick={() => onExportCsv(result)}>导出 CSV</button></div></header>
-    <section className="result-summary"><article className="panel"><div className="panel-title"><div><span className="eyebrow"><Term term="score-distribution">{scoreLevelCount === DEFAULT_SCORE_LEVELS ? "评分分布对比" : "评分分布"}</Term></span><h2>{scoreLevelCount === DEFAULT_SCORE_LEVELS ? "原评分 → 新评分" : `原评分与 ${scoreLevelCount} 档新评分`}</h2></div><div className="distribution-controls"><ScoreLevelSelect id="result-score-level-count" className="header-select" value={scoreLevelCount} disabled={busy} onChange={(levelCount) => void onDistribution(distributionWithLevelCount(state.session.distribution, levelCount))} /><select id="result-distribution-preset" value={state.session.distribution.preset} disabled={busy} onChange={(event) => { const preset = event.target.value as DistributionPreset; void onDistribution(distributionConfig(preset, scoreLevelCount, state.session.distribution.weights)); }}><option value="uniform">均匀 {scoreLevelCount} 档</option><option value="preserve">保持原分布</option><option value="high-tail">高分辨率尾部</option><option value="reverse-j">反 J 分布</option><option value="custom">自定义权重</option></select></div></div>{state.session.distribution.preset === "custom" && <CustomDistributionEditor key={`${state.session.id}:${scoreLevelCount}`} weights={state.session.distribution.weights} busy={busy} onApply={(weights) => onDistribution(distributionConfig("custom", scoreLevelCount, weights))} />}{scoreLevelCount === DEFAULT_SCORE_LEVELS ? <><TenLevelComparisonHistogram items={state.items} result={result} /><div className="chart-legend"><span><i className="old" />原评分</span><span><i className="new" />新评分</span></div></> : <div className="distribution-charts"><div className="distribution-chart"><strong>原评分 · 1–10</strong><OriginalScoreHistogram items={state.items} /></div><div className="distribution-chart"><strong>新评分 · 1–{scoreLevelCount}</strong><NewScoreHistogram result={result} levelCount={scoreLevelCount} /></div></div>}</article><article className="summary-stat"><span><Term term="cross-two-buckets">预计跨两档作品</Term></span><strong>{crossTwoBucketValue(diagnostics)}</strong><small><Term term="posterior-interval">{crossTwoBucketInterval(diagnostics)}</Term></small><div className="summary-forecast"><span><Term term="dynamic-forecast">动态剩余预测</Term></span><b>{forecastRange(diagnostics)}</b><small><StoppingCriterionDetail diagnostics={diagnostics} /></small></div><hr /><span><Term term="maximum-displacement">最坏偏移</Term></span><strong>{maxBucketDisplacementValue(diagnostics)}</strong><small>{maxBucketDisplacementInterval(diagnostics)}；仅作尾部诊断，停止条件允许最多 10% 的作品<Term term="cross-two-buckets">跨两档</Term>。{diagnostics?.calibration.completed ? <><Term term="calibration-repeat">复问</Term> {diagnostics.calibration.consistent}/{diagnostics.calibration.completed} 次一致，<Term term="posterior">后验</Term> {percent(diagnostics.calibration.posteriorMean)}（仅作诊断）</> : "尚无校准复问；区间仅代表模型内近似"}</small></article></section>
+    <section className="result-summary"><article className="panel"><div className="panel-title"><div><span className="eyebrow"><Term term="score-distribution">{scoreLevelCount === DEFAULT_SCORE_LEVELS ? "评分分布对比" : "评分分布"}</Term></span><h2>{scoreLevelCount === DEFAULT_SCORE_LEVELS ? "原评分 → 新评分" : `原评分与 ${scoreLevelCount} 档新评分`}</h2></div><div className="distribution-controls"><ScoreLevelSelect id="result-score-level-count" className="header-select" compact value={scoreLevelCount} disabled={busy} onChange={(levelCount) => void onDistribution(distributionWithLevelCount(state.session.distribution, levelCount))} /><ThemedSelect id="result-distribution-preset" value={state.session.distribution.preset} options={distributionPresetOptions(scoreLevelCount)} ariaLabel="评分分布预设" menuLabel="评分分布预设选项" compact alignMenu="end" triggerClassName="header-select" disabled={busy} onChange={(preset) => void onDistribution(distributionConfig(preset, scoreLevelCount, state.session.distribution.weights))} /></div></div>{state.session.distribution.preset === "custom" && <CustomDistributionEditor key={`${state.session.id}:${scoreLevelCount}`} weights={state.session.distribution.weights} busy={busy} onApply={(weights) => onDistribution(distributionConfig("custom", scoreLevelCount, weights))} />}{scoreLevelCount === DEFAULT_SCORE_LEVELS ? <><TenLevelComparisonHistogram items={state.items} result={result} /><div className="chart-legend"><span><i className="old" />原评分</span><span><i className="new" />新评分</span></div></> : <div className="distribution-charts"><div className="distribution-chart"><strong>原评分 · 1–10</strong><OriginalScoreHistogram items={state.items} /></div><div className="distribution-chart"><strong>新评分 · 1–{scoreLevelCount}</strong><NewScoreHistogram result={result} levelCount={scoreLevelCount} /></div></div>}</article><article className="summary-stat"><span><Term term="cross-two-buckets">预计跨两档作品</Term></span><strong>{crossTwoBucketValue(diagnostics)}</strong><small><Term term="posterior-interval">{crossTwoBucketInterval(diagnostics)}</Term></small><div className="summary-forecast"><span><Term term="dynamic-forecast">动态剩余预测</Term></span><b>{forecastRange(diagnostics)}</b><small><StoppingCriterionDetail diagnostics={diagnostics} /></small></div><hr /><span><Term term="maximum-displacement">最坏偏移</Term></span><strong>{maxBucketDisplacementValue(diagnostics)}</strong><small>{maxBucketDisplacementInterval(diagnostics)}；仅作尾部诊断，停止条件允许最多 10% 的作品<Term term="cross-two-buckets">跨两档</Term>。{diagnostics?.calibration.completed ? <><Term term="calibration-repeat">复问</Term> {diagnostics.calibration.consistent}/{diagnostics.calibration.completed} 次一致，<Term term="posterior">后验</Term> {percent(diagnostics.calibration.posteriorMean)}（仅作诊断）</> : "尚无校准复问；区间仅代表模型内近似"}</small></article></section>
     <MobileRankingCards items={result} scoreLevelCount={scoreLevelCount} />
     <ComparisonManager key={state.session.id} items={result} history={state.history} sessionId={state.session.id} busy={busy} onAdd={onAddComparison} onDelete={onDeleteComparison} />
     <RatingWriteDangerZone
