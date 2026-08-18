@@ -9,6 +9,9 @@ test("static export contains the complete first screen and metadata", async () =
   assert.match(html, /让你的评分/);
   assert.match(html, /先用演示数据体验/);
   assert.match(html, /为什么这样排序/);
+  assert.match(html, /正在恢复本地排序/);
+  assert.match(html, /principles-return-pending/);
+  assert.match(html, /has-local-project/);
   assert.match(html, /og:image/);
   assert.match(html, /rel="preconnect" href="https:\/\/lain\.bgm\.tv"/);
   assert.doesNotMatch(html, /SkeletonPreview|react-loading-skeleton|Starter Project/);

@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { LOCAL_PROJECT_MARKER_KEY, PRINCIPLES_RETURN_PENDING_KEY } from "@/lib/site-path";
 
 const basePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000";
@@ -35,8 +36,9 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="zh-CN">
+    <html lang="zh-CN" suppressHydrationWarning>
       <head>
+        <script dangerouslySetInnerHTML={{ __html: `try{if(sessionStorage.getItem(${JSON.stringify(PRINCIPLES_RETURN_PENDING_KEY)})==="1"||localStorage.getItem(${JSON.stringify(LOCAL_PROJECT_MARKER_KEY)})==="1")document.documentElement.dataset.resorterRestoring="true"}catch{}` }} />
         <link rel="preconnect" href="https://lain.bgm.tv" />
         <link rel="dns-prefetch" href="//lain.bgm.tv" />
       </head>

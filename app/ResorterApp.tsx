@@ -40,7 +40,7 @@ import {
   resampleDistributionWeights,
 } from "@/lib/distribution";
 import { bangumiCoverVariant } from "@/lib/images";
-import { sitePath } from "@/lib/site-path";
+import { LOCAL_PROJECT_MARKER_KEY, PRINCIPLES_RETURN_PENDING_KEY, PRINCIPLES_RETURN_TARGET_KEY, sitePath } from "@/lib/site-path";
 import type { TermKey } from "@/lib/terminology";
 import { buildRankedItems } from "@/lib/ranking/engine";
 import {
@@ -323,6 +323,10 @@ function Shell({ view, onNavigate, profile, children }: { view: View; onNavigate
 
 function Notice({ tone = "info", children }: { tone?: "info" | "warning" | "error" | "success"; children: ReactNode }) {
   return <div className={`notice notice-${tone}`} role={tone === "error" ? "alert" : "status"}>{children}</div>;
+}
+
+function RestoreSplash() {
+  return <div className="restore-splash" role="status"><span className="brand-mark">R</span><strong>正在恢复本地排序…</strong></div>;
 }
 
 function ConnectView({ onConnected, onCancel, currentUsername }: {
@@ -1058,14 +1062,55 @@ export default function ResorterApp() {
 
   const loadSnapshot = useCallback(async (nextSnapshot: Snapshot, target: View = "library") => {
     const [nextItems, nextSessions, nextProfile] = await Promise.all([getSnapshotItems(nextSnapshot.id), listSessions(nextSnapshot.profileId), db.profiles.get(nextSnapshot.profileId)]);
+    try { window.localStorage.setItem(LOCAL_PROJECT_MARKER_KEY, "1"); } catch { /* IndexedDB remains the source of truth. */ }
     setSnapshot(nextSnapshot); setItems(nextItems); setSessions(nextSessions); setProfile(nextProfile); setStoreStatus(await storageStatus()); navigate(target);
   }, [navigate]);
 
   useEffect(() => {
+    let active = true;
+    let readyFrame = 0;
     workerRef.current = new RankingWorkerClient();
-    document.documentElement.dataset.resorterReady = "true";
-    latestSnapshot().then((saved) => saved ? loadSnapshot(saved, "library") : navigate("connect")).catch(() => navigate("connect"));
+    const clearPrinciplesReturn = () => {
+      try {
+        window.sessionStorage.removeItem(PRINCIPLES_RETURN_PENDING_KEY);
+        window.sessionStorage.removeItem(PRINCIPLES_RETURN_TARGET_KEY);
+      } catch {
+        // Session storage can be disabled without affecting local project recovery.
+      }
+    };
+    const pageshow = (event: PageTransitionEvent) => {
+      if (event.persisted) clearPrinciplesReturn();
+    };
+    window.addEventListener("pageshow", pageshow);
+    void (async () => {
+      try {
+        const saved = await latestSnapshot();
+        if (!active) return;
+        if (saved) await loadSnapshot(saved, "library");
+        else {
+          try { window.localStorage.removeItem(LOCAL_PROJECT_MARKER_KEY); } catch { /* Storage may be disabled. */ }
+          navigate("connect");
+        }
+      } catch {
+        if (active) {
+          try { window.localStorage.removeItem(LOCAL_PROJECT_MARKER_KEY); } catch { /* Storage may be disabled. */ }
+          navigate("connect");
+        }
+      } finally {
+        if (active) {
+          readyFrame = window.requestAnimationFrame(() => {
+            if (!active) return;
+            document.documentElement.dataset.resorterReady = "true";
+            delete document.documentElement.dataset.resorterRestoring;
+            clearPrinciplesReturn();
+          });
+        }
+      }
+    })();
     return () => {
+      active = false;
+      window.cancelAnimationFrame(readyFrame);
+      window.removeEventListener("pageshow", pageshow);
       delete document.documentElement.dataset.resorterReady;
       workerRef.current?.terminate();
     };
@@ -1310,6 +1355,6 @@ export default function ResorterApp() {
     return <div className="center-message"><h2>请先选择一个排序会话</h2><button className="primary-button compact" onClick={() => navigate("library")}>返回收藏概览</button></div>;
   })();
 
-  if (view === "connect" || !snapshot || !profile) return <ConnectView onConnected={(saved) => loadSnapshot(saved, "library")} onCancel={snapshot && profile ? () => navigate("library") : undefined} currentUsername={snapshot && profile ? snapshot.username : undefined} />;
+  if (view === "connect" || !snapshot || !profile) return <><RestoreSplash /><ConnectView onConnected={(saved) => loadSnapshot(saved, "library")} onCancel={snapshot && profile ? () => navigate("library") : undefined} currentUsername={snapshot && profile ? snapshot.username : undefined} /></>;
   return <Shell view={view} onNavigate={navigate} profile={profile}>{globalError && <Notice tone="error">{globalError}</Notice>}{busy && view !== "compare" && <div className="loading-line">正在准备排序模型…</div>}{shellContent}{resyncOpen && <ResyncDialog snapshot={snapshot} onCancel={() => setResyncOpen(false)} onConnected={async (saved) => { setResyncOpen(false); await loadSnapshot(saved, "library"); }} />}</Shell>;
 }

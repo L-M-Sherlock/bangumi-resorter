@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
+import { AppReturnLink } from "@/app/AppReturnLink";
 import { Term } from "@/app/Term";
-import { sitePath } from "@/lib/site-path";
 
 export const metadata: Metadata = {
   title: "为什么这样排序？· Bangumi Resorter",
@@ -38,8 +38,8 @@ function SectionHeading({ id, children }: { id: string; children: string }) {
 export default function PrinciplesPage() {
   return <main className="principles-page">
     <header className="principles-topbar">
-      <a className="principles-brand" href={sitePath("/")}><span>R</span><strong>Resorter</strong><small>for Bangumi</small></a>
-      <a className="principles-back" href={sitePath("/")}>返回排序工具 <span aria-hidden="true">→</span></a>
+      <AppReturnLink className="principles-brand"><span>R</span><strong>Resorter</strong><small>for Bangumi</small></AppReturnLink>
+      <AppReturnLink className="principles-back">返回排序工具 <span aria-hidden="true">→</span></AppReturnLink>
     </header>
 
     <div className="principles-layout">

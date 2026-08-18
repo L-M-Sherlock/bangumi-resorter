@@ -48,3 +48,67 @@ test("term popovers stay inside a mobile viewport", async ({ page }) => {
   await page.keyboard.press("Escape");
   await expect(popover).toHaveCount(0);
 });
+
+test("returning from principles restores the active sorter without a login flash", async ({ page }) => {
+  await page.addInitScript(() => {
+    const watchKey = "resorter-test:watch-return";
+    const flashKey = "resorter-test:login-flashed";
+    const inspectUntilReady = () => {
+      if (window.sessionStorage.getItem(watchKey) !== "1") return;
+      const connect = document.querySelector<HTMLElement>(".connect-page");
+      if (connect && getComputedStyle(connect).visibility !== "hidden" && connect.getClientRects().length > 0) {
+        window.sessionStorage.setItem(flashKey, "1");
+      }
+      if (!document.documentElement.dataset.resorterReady) window.requestAnimationFrame(inspectUntilReady);
+    };
+    window.requestAnimationFrame(inspectUntilReady);
+  });
+  await page.goto("/");
+  await page.locator("html[data-resorter-ready='true']").waitFor();
+  await page.getByRole("button", { name: "先用演示数据体验" }).click();
+  await expect(page.getByRole("heading", { name: /demo 的已评分收藏/ })).toBeVisible();
+  await page.evaluate(() => {
+    window.sessionStorage.setItem("resorter-test:watch-return", "1");
+    window.sessionStorage.removeItem("resorter-test:login-flashed");
+  });
+
+  await page.getByRole("link", { name: /原理/ }).click();
+  await expect(page).toHaveURL(/\/principles$/);
+  await page.locator('.principles-toc a[href="#stopping-rule"]').click();
+  await expect(page).toHaveURL(/\/principles#stopping-rule$/);
+  await page.getByRole("link", { name: /返回排序工具/ }).click();
+
+  await expect(page).toHaveURL(/\/#library$/);
+  await expect(page.getByRole("heading", { name: /demo 的已评分收藏/ })).toBeVisible();
+  await expect(page.locator(".connect-page")).toHaveCount(0);
+  expect(await page.evaluate(() => window.sessionStorage.getItem("resorter-test:login-flashed"))).toBeNull();
+});
+
+test("refreshing a saved project restores it without exposing the login page", async ({ page }) => {
+  await page.addInitScript(() => {
+    const flashKey = "resorter-test:refresh-login-flashed";
+    const inspectUntilReady = () => {
+      const connect = document.querySelector<HTMLElement>(".connect-page");
+      if (connect && getComputedStyle(connect).visibility !== "hidden" && connect.getClientRects().length > 0) {
+        window.sessionStorage.setItem(flashKey, "1");
+      }
+      if (!document.documentElement.dataset.resorterReady) window.requestAnimationFrame(inspectUntilReady);
+    };
+    if (window.localStorage.getItem("bangumi-resorter:has-local-project") === "1") {
+      window.requestAnimationFrame(inspectUntilReady);
+    }
+  });
+  await page.goto("/");
+  await page.locator("html[data-resorter-ready='true']").waitFor();
+  await page.getByRole("button", { name: "先用演示数据体验" }).click();
+  await expect(page.getByRole("heading", { name: /demo 的已评分收藏/ })).toBeVisible();
+  await page.evaluate(() => window.sessionStorage.removeItem("resorter-test:refresh-login-flashed"));
+
+  await page.reload();
+
+  await page.locator("html[data-resorter-ready='true']").waitFor();
+  await expect(page).toHaveURL(/\/#library$/);
+  await expect(page.getByRole("heading", { name: /demo 的已评分收藏/ })).toBeVisible();
+  await expect(page.locator(".connect-page")).toHaveCount(0);
+  expect(await page.evaluate(() => window.sessionStorage.getItem("resorter-test:refresh-login-flashed"))).toBeNull();
+});
