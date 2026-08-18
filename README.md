@@ -27,16 +27,16 @@
 
 ## 本地开发
 
-要求 Node.js 22.13 或更高版本。
+要求 Node.js 22.13 或更高版本。开发脚本可直接在 macOS、Linux，以及 Windows PowerShell 或命令提示符中运行，不需要 WSL。
 
-```bash
+```shell
 npm ci
 npm run dev
 ```
 
 打开 `http://localhost:3000`。常用检查：
 
-```bash
+```shell
 npm run typecheck
 npm run test:unit
 npm run lint
@@ -45,6 +45,22 @@ npm run test:e2e
 ```
 
 生产静态文件位于 `dist/client`。
+
+### Windows
+
+建议使用 Node.js 官方安装包或 nvm-windows 安装当前 LTS 版本。在 PowerShell 中，从仓库目录直接运行：
+
+```powershell
+npm ci
+npm run dev
+```
+
+若 PowerShell 因本机执行策略阻止 `npm.ps1`，可以改用同目录下的 `npm.cmd`，无需修改项目或全局执行策略：
+
+```powershell
+npm.cmd ci
+npm.cmd run dev
+```
 
 ## 部署
 
@@ -56,11 +72,29 @@ npm run test:e2e
 
 ### 其他子路径托管
 
-如果站点部署在 `/some-path` 下，构建时设置：
+如果站点部署在 `/some-path` 下，构建时设置环境变量。
+
+macOS / Linux：
 
 ```bash
 NEXT_PUBLIC_BASE_PATH=/some-path \
 NEXT_PUBLIC_SITE_URL=https://example.com \
+npm run build
+```
+
+Windows PowerShell：
+
+```powershell
+$env:NEXT_PUBLIC_BASE_PATH = "/some-path"
+$env:NEXT_PUBLIC_SITE_URL = "https://example.com"
+npm run build
+```
+
+Windows 命令提示符：
+
+```bat
+set "NEXT_PUBLIC_BASE_PATH=/some-path"
+set "NEXT_PUBLIC_SITE_URL=https://example.com"
 npm run build
 ```
 

@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import { ThemeToggle } from "@/app/ThemeToggle";
 import { LOCAL_PROJECT_MARKER_KEY, PRINCIPLES_RETURN_PENDING_KEY, THEME_PREFERENCE_KEY } from "@/lib/site-path";
 
 const basePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
@@ -44,7 +43,7 @@ export default function RootLayout({
         <link rel="preconnect" href="https://lain.bgm.tv" />
         <link rel="dns-prefetch" href="//lain.bgm.tv" />
       </head>
-      <body>{children}<ThemeToggle /></body>
+      <body>{children}</body>
     </html>
   );
 }

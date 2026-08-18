@@ -58,6 +58,7 @@ test("principles page is public and terminology popovers are keyboard accessible
 test("term popovers stay inside a mobile viewport", async ({ page }) => {
   await page.setViewportSize({ width: 375, height: 812 });
   await page.goto("/principles");
+  await page.waitForLoadState("networkidle");
   const term = page.locator('[data-term-key="rating-clumping"]').first();
   await term.scrollIntoViewIfNeeded();
   await term.click();

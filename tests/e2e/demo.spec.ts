@@ -29,6 +29,14 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await expect(page.getByText(/当前 5 档分桶.*当前 6 部作品中，允许最多 0 部跨两档/)).toBeVisible();
   await page.getByRole("button", { name: /开始快速比较 · 动态停止/ }).click();
   await expect(page.getByRole("heading", { name: "哪一部在你的偏好中更靠前？" })).toBeVisible();
+  await page.setViewportSize({ width: 375, height: 812 });
+  for (const shortcut of [page.locator(".choice-button kbd"), page.locator(".secondary-actions kbd")]) {
+    const count = await shortcut.count();
+    for (let index = 0; index < count; index += 1) await expect(shortcut.nth(index)).toBeHidden();
+  }
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await expect(page.locator(".choice-button kbd").first()).toBeVisible();
+  await expect(page.locator(".secondary-actions kbd").first()).toBeVisible();
   await expect(page.getByText(/原评分 \d/)).toHaveCount(0);
   const originalPair = await page.locator(".media-card h2").allTextContents();
   await page.locator(".media-card h2").nth(1).evaluate((heading) => {

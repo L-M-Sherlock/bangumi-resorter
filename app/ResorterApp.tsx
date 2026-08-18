@@ -3,6 +3,7 @@
 
 import { FormEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { Term } from "@/app/Term";
+import { ThemeToggle } from "@/app/ThemeToggle";
 import {
   previewBangumiRatingWrite,
   RatingWriteCandidate,
@@ -313,21 +314,29 @@ function Shell({ view, onNavigate, profile, children }: { view: View; onNavigate
   return (
     <main className="app-shell">
       <aside className="sidebar">
-        <button className="brand-button" onClick={() => onNavigate("library")}><Brand /></button>
+        <button className="brand-button" aria-label="返回主页" title="收藏概览" onClick={() => onNavigate("library")}><Brand /></button>
         <nav aria-label="主要导航">
           {nav.map(([target, icon, label]) => (
-            <button key={target} className={view === target ? "active" : ""} onClick={() => onNavigate(target)}>
-              <span className="nav-icon">{icon}</span><span className="nav-label">{label}</span>
+            <button key={target} aria-label={label} title={label} className={view === target ? "active" : ""} onClick={() => onNavigate(target)}>
+              <span className="nav-icon" aria-hidden="true">{icon}</span><span className="nav-label">{label}</span>
             </button>
           ))}
-          <a href={sitePath("/principles")}><span className="nav-icon">§</span><span className="nav-label">原理</span></a>
-          <a href={GITHUB_REPOSITORY_URL} target="_blank" rel="noreferrer" title="在 GitHub 上打开项目并 Star"><span className="nav-icon" aria-hidden="true">★</span><span className="nav-label">GitHub Star</span></a>
+          <a className="desktop-nav-link" aria-label="排序原理" href={sitePath("/principles")}><span className="nav-icon" aria-hidden="true">§</span><span className="nav-label">原理</span></a>
+          <a className="desktop-nav-link" href={GITHUB_REPOSITORY_URL} target="_blank" rel="noreferrer" title="在 GitHub 上打开项目并 Star"><span className="nav-icon" aria-hidden="true">★</span><span className="nav-label">GitHub Star</span></a>
+          <details className="mobile-nav-more">
+            <summary role="button" aria-label="更多导航" title="更多导航"><span className="nav-icon" aria-hidden="true">•••</span><span className="nav-label">更多</span></summary>
+            <div className="mobile-nav-menu">
+              <a href={sitePath("/principles")}><span aria-hidden="true">§</span><span>排序原理</span></a>
+              <a href={GITHUB_REPOSITORY_URL} target="_blank" rel="noreferrer"><span aria-hidden="true">★</span><span>GitHub Star</span></a>
+            </div>
+          </details>
         </nav>
         {profile && <div className="profile-mini">
           {profile.avatar ? <img src={profile.avatar} alt="" /> : <span className="avatar-fallback">{profile.username[0]?.toUpperCase()}</span>}
           <div><strong>{profile.nickname || profile.username}</strong><small>@{profile.username}</small></div>
         </div>}
         <div className="sidebar-note"><span className="status-dot" /><div><strong>排序数据仅存于本机</strong><small>默认只读；确认后才会写回</small></div></div>
+        <ThemeToggle />
       </aside>
       <section className="workspace">{children}</section>
     </main>
@@ -379,7 +388,7 @@ function ConnectView({ onConnected, onCancel, currentUsername }: {
   return (
     <main className="connect-page">
       <section className="connect-intro">
-        <Brand />
+        <div className="connect-header"><Brand /><ThemeToggle /></div>
         <span className="hero-kicker">PERSONAL MEDIA RANKING</span>
         <h1>让你的评分，<br />重新变得有意义。</h1>
         <p>不再纠结“它值 8 分还是 9 分”。只需回答哪一部更喜欢，Resorter 会用 <Term term="bradley-terry">Bradley–Terry 模型</Term>得到可检查、逐步稳定的个人偏好顺序。</p>
@@ -765,7 +774,7 @@ function LibraryView({ snapshot, items, sessions, onStart, onResume, onUpgradeSe
   }
 
   return <>
-    <header className="page-header"><div><span className="eyebrow">收藏概览</span><h1>{snapshot.username} 的已评分收藏</h1><p>上次同步于 {formatDate(snapshot.syncedAt)} · 共 {items.length} 个条目</p></div><div className="header-actions"><button className="outline-button" onClick={onSyncAgain}>重新同步</button><button className="outline-button" onClick={onSwitchAccount}>切换账号</button></div></header>
+    <header className="page-header library-header"><div><span className="eyebrow">收藏概览</span><h1>{snapshot.username} 的已评分收藏</h1><p>上次同步于 {formatDate(snapshot.syncedAt)} · 共 {items.length} 个条目</p></div><div className="header-actions"><button className="outline-button" onClick={onSyncAgain}>重新同步</button><button className="outline-button" onClick={onSwitchAccount}>切换账号</button></div></header>
     <section className="metric-grid">
       {availableTypes.map(([type, label]) => { const count = items.filter((item) => item.subjectType === type).length; const mean = items.filter((item) => item.subjectType === type).reduce((sum, item) => sum + item.rate, 0) / count; return <button key={type} className={`metric-card ${selectedType === type ? "selected" : ""}`} onClick={() => { setSelectedType(type); setSelectedTags([]); }}><span>{label}</span><strong>{count}</strong><small>平均 {mean.toFixed(1)} 分</small></button>; })}
     </section>
@@ -848,10 +857,12 @@ function CompareView({ state, busy, scoresVisible, onToggleScores, onMode, onAns
   const calibrationAvailable = (diagnostics?.calibration.completed ?? 0) > 0;
   const forecast = diagnostics?.forecast;
   const projectionSuccesses = forecast?.withinProjectionSuccesses ?? forecast?.beforeLimitSuccesses;
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   if (!left || !right) return <div className="center-message"><h2>暂时没有可比较的条目</h2><p>你可以查看当前结果，或返回收藏调整范围。</p><button className="primary-button" onClick={onResults}>查看结果</button></div>;
   return <>
-    <header className="topbar"><div><span className="eyebrow">{SUBJECT_TYPES[state.session.subjectType]} · {BUDGET_MODE_COPY[budgetMode].label}模式 · <Term term="score-bucket">{scoreLevelCount} 档</Term> · {state.session.title}</span><h1>哪一部在你的偏好中更靠前？</h1></div><div className="header-actions"><InferenceModeSelect id="compare-budget-mode" value={budgetMode} busy={busy} onChange={onMode} /><button className="ghost-button" onClick={onToggleScores}>{scoresVisible ? "隐藏原评分" : "显示原评分"}</button></div></header>
-    <div className="progress-row dynamic-progress"><div className="progress-copy"><span>本次已完成 <strong>{currentSessionAccepted}</strong> 次</span><span><Term term="adjacent-tolerance">后验期望相邻容差覆盖</Term> <strong>{Math.round(toleranceCoverage)}%</strong></span><span><Term term="maximum-displacement">最坏偏移中位数</Term> <strong>{maxBucketDisplacementValue(diagnostics)}</strong></span></div><div className="progress-track" aria-label={`后验期望相邻容差覆盖 ${Math.round(toleranceCoverage)}%`}><span style={{ width: `${toleranceCoverage}%` }} /></div><div className="forecast-row"><span><Term term="cross-two-buckets">跨两档作品分布</Term> <strong><Term term="posterior-interval">{crossTwoBucketInterval(diagnostics)}</Term></strong></span><span><Term term="maximum-displacement">最坏偏移分布</Term> <strong>{maxBucketDisplacementInterval(diagnostics)}</strong></span><span><Term term="dynamic-forecast">动态剩余预测</Term> <strong>{forecastRange(diagnostics)}</strong></span></div></div>
+    <header className="topbar compare-header"><div><span className="eyebrow">{SUBJECT_TYPES[state.session.subjectType]} · {BUDGET_MODE_COPY[budgetMode].label}模式 · <Term term="score-bucket">{scoreLevelCount} 档</Term> · {state.session.title}</span><h1>哪一部在你的偏好中更靠前？</h1></div><div className="header-actions"><InferenceModeSelect id="compare-budget-mode" value={budgetMode} busy={busy} onChange={onMode} /><button className="ghost-button" onClick={onToggleScores}>{scoresVisible ? "隐藏原评分" : "显示原评分"}</button></div></header>
+    <button className="mobile-diagnostics-toggle" type="button" aria-expanded={diagnosticsOpen} aria-controls="compare-diagnostics" onClick={() => setDiagnosticsOpen((value) => !value)}><span>已完成 {currentSessionAccepted} 次 · 覆盖 {Math.round(toleranceCoverage)}%</span><span>{diagnosticsOpen ? "收起诊断" : "查看诊断"}</span></button>
+    <div className="progress-row dynamic-progress" id="compare-diagnostics"><div className="progress-copy"><span>本次已完成 <strong>{currentSessionAccepted}</strong> 次</span><span><Term term="adjacent-tolerance">后验期望相邻容差覆盖</Term> <strong>{Math.round(toleranceCoverage)}%</strong></span><span><Term term="maximum-displacement">最坏偏移中位数</Term> <strong>{maxBucketDisplacementValue(diagnostics)}</strong></span></div><div className="progress-track" aria-label={`后验期望相邻容差覆盖 ${Math.round(toleranceCoverage)}%`}><span style={{ width: `${toleranceCoverage}%` }} /></div><div className="forecast-row"><span><Term term="cross-two-buckets">跨两档作品分布</Term> <strong><Term term="posterior-interval">{crossTwoBucketInterval(diagnostics)}</Term></strong></span><span><Term term="maximum-displacement">最坏偏移分布</Term> <strong>{maxBucketDisplacementInterval(diagnostics)}</strong></span><span><Term term="dynamic-forecast">动态剩余预测</Term> <strong>{forecastRange(diagnostics)}</strong></span></div></div>
     {currentSessionAccepted > 0 && currentSessionAccepted % 20 === 0 && <Notice tone="warning">你已经完成 {currentSessionAccepted} 次判断，建议现在下载一次 JSON 备份。</Notice>}
     {targetReady && <Notice tone="success">当前{BUDGET_MODE_COPY[budgetMode].label}模式要求的嵌套<Term term="posterior">后验检查</Term>均已达标：在 <Term term="score-bucket">{scoreLevelCount} 档评分</Term>中，至少 90% 的作品最多偏移一档。可以导出结果，也可以继续比较。</Notice>}
     {!targetReady && projectionSuccesses === 0 && <Notice>本轮预测窗口内<Term term="monte-carlo">达标模拟</Term>为 {forecastProjectionProbability(forecast)}；未观察到成功不是不可达证明。再完成 {forecast?.nextCheckpoint} 次后会用新证据重估。</Notice>}
@@ -1217,6 +1228,23 @@ function RatingWriteDangerZone({
   </details>;
 }
 
+function MobileRankingCards({ items, scoreLevelCount }: { items: RankedItem[]; scoreLevelCount: number }) {
+  return <ol className="ranking-cards" aria-label="移动端排名结果">{items.map((item) =>
+    <li className="ranking-card" key={item.subjectId}>
+      <div className="ranking-card-main">
+        <strong className="ranking-card-rank">#{item.rank}</strong>
+        <div className="title-cell"><Poster item={item} /><div><strong>{primaryName(item)}</strong><small>{item.nameCn ? item.name : (item.date?.slice(0, 4) || "") + " · " + SUBJECT_TYPES[item.subjectType]}</small></div></div>
+        <a href={"https://bgm.tv/subject/" + item.subjectId} target="_blank" rel="noreferrer" aria-label={"在 Bangumi 打开 " + primaryName(item)}>↗</a>
+      </div>
+      <div className="ranking-card-scores">
+        <span>原评分 <b className="score-pill old">{item.rate}</b></span>
+        <span>新评分 <b className={"score-pill new " + (scoreLevelCount === DEFAULT_SCORE_LEVELS && item.newRate !== item.rate ? "changed" : "")}>{item.newRate}</b></span>
+        <span>稳定度 <strong>{item.bucketStability === undefined ? "—" : percent(item.bucketStability)}</strong></span>
+      </div>
+      <details><summary>模型细节</summary><dl><div><dt>连续潜在分数</dt><dd>{item.ability.toFixed(3)}</dd></div><div><dt>后验标准差</dt><dd>{item.uncertainty.toFixed(3)}</dd></div></dl></details>
+    </li>)}</ol>;
+}
+
 function ResultsView({ state, username, busy, onBack, onMode, onDistribution, onExportCsv, onAddComparison, onDeleteComparison, onResync }: {
   state: CompareState;
   username: string;
@@ -1240,8 +1268,9 @@ function ResultsView({ state, username, busy, onBack, onMode, onDistribution, on
       ? "原评分作为中等先验"
       : "模型未采用原评分顺序先验";
   return <>
-    <header className="page-header"><div><span className="eyebrow">排序结果 · {BUDGET_MODE_COPY[budgetMode].label}模式 · <Term term="score-bucket">{scoreLevelCount} 档</Term></span><h1>你的偏好序列</h1><p>{result.length} 个{SUBJECT_TYPES[state.session.subjectType]}条目 · 当前输出 <Term term="score-bucket">{scoreLevelCount} 档评分</Term> · <Term term="prior">{priorCopy}</Term></p></div><div className="header-actions"><InferenceModeSelect id="result-budget-mode" value={budgetMode} busy={busy} onChange={onMode} /><button className="outline-button" onClick={onBack}>继续比较</button><button className="primary-button compact" onClick={() => onExportCsv(result)}>导出 CSV</button></div></header>
+    <header className="page-header results-header"><div><span className="eyebrow">排序结果 · {BUDGET_MODE_COPY[budgetMode].label}模式 · <Term term="score-bucket">{scoreLevelCount} 档</Term></span><h1>你的偏好序列</h1><p>{result.length} 个{SUBJECT_TYPES[state.session.subjectType]}条目 · 当前输出 <Term term="score-bucket">{scoreLevelCount} 档评分</Term> · <Term term="prior">{priorCopy}</Term></p></div><div className="header-actions"><InferenceModeSelect id="result-budget-mode" value={budgetMode} busy={busy} onChange={onMode} /><button className="outline-button" onClick={onBack}>继续比较</button><button className="primary-button compact" onClick={() => onExportCsv(result)}>导出 CSV</button></div></header>
     <section className="result-summary"><article className="panel"><div className="panel-title"><div><span className="eyebrow"><Term term="score-distribution">{scoreLevelCount === DEFAULT_SCORE_LEVELS ? "评分分布对比" : "评分分布"}</Term></span><h2>{scoreLevelCount === DEFAULT_SCORE_LEVELS ? "原评分 → 新评分" : `原评分与 ${scoreLevelCount} 档新评分`}</h2></div><div className="distribution-controls"><ScoreLevelSelect id="result-score-level-count" className="header-select" value={scoreLevelCount} disabled={busy} onChange={(levelCount) => void onDistribution(distributionWithLevelCount(state.session.distribution, levelCount))} /><select id="result-distribution-preset" value={state.session.distribution.preset} disabled={busy} onChange={(event) => { const preset = event.target.value as DistributionPreset; void onDistribution(distributionConfig(preset, scoreLevelCount, state.session.distribution.weights)); }}><option value="uniform">均匀 {scoreLevelCount} 档</option><option value="preserve">保持原分布</option><option value="high-tail">高分辨率尾部</option><option value="reverse-j">反 J 分布</option><option value="custom">自定义权重</option></select></div></div>{state.session.distribution.preset === "custom" && <CustomDistributionEditor key={`${state.session.id}:${scoreLevelCount}`} weights={state.session.distribution.weights} busy={busy} onApply={(weights) => onDistribution(distributionConfig("custom", scoreLevelCount, weights))} />}{scoreLevelCount === DEFAULT_SCORE_LEVELS ? <><TenLevelComparisonHistogram items={state.items} result={result} /><div className="chart-legend"><span><i className="old" />原评分</span><span><i className="new" />新评分</span></div></> : <div className="distribution-charts"><div className="distribution-chart"><strong>原评分 · 1–10</strong><OriginalScoreHistogram items={state.items} /></div><div className="distribution-chart"><strong>新评分 · 1–{scoreLevelCount}</strong><NewScoreHistogram result={result} levelCount={scoreLevelCount} /></div></div>}</article><article className="summary-stat"><span><Term term="cross-two-buckets">预计跨两档作品</Term></span><strong>{crossTwoBucketValue(diagnostics)}</strong><small><Term term="posterior-interval">{crossTwoBucketInterval(diagnostics)}</Term></small><div className="summary-forecast"><span><Term term="dynamic-forecast">动态剩余预测</Term></span><b>{forecastRange(diagnostics)}</b><small><StoppingCriterionDetail diagnostics={diagnostics} /></small></div><hr /><span><Term term="maximum-displacement">最坏偏移</Term></span><strong>{maxBucketDisplacementValue(diagnostics)}</strong><small>{maxBucketDisplacementInterval(diagnostics)}；仅作尾部诊断，停止条件允许最多 10% 的作品<Term term="cross-two-buckets">跨两档</Term>。{diagnostics?.calibration.completed ? <><Term term="calibration-repeat">复问</Term> {diagnostics.calibration.consistent}/{diagnostics.calibration.completed} 次一致，<Term term="posterior">后验</Term> {percent(diagnostics.calibration.posteriorMean)}（仅作诊断）</> : "尚无校准复问；区间仅代表模型内近似"}</small></article></section>
+    <MobileRankingCards items={result} scoreLevelCount={scoreLevelCount} />
     <ComparisonManager key={state.session.id} items={result} history={state.history} sessionId={state.session.id} busy={busy} onAdd={onAddComparison} onDelete={onDeleteComparison} />
     <RatingWriteDangerZone
       key={`${state.session.id}:${state.model.version}:${scoreLevelCount}:${state.session.distribution.preset}:${state.session.distribution.weights.join(",")}`}

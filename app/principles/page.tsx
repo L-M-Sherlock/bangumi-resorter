@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { AppReturnLink } from "@/app/AppReturnLink";
 import { Term } from "@/app/Term";
+import { ThemeToggle } from "@/app/ThemeToggle";
 
 export const metadata: Metadata = {
   title: "为什么这样排序？· Bangumi Resorter",
@@ -39,7 +40,7 @@ export default function PrinciplesPage() {
   return <main className="principles-page">
     <header className="principles-topbar">
       <AppReturnLink className="principles-brand"><span>R</span><strong>Resorter</strong><small>for Bangumi</small></AppReturnLink>
-      <AppReturnLink className="principles-back">返回排序工具 <span aria-hidden="true">→</span></AppReturnLink>
+      <div className="principles-actions"><AppReturnLink className="principles-back">返回排序工具 <span aria-hidden="true">→</span></AppReturnLink><ThemeToggle /></div>
     </header>
 
     <div className="principles-layout">
