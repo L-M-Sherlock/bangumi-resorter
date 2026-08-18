@@ -109,7 +109,7 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await expect(page.getByText(/区间仅代表模型内近似/)).toBeVisible();
   let dangerZone = page.locator(".rating-write-danger");
   await expect(dangerZone).toBeVisible();
-  await expect(page.locator(".comparison-manager + .rating-write-danger + .ranking-table-wrap")).toHaveCount(1);
+  await expect(page.locator(".comparison-manager + .rating-write-danger + .ranking-cards + .ranking-table-wrap")).toHaveCount(1);
   expect(await dangerZone.locator(":scope > summary strong").evaluate((element) => getComputedStyle(element).fontSize)).toBe("14px");
   await dangerZone.locator(":scope > summary").click();
   await expect(dangerZone.getByText(/当前结果是 5 档/)).toBeVisible();

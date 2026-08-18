@@ -247,10 +247,12 @@ test.describe("移动端 UI/UX", () => {
     const rankingPlacement = await page.evaluate(() => ({
       cardsTop: document.querySelector<HTMLElement>(".ranking-cards")?.getBoundingClientRect().top ?? Infinity,
       managerTop: document.querySelector<HTMLElement>(".comparison-manager")?.getBoundingClientRect().top ?? Infinity,
+      dangerTop: document.querySelector<HTMLElement>(".rating-write-danger")?.getBoundingClientRect().top ?? Infinity,
       externalLinkHeight: document.querySelector<HTMLElement>(".ranking-card-main > a")?.getBoundingClientRect().height ?? 0,
       detailsHeight: document.querySelector<HTMLElement>(".ranking-card details summary")?.getBoundingClientRect().height ?? 0,
     }));
-    expect(rankingPlacement.cardsTop).toBeLessThan(rankingPlacement.managerTop);
+    expect(rankingPlacement.managerTop).toBeLessThan(rankingPlacement.cardsTop);
+    expect(rankingPlacement.dangerTop).toBeLessThan(rankingPlacement.cardsTop);
     expect(rankingPlacement.externalLinkHeight).toBeGreaterThanOrEqual(44);
     expect(rankingPlacement.detailsHeight).toBeGreaterThanOrEqual(44);
 
