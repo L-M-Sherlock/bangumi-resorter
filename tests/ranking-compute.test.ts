@@ -31,7 +31,7 @@ function request(mode: ComparisonBudgetMode, version: number, previousModel?: Mo
     randomSeed: 20260817,
     items,
     history,
-    distribution: { preset: "uniform", weights: Array(10).fill(10) },
+    distribution: { preset: "uniform", levelCount: 10, weights: Array(10).fill(10) },
     budgetMode: mode,
     previousModel,
     ...rankingTuning(mode),

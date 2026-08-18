@@ -23,6 +23,7 @@ import {
 } from "./types";
 import { sessionBudgetMode, sessionReusePolicy } from "./ranking/strategy";
 import { collectionTagFilter, filterScopeItems, sameTagFilter } from "./scope";
+import { normalizeDistributionConfig } from "./distribution";
 
 interface MetaRecord { key: string; value: string; }
 
@@ -75,6 +76,20 @@ class ResorterDatabase extends Dexie {
     }).upgrade(async (transaction) => {
       await transaction.table("sessions").toCollection().modify((session: SortingSession) => {
         session.maxComparisons = undefined;
+      });
+    });
+    this.version(4).stores({
+      profiles: "id, username, updatedAt",
+      snapshots: "id, profileId, syncedAt",
+      items: "[snapshotId+subjectId], snapshotId, subjectId, subjectType, collectionType, rate",
+      sessions: "id, profileId, snapshotId, subjectType, status, updatedAt",
+      sessionItems: "id, sessionId, subjectId, [sessionId+subjectId]",
+      comparisons: "id, profileId, sessionId, subjectType, active, createdAt",
+      models: "sessionId, version, updatedAt",
+      meta: "key",
+    }).upgrade(async (transaction) => {
+      await transaction.table("sessions").toCollection().modify((session: SortingSession) => {
+        session.distribution = normalizeDistributionConfig(session.distribution);
       });
     });
   }
@@ -192,7 +207,7 @@ export async function createSession(
   const timestamp = now();
   const session: SortingSession = {
     id: id(), profileId: snapshot.profileId, snapshotId: snapshot.id, subjectType, collectionTypes,
-    title: `${snapshot.username} 的排序`, status: "active", distribution,
+    title: `${snapshot.username} 的排序`, status: "active", distribution: normalizeDistributionConfig(distribution),
     randomSeed: crypto.getRandomValues(new Uint32Array(1))[0], modelVersion: 0,
     budgetMode, comparisonReusePolicy, tagFilter: normalizedTagFilter,
     createdAt: timestamp, updatedAt: timestamp,
@@ -343,7 +358,7 @@ export async function upgradeSessionToSnapshot(sourceSessionId: string, targetSn
         collectionTypes: [...state.source.collectionTypes],
         title: state.source.title,
         status: "active",
-        distribution: { ...state.source.distribution, weights: [...state.source.distribution.weights] },
+        distribution: normalizeDistributionConfig(state.source.distribution),
         randomSeed: crypto.getRandomValues(new Uint32Array(1))[0],
         modelVersion: 0,
         budgetMode: sessionBudgetMode(state.source),
@@ -435,7 +450,7 @@ export async function deriveSessionWithTagFilter(
         collectionTypes: [...state.source.collectionTypes],
         title: state.source.title,
         status: "active",
-        distribution: { ...state.source.distribution, weights: [...state.source.distribution.weights] },
+        distribution: normalizeDistributionConfig(state.source.distribution),
         randomSeed: crypto.getRandomValues(new Uint32Array(1))[0],
         modelVersion: 0,
         budgetMode: sessionBudgetMode(state.source),
@@ -580,7 +595,7 @@ export async function commitSessionDistribution(
     if (!session || session.modelVersion !== expectedVersion) throw new Error("排序会话已在其他页面更新，请刷新后继续。");
     const updated: SortingSession = {
       ...session,
-      distribution,
+      distribution: normalizeDistributionConfig(distribution),
       modelVersion: expectedVersion + 1,
       status: modelMeetsTarget(nextModel) ? "complete" : "active",
       updatedAt: now(),
@@ -656,6 +671,7 @@ export async function importProject(payload: ExportV1): Promise<Profile> {
     derivedFromSessionId: item.derivedFromSessionId
       ? mapSession.get(item.derivedFromSessionId)
       : undefined,
+    distribution: normalizeDistributionConfig(item.distribution),
     tagFilter: collectionTagFilter(item.tagFilter?.tags ?? []),
     stoppingTarget: undefined,
     maxComparisons: undefined,

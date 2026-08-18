@@ -6,7 +6,7 @@ import {
   commitComparisonDeletion, commitResponse, commitSessionBudgetMode, commitSessionDistribution, createSession, db, deleteSession, deriveSessionWithTagFilter, exportProject, getSessionBundle, importProject,
   initializeModel, lastActiveResponse, previewSessionTagDerivation, previewSessionUpgrade, saveSnapshot, upgradeSessionToSnapshot,
 } from "../lib/db";
-import type { ComparisonRecord } from "../lib/types";
+import type { ComparisonRecord, DistributionConfig } from "../lib/types";
 
 beforeEach(async () => {
   db.close();
@@ -19,7 +19,7 @@ describe("IndexedDB project persistence", () => {
     const snapshotId = crypto.randomUUID();
     const items = createDemoItems(snapshotId).slice(0, 3);
     const snapshot = await saveSnapshot({ username: "demo", nickname: "Demo" }, snapshotId, items);
-    const session = await createSession(snapshot, 2, [2], { preset: "uniform", weights: Array(10).fill(10) });
+    const session = await createSession(snapshot, 2, [2], { preset: "uniform", levelCount: 10, weights: Array(10).fill(10) });
     expect(session.budgetMode).toBe("quick");
     expect(session.comparisonReusePolicy).toBe("snapshot");
     expect(session.stoppingTarget).toBeUndefined();
@@ -43,7 +43,7 @@ describe("IndexedDB project persistence", () => {
     const snapshotId = crypto.randomUUID();
     const items = createDemoItems(snapshotId).slice(0, 3);
     const snapshot = await saveSnapshot({ username: "demo", nickname: "Demo" }, snapshotId, items);
-    const session = await createSession(snapshot, 2, [2], { preset: "uniform", weights: Array(10).fill(10) });
+    const session = await createSession(snapshot, 2, [2], { preset: "uniform", levelCount: 10, weights: Array(10).fill(10) });
     const inputs = items.map(({ subjectId, rate }) => ({ subjectId, rate }));
     const initialFit = fitModel(inputs, []);
     const initialModel = toModelState(session.id, 0, initialFit);
@@ -69,7 +69,7 @@ describe("IndexedDB project persistence", () => {
     const snapshotId = crypto.randomUUID();
     const items = createDemoItems(snapshotId).slice(0, 2);
     const snapshot = await saveSnapshot({ username: "demo", nickname: "Demo" }, snapshotId, items);
-    const session = await createSession(snapshot, 2, [2], { preset: "uniform", weights: Array(10).fill(10) });
+    const session = await createSession(snapshot, 2, [2], { preset: "uniform", levelCount: 10, weights: Array(10).fill(10) });
     const fit = fitModel(items.map(({ subjectId, rate }) => ({ subjectId, rate })), []);
     const initial = toModelState(session.id, 0, fit);
     await initializeModel(session.id, initial);
@@ -89,8 +89,8 @@ describe("IndexedDB project persistence", () => {
     const snapshotId = crypto.randomUUID();
     const items = createDemoItems(snapshotId).slice(0, 4);
     const snapshot = await saveSnapshot({ username: "demo", nickname: "Demo" }, snapshotId, items);
-    const source = await createSession(snapshot, 2, [2], { preset: "uniform", weights: Array(10).fill(10) });
-    const upgraded = await createSession(snapshot, 2, [2], { preset: "uniform", weights: Array(10).fill(10) });
+    const source = await createSession(snapshot, 2, [2], { preset: "uniform", levelCount: 5, weights: Array(5).fill(20) });
+    const upgraded = await createSession(snapshot, 2, [2], { preset: "uniform", levelCount: 10, weights: Array(10).fill(10) });
     const derived = await deriveSessionWithTagFilter(source.id, { source: "collection", match: "all", tags: ["经典"] });
     await db.sessions.update(upgraded.id, { upgradedFromSessionId: source.id });
     const payload = await exportProject("demo");
@@ -98,6 +98,7 @@ describe("IndexedDB project persistence", () => {
       session.stoppingTarget = "top-tail";
       session.maxComparisons = 1000;
       session.status = "complete";
+      delete (session.distribution as Partial<DistributionConfig>).levelCount;
     });
     const imported = await importProject(payload);
     expect(imported.id).not.toBe("demo");
@@ -109,6 +110,7 @@ describe("IndexedDB project persistence", () => {
     expect(importedSessions.every((session) => session.stoppingTarget === undefined)).toBe(true);
     expect(importedSessions.every((session) => session.maxComparisons === undefined)).toBe(true);
     expect(importedSessions.every((session) => session.status === "active")).toBe(true);
+    expect(importedSessions.every((session) => session.distribution.levelCount === 10)).toBe(true);
     const importedUpgrade = importedSessions.find((session) => session.upgradedFromSessionId);
     expect(importedUpgrade).toBeDefined();
     const importedSource = importedSessions.find((session) => session.id === importedUpgrade?.upgradedFromSessionId);
@@ -126,15 +128,15 @@ describe("IndexedDB project persistence", () => {
     const snapshotOneId = crypto.randomUUID();
     const firstItems = createDemoItems(snapshotOneId).slice(0, 2);
     const snapshotOne = await saveSnapshot({ username: "demo", nickname: "Demo" }, snapshotOneId, firstItems);
-    const first = await createSession(snapshotOne, 2, [2], { preset: "uniform", weights: Array(10).fill(10) });
-    const second = await createSession(snapshotOne, 2, [2], { preset: "uniform", weights: Array(10).fill(10) });
+    const first = await createSession(snapshotOne, 2, [2], { preset: "uniform", levelCount: 10, weights: Array(10).fill(10) });
+    const second = await createSession(snapshotOne, 2, [2], { preset: "uniform", levelCount: 10, weights: Array(10).fill(10) });
 
     const snapshotTwoId = crypto.randomUUID();
     const secondItems = firstItems.map((entry) => ({ ...entry, snapshotId: snapshotTwoId }));
     const snapshotTwo = await saveSnapshot({ username: "demo", nickname: "Demo" }, snapshotTwoId, secondItems);
-    const snapshotOnly = await createSession(snapshotTwo, 2, [2], { preset: "uniform", weights: Array(10).fill(10) });
-    const sessionOnly = await createSession(snapshotTwo, 2, [2], { preset: "uniform", weights: Array(10).fill(10) }, "quick", "session");
-    const wholeProfile = await createSession(snapshotTwo, 2, [2], { preset: "uniform", weights: Array(10).fill(10) }, "quick", "profile");
+    const snapshotOnly = await createSession(snapshotTwo, 2, [2], { preset: "uniform", levelCount: 10, weights: Array(10).fill(10) });
+    const sessionOnly = await createSession(snapshotTwo, 2, [2], { preset: "uniform", levelCount: 10, weights: Array(10).fill(10) }, "quick", "session");
+    const wholeProfile = await createSession(snapshotTwo, 2, [2], { preset: "uniform", levelCount: 10, weights: Array(10).fill(10) }, "quick", "profile");
 
     const pair = { leftSubjectId: firstItems[0].subjectId, rightSubjectId: firstItems[1].subjectId };
     const records: ComparisonRecord[] = [first, second, snapshotOnly, sessionOnly, wholeProfile].map((session, index) => ({
@@ -164,7 +166,7 @@ describe("IndexedDB project persistence", () => {
     const snapshotId = crypto.randomUUID();
     const items = createDemoItems(snapshotId).slice(0, 4);
     const snapshot = await saveSnapshot({ username: "demo", nickname: "Demo" }, snapshotId, items);
-    const source = await createSession(snapshot, 2, [2], { preset: "uniform", weights: Array(10).fill(10) });
+    const source = await createSession(snapshot, 2, [2], { preset: "uniform", levelCount: 5, weights: Array(5).fill(20) });
     const records: ComparisonRecord[] = [
       {
         id: "tag-kept", profileId: "demo", sessionId: source.id, subjectType: 2,
@@ -213,6 +215,7 @@ describe("IndexedDB project persistence", () => {
       status: "active",
       tagFilter,
     });
+    expect(derived.session.distribution.levelCount).toBe(5);
     expect((await getSessionBundle(source.id))?.items).toHaveLength(4);
     const bundle = await getSessionBundle(derived.session.id);
     expect(bundle?.items.map((entry) => entry.subjectId).sort((a, b) => a - b)).toEqual([items[0].subjectId, items[3].subjectId]);
@@ -257,7 +260,7 @@ describe("IndexedDB project persistence", () => {
     const firstSnapshotId = crypto.randomUUID();
     const firstItems = createDemoItems(firstSnapshotId).slice(0, 3);
     const firstSnapshot = await saveSnapshot({ username: "demo", nickname: "Demo" }, firstSnapshotId, firstItems);
-    const source = await createSession(firstSnapshot, 2, [2], { preset: "preserve", weights: Array(10).fill(10) });
+    const source = await createSession(firstSnapshot, 2, [2], { preset: "preserve", levelCount: 5, weights: Array(5).fill(20) });
     const records: ComparisonRecord[] = [
       {
         id: "kept", profileId: "demo", sessionId: source.id, subjectType: 2,
@@ -315,6 +318,7 @@ describe("IndexedDB project persistence", () => {
       modelVersion: 0,
       status: "active",
     });
+    expect(upgraded.session.distribution.levelCount).toBe(5);
     expect(await db.sessions.get(source.id)).toBeDefined();
     const bundle = await getSessionBundle(upgraded.session.id);
     expect(bundle?.items.map((entry) => entry.subjectId).sort((a, b) => a - b))
@@ -340,7 +344,7 @@ describe("IndexedDB project persistence", () => {
       firstSnapshot,
       2,
       [2],
-      { preset: "uniform", weights: Array(10).fill(10) },
+      { preset: "uniform", levelCount: 10, weights: Array(10).fill(10) },
       "quick",
       "snapshot",
       tagFilter,
@@ -373,7 +377,7 @@ describe("IndexedDB project persistence", () => {
     const snapshotId = crypto.randomUUID();
     const items = createDemoItems(snapshotId).slice(0, 2);
     const snapshot = await saveSnapshot({ username: "demo", nickname: "Demo" }, snapshotId, items);
-    const session = await createSession(snapshot, 2, [2], { preset: "uniform", weights: Array(10).fill(10) });
+    const session = await createSession(snapshot, 2, [2], { preset: "uniform", levelCount: 10, weights: Array(10).fill(10) });
     const original: ComparisonRecord = {
       id: "original", profileId: "demo", sessionId: session.id, subjectType: 2,
       leftSubjectId: items[0].subjectId, rightSubjectId: items[1].subjectId, outcome: "left",
@@ -411,25 +415,31 @@ describe("IndexedDB project persistence", () => {
     const snapshotId = crypto.randomUUID();
     const items = createDemoItems(snapshotId).slice(0, 2);
     const snapshot = await saveSnapshot({ username: "demo", nickname: "Demo" }, snapshotId, items);
-    const session = await createSession(snapshot, 2, [2], { preset: "uniform", weights: Array(10).fill(10) });
+    const session = await createSession(snapshot, 2, [2], { preset: "uniform", levelCount: 10, weights: Array(10).fill(10) });
     const fit = fitModel(items.map(({ subjectId, rate }) => ({ subjectId, rate })), []);
     const initial = toModelState(session.id, 0, fit);
     await initializeModel(session.id, initial);
-    const next = toModelState(session.id, 1, fit, initial.initialMeanUncertainty);
-    const distribution = { preset: "reverse-j" as const, weights: [50, 25, 14, 4, 2, 1, 1, 1, 1, 1] };
-    await commitSessionDistribution(session.id, 0, distribution, next);
-    await expect(commitSessionDistribution(session.id, 0, distribution, next)).rejects.toThrow(/其他页面更新/);
+    const pair = { leftSubjectId: items[0].subjectId, rightSubjectId: items[1].subjectId };
+    const answeredFit = fitModel(items.map(({ subjectId, rate }) => ({ subjectId, rate })), [{ ...pair, outcome: "left" }]);
+    const answered = toModelState(session.id, 1, answeredFit, initial.initialMeanUncertainty);
+    await commitResponse(session.id, 0, pair, "left", answered);
+    const next = toModelState(session.id, 2, answeredFit, initial.initialMeanUncertainty);
+    const distribution = { preset: "reverse-j" as const, levelCount: 5, weights: [89, 6, 2, 1.5, 1.5] };
+    await commitSessionDistribution(session.id, 1, distribution, next);
+    await expect(commitSessionDistribution(session.id, 1, distribution, next)).rejects.toThrow(/其他页面更新/);
     const bundle = await getSessionBundle(session.id);
-    expect(bundle?.session.modelVersion).toBe(1);
+    expect(bundle?.session.modelVersion).toBe(2);
     expect(bundle?.session.distribution.preset).toBe("reverse-j");
-    expect(bundle?.model?.version).toBe(1);
+    expect(bundle?.session.distribution.levelCount).toBe(5);
+    expect(bundle?.history).toHaveLength(1);
+    expect(bundle?.model?.version).toBe(2);
   });
 
   it("atomically changes inference mode without replacing session history", async () => {
     const snapshotId = crypto.randomUUID();
     const items = createDemoItems(snapshotId).slice(0, 2);
     const snapshot = await saveSnapshot({ username: "demo", nickname: "Demo" }, snapshotId, items);
-    const session = await createSession(snapshot, 2, [2], { preset: "uniform", weights: Array(10).fill(10) });
+    const session = await createSession(snapshot, 2, [2], { preset: "uniform", levelCount: 10, weights: Array(10).fill(10) });
     const fit = fitModel(items.map(({ subjectId, rate }) => ({ subjectId, rate })), []);
     const initial = toModelState(session.id, 0, fit);
     await initializeModel(session.id, initial);

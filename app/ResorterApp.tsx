@@ -29,6 +29,15 @@ import {
   upgradeSessionToSnapshot,
 } from "@/lib/db";
 import { downloadJson, downloadText, readBackup, requestPersistentStorage, resultsCsv, storageStatus } from "@/lib/export";
+import {
+  DEFAULT_SCORE_LEVELS,
+  MAX_SCORE_LEVELS,
+  MIN_SCORE_LEVELS,
+  distributionConfig,
+  distributionWithLevelCount,
+  normalizeScoreLevelCount,
+  resampleDistributionWeights,
+} from "@/lib/distribution";
 import { bangumiCoverVariant } from "@/lib/images";
 import { buildRankedItems } from "@/lib/ranking/engine";
 import {
@@ -58,7 +67,6 @@ import {
   ComparisonOutcome,
   ComparisonRecord,
   ComparisonReusePolicy,
-  DISTRIBUTIONS,
   DistributionConfig,
   DistributionPreset,
   ModelState,
@@ -107,10 +115,6 @@ function toRankingHistory(history: ComparisonRecord[]): RankingHistoryInput[] {
       calibrationOfComparisonId: record.calibrationOfComparisonId,
       createdAt: record.createdAt,
     }));
-}
-
-function distributionConfig(preset: DistributionPreset, customWeights: number[]): DistributionConfig {
-  return { preset, weights: preset === "custom" ? customWeights : DISTRIBUTIONS[preset] };
 }
 
 function percent(value?: number) {
@@ -430,23 +434,56 @@ function ResyncDialog({ snapshot, onCancel, onConnected }: {
   </div>;
 }
 
-function Histogram({ items, result }: { items: CollectionItem[]; result?: RankedItem[] }) {
-  const original = Array.from({ length: 10 }, (_, index) => items.filter((item) => item.rate === index + 1).length);
-  const updated = result ? Array.from({ length: 10 }, (_, index) => result.filter((item) => item.newRate === index + 1).length) : undefined;
-  const max = Math.max(1, ...original, ...(updated ?? []));
-  return <div className="histogram" aria-label="评分分布图">
-    {original.map((count, index) => <div className="histogram-column" key={index} title={`${index + 1} 分：${count} 个`}>
-      <div className="bar-space">
-        {updated && <i className="bar-new" style={{ height: `${updated[index] / max * 100}%` }} />}
-        <i className="bar-old" style={{ height: `${count / max * 100}%` }} />
-      </div><span>{index + 1}</span>
-    </div>)}
+function ScoreHistogram({ counts, tone, label }: { counts: number[]; tone: "old" | "new"; label: string }) {
+  const max = Math.max(1, ...counts);
+  return <div className="histogram-scroll">
+    <div
+      className={`histogram single-series ${tone}`}
+      aria-label={label}
+      data-level-count={counts.length}
+      style={{ gridTemplateColumns: `repeat(${counts.length}, minmax(16px, 1fr))`, minWidth: `${Math.max(0, counts.length * 28)}px` }}
+    >
+      {counts.map((count, index) => <div className="histogram-column" key={index} title={`${index + 1} 分：${count} 个`}>
+        <div className="bar-space"><i className={`bar-${tone}`} style={{ height: `${count / max * 100}%` }} /></div><span>{index + 1}</span>
+      </div>)}
+    </div>
+  </div>;
+}
+
+function OriginalScoreHistogram({ items }: { items: CollectionItem[] }) {
+  const counts = Array.from({ length: DEFAULT_SCORE_LEVELS }, (_, index) => items.filter((item) => item.rate === index + 1).length);
+  return <ScoreHistogram counts={counts} tone="old" label="原评分 1 至 10 分布图" />;
+}
+
+function NewScoreHistogram({ result, levelCount }: { result: RankedItem[]; levelCount: number }) {
+  const counts = Array.from({ length: levelCount }, (_, index) => result.filter((item) => item.newRate === index + 1).length);
+  return <ScoreHistogram counts={counts} tone="new" label={`新评分 1 至 ${levelCount} 分布图`} />;
+}
+
+function TenLevelComparisonHistogram({ items, result }: { items: CollectionItem[]; result: RankedItem[] }) {
+  const original = Array.from({ length: DEFAULT_SCORE_LEVELS }, (_, index) => items.filter((item) => item.rate === index + 1).length);
+  const updated = Array.from({ length: DEFAULT_SCORE_LEVELS }, (_, index) => result.filter((item) => item.newRate === index + 1).length);
+  const max = Math.max(1, ...original, ...updated);
+  return <div className="histogram-scroll">
+    <div
+      className="histogram"
+      aria-label="原评分与新评分 1 至 10 分布对比图"
+      data-level-count={DEFAULT_SCORE_LEVELS}
+      style={{ gridTemplateColumns: `repeat(${DEFAULT_SCORE_LEVELS}, minmax(16px, 1fr))` }}
+    >
+      {original.map((count, index) => <div className="histogram-column" key={index} title={`${index + 1} 分：原评分 ${count} 个，新评分 ${updated[index]} 个`}>
+        <div className="bar-space">
+          <i className="bar-new" style={{ height: `${updated[index] / max * 100}%` }} />
+          <i className="bar-old" style={{ height: `${count / max * 100}%` }} />
+        </div><span>{index + 1}</span>
+      </div>)}
+    </div>
   </div>;
 }
 
 function DistributionWeights({ weights, onChange }: { weights: number[]; onChange: (weights: number[]) => void }) {
   return <div className="weight-editor" aria-label="自定义评分权重">
-    {Array.from({ length: 10 }, (_, index) => <label key={index}><span>{index + 1} 分</span><input type="number" min="0" max="100" step="1" value={weights[index] ?? 0} onChange={(event) => {
+    {weights.map((weight, index) => <label key={index}><span>{index + 1} 分</span><input type="number" min="0" max="100" step="0.1" value={weight} onChange={(event) => {
       const next = [...weights];
       next[index] = Math.max(0, Number(event.target.value) || 0);
       onChange(next);
@@ -460,6 +497,30 @@ function CustomDistributionEditor({ weights, busy, onApply }: { weights: number[
     <DistributionWeights weights={draft} onChange={setDraft} />
     <button className="outline-button full" disabled={busy} onClick={() => void onApply(draft)}>应用自定义权重</button>
   </div>;
+}
+
+const SCORE_LEVEL_OPTIONS = Array.from(
+  { length: MAX_SCORE_LEVELS - MIN_SCORE_LEVELS + 1 },
+  (_, index) => MIN_SCORE_LEVELS + index,
+);
+
+function ScoreLevelSelect({ id, value, disabled, className, onChange }: {
+  id: string;
+  value: number;
+  disabled?: boolean;
+  className?: string;
+  onChange: (levelCount: number) => void;
+}) {
+  return <select
+    id={id}
+    className={className}
+    aria-label="评分档数"
+    value={normalizeScoreLevelCount(value)}
+    disabled={disabled}
+    onChange={(event) => onChange(normalizeScoreLevelCount(event.target.value))}
+  >
+    {SCORE_LEVEL_OPTIONS.map((levelCount) => <option value={levelCount} key={levelCount}>{levelCount} 档</option>)}
+  </select>;
 }
 
 const TAG_OPTION_LIMIT = 50;
@@ -550,7 +611,8 @@ function LibraryView({ snapshot, items, sessions, onStart, onResume, onUpgradeSe
   const [statuses, setStatuses] = useState<CollectionType[]>(collectionEntries.map(([type]) => type));
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [manualPreset, setManualPreset] = useState<DistributionPreset>();
-  const [customWeights, setCustomWeights] = useState([...DISTRIBUTIONS.uniform]);
+  const [scoreLevelCount, setScoreLevelCount] = useState(DEFAULT_SCORE_LEVELS);
+  const [customWeights, setCustomWeights] = useState(distributionConfig("uniform", DEFAULT_SCORE_LEVELS).weights);
   const [budgetMode, setBudgetMode] = useState<ComparisonBudgetMode>("quick");
   const [comparisonReusePolicy, setComparisonReusePolicy] = useState<ComparisonReusePolicy>("snapshot");
   const [busy, setBusy] = useState(false);
@@ -577,7 +639,7 @@ function LibraryView({ snapshot, items, sessions, onStart, onResume, onUpgradeSe
       await onStart(
         selectedType,
         statuses,
-        distributionConfig(preset, customWeights),
+        distributionConfig(preset, scoreLevelCount, customWeights),
         budgetMode,
         comparisonReusePolicy,
         tagFilter,
@@ -660,14 +722,15 @@ function LibraryView({ snapshot, items, sessions, onStart, onResume, onUpgradeSe
       {availableTypes.map(([type, label]) => { const count = items.filter((item) => item.subjectType === type).length; const mean = items.filter((item) => item.subjectType === type).reduce((sum, item) => sum + item.rate, 0) / count; return <button key={type} className={`metric-card ${selectedType === type ? "selected" : ""}`} onClick={() => { setSelectedType(type); setSelectedTags([]); }}><span>{label}</span><strong>{count}</strong><small>平均 {mean.toFixed(1)} 分</small></button>; })}
     </section>
     <section className="dashboard-grid">
-      <article className="panel distribution-panel"><div className="panel-title"><div><span className="eyebrow">当前范围评分分布</span><h2>{SUBJECT_TYPES[selectedType]} · {selectedItems.length} 部</h2></div><span className="legend"><i />原评分</span></div><Histogram items={selectedItems} /></article>
+      <article className="panel distribution-panel"><div className="panel-title"><div><span className="eyebrow">当前范围评分分布</span><h2>{SUBJECT_TYPES[selectedType]} · {selectedItems.length} 部</h2></div><span className="legend"><i />原评分 · 10 档</span></div><OriginalScoreHistogram items={selectedItems} /></article>
       <article className="panel start-panel"><span className="eyebrow">新建排序会话</span><h2>选择本次范围</h2><p>不同媒介会分别建立模型，比较记录可在后续会话中复用。</p>
         <div className="field-group"><span className="field-label" id="collection-status-label">收藏状态</span><div className="chip-row" role="group" aria-labelledby="collection-status-label">{collectionEntries.map(([type, label]) => <button key={type} className={statuses.includes(type) ? "selected" : ""} onClick={() => setStatuses((value) => value.includes(type) ? value.filter((item) => item !== type) : [...value, type])}>{label}</button>)}</div></div>
         <div className="field-group"><label htmlFor="new-session-tag-search">个人标签（全部匹配）</label><TagFilterSelector id="new-session-tag-search" items={baseItems} selectedTags={selectedTags} onChange={setSelectedTags} /><small className="field-help">标签来自你的 Bangumi 收藏；选择多个标签时，作品必须同时包含全部标签。</small></div>
         <div className="field-group"><label htmlFor="comparison-budget">推断模式</label><select id="comparison-budget" value={budgetMode} onChange={(event) => setBudgetMode(event.target.value as ComparisonBudgetMode)}><option value="quick">快速（推荐）</option><option value="standard">标准</option><option value="thorough">精细</option></select><small className="field-help">{BUDGET_MODE_COPY[budgetMode].description} · 每次回答后动态重估剩余区间</small></div>
-        <div className="field-group"><label htmlFor="distribution-preset">新评分分布</label><select id="distribution-preset" value={preset} onChange={(event) => setManualPreset(event.target.value as DistributionPreset)}><option value="uniform">均匀 1–10</option><option value="preserve">保持原分布</option><option value="high-tail">高分辨率尾部</option><option value="reverse-j">反 J 分布</option><option value="custom">自定义权重</option></select><small className="field-help">{manualPreset === undefined ? `已按 ${selectedItems.length} 个条目的规模自动推荐` : "已使用手动选择"}</small>{preset === "reverse-j" && <small className="field-help">约 50% 为 1 分、25% 为 2 分，越高分档越稀有；8–10 分各约 1%。</small>}{preset === "custom" && <DistributionWeights weights={customWeights} onChange={setCustomWeights} />}</div>
+        <div className="field-group"><label htmlFor="score-level-count">评分档数</label><ScoreLevelSelect id="score-level-count" value={scoreLevelCount} onChange={(nextLevelCount) => { setScoreLevelCount(nextLevelCount); setCustomWeights((weights) => resampleDistributionWeights(weights, nextLevelCount)); }} /><small className="field-help">可选择 3–20 档；档数越多，一档越窄，通常需要更多判断才能稳定。</small></div>
+        <div className="field-group"><label htmlFor="distribution-preset">新评分分布</label><select id="distribution-preset" value={preset} onChange={(event) => setManualPreset(event.target.value as DistributionPreset)}><option value="uniform">均匀 {scoreLevelCount} 档</option><option value="preserve">保持原分布</option><option value="high-tail">高分辨率尾部</option><option value="reverse-j">反 J 分布</option><option value="custom">自定义权重</option></select><small className="field-help">{manualPreset === undefined ? `已按 ${selectedItems.length} 个条目的规模自动推荐` : "已使用手动选择"}</small>{preset === "reverse-j" && <small className="field-help">低分档占比最高，越高分档越稀疏；系统会按当前档数保持累计分布形状。</small>}{preset === "custom" && <DistributionWeights weights={customWeights} onChange={setCustomWeights} />}</div>
         <div className="field-group"><label htmlFor="reuse-policy">历史判断</label><select id="reuse-policy" value={comparisonReusePolicy} onChange={(event) => setComparisonReusePolicy(event.target.value as ComparisonReusePolicy)}><option value="snapshot">复用同一快照（推荐）</option><option value="session">本会话从零开始</option><option value="profile">复用所有历史快照</option></select><small className="field-help">新快照默认不继承旧偏好，避免长期漂移被历史判断锁定。</small></div>
-        <div className="field-group"><span className="field-label">停止标准</span><small className="field-help">至少 90% 的作品相对当前 1–10 分桶最多偏移一档；在当前 {selectedItems.length} 部作品中，允许最多 {allowedCrossTwoBucketCount(selectedItems.length)} 部跨两档。该事件的后验概率之 90% 蒙特卡洛下界须达到 90%。</small></div>
+        <div className="field-group"><span className="field-label">停止标准</span><small className="field-help">至少 90% 的作品相对当前 {scoreLevelCount} 档分桶最多偏移一档；在当前 {selectedItems.length} 部作品中，允许最多 {allowedCrossTwoBucketCount(selectedItems.length)} 部跨两档。该事件的后验概率之 90% 蒙特卡洛下界须达到 90%。</small></div>
         {error && <Notice tone="error">{error}</Notice>}
         <button className="primary-button" onClick={start} disabled={busy || selectedItems.length < 2}>{busy ? "正在准备模型…" : `开始${BUDGET_MODE_COPY[budgetMode].label}比较 · 动态停止`}<span>→</span></button>
       </article>
@@ -685,7 +748,7 @@ function LibraryView({ snapshot, items, sessions, onStart, onResume, onUpgradeSe
       return <article className="session-row" key={session.id}>
         <button className="session-open" disabled={actionBusy} onClick={() => onResume(session.id)}>
           <span className="session-type">{SUBJECT_TYPES[session.subjectType]}</span>
-          <div><strong>{session.title}</strong><small>{BUDGET_MODE_COPY[sessionBudgetMode(session)].label}模式 · {usesCurrentSnapshot ? "当前收藏" : "旧收藏"} · {historyLabel} · 更新于 {formatDate(session.updatedAt)}</small><small>标签范围：{tagFilterSummary(session.tagFilter)}</small></div>
+          <div><strong>{session.title}</strong><small>{BUDGET_MODE_COPY[sessionBudgetMode(session)].label}模式 · {normalizeScoreLevelCount(session.distribution.levelCount)} 档 · {usesCurrentSnapshot ? "当前收藏" : "旧收藏"} · {historyLabel} · 更新于 {formatDate(session.updatedAt)}</small><small>标签范围：{tagFilterSummary(session.tagFilter)}</small></div>
           <span className={`session-status ${session.status}`}>{session.status === "complete" ? "已稳定" : "进行中"}</span><b>→</b>
         </button>
         <div className="session-actions">
@@ -727,6 +790,7 @@ function CompareView({ state, busy, scoresVisible, onToggleScores, onMode, onAns
   const right = state.items.find((item) => item.subjectId === state.nextPair?.rightSubjectId);
   const currentSessionAccepted = state.history.filter((item) => item.sessionId === state.session.id && item.active && item.outcome !== "skip").length;
   const budgetMode = sessionBudgetMode(state.session);
+  const scoreLevelCount = normalizeScoreLevelCount(state.session.distribution.levelCount);
   const diagnostics = state.model.diagnostics;
   const targetReady = diagnostics?.ready;
   const expectedViolations = expectedCrossTwoBucketCount(diagnostics);
@@ -738,10 +802,10 @@ function CompareView({ state, busy, scoresVisible, onToggleScores, onMode, onAns
   const projectionSuccesses = forecast?.withinProjectionSuccesses ?? forecast?.beforeLimitSuccesses;
   if (!left || !right) return <div className="center-message"><h2>暂时没有可比较的条目</h2><p>你可以查看当前结果，或返回收藏调整范围。</p><button className="primary-button" onClick={onResults}>查看结果</button></div>;
   return <>
-    <header className="topbar"><div><span className="eyebrow">{SUBJECT_TYPES[state.session.subjectType]} · {BUDGET_MODE_COPY[budgetMode].label}模式 · {state.session.title}</span><h1>哪一部在你的偏好中更靠前？</h1></div><div className="header-actions"><InferenceModeSelect id="compare-budget-mode" value={budgetMode} busy={busy} onChange={onMode} /><button className="ghost-button" onClick={onToggleScores}>{scoresVisible ? "隐藏原评分" : "显示原评分"}</button></div></header>
+    <header className="topbar"><div><span className="eyebrow">{SUBJECT_TYPES[state.session.subjectType]} · {BUDGET_MODE_COPY[budgetMode].label}模式 · {scoreLevelCount} 档 · {state.session.title}</span><h1>哪一部在你的偏好中更靠前？</h1></div><div className="header-actions"><InferenceModeSelect id="compare-budget-mode" value={budgetMode} busy={busy} onChange={onMode} /><button className="ghost-button" onClick={onToggleScores}>{scoresVisible ? "隐藏原评分" : "显示原评分"}</button></div></header>
     <div className="progress-row dynamic-progress"><div className="progress-copy"><span>本次已完成 <strong>{currentSessionAccepted}</strong> 次</span><span>后验期望相邻容差覆盖 <strong>{Math.round(toleranceCoverage)}%</strong></span><span>最坏偏移中位数 <strong>{maxBucketDisplacementValue(diagnostics)}</strong></span></div><div className="progress-track" aria-label={`后验期望相邻容差覆盖 ${Math.round(toleranceCoverage)}%`}><span style={{ width: `${toleranceCoverage}%` }} /></div><div className="forecast-row"><span>跨两档作品分布 <strong>{crossTwoBucketInterval(diagnostics)}</strong></span><span>最坏偏移分布 <strong>{maxBucketDisplacementInterval(diagnostics)}</strong></span><span>动态剩余预测 <strong>{forecastRange(diagnostics)}</strong></span></div></div>
     {currentSessionAccepted > 0 && currentSessionAccepted % 20 === 0 && <Notice tone="warning">你已经完成 {currentSessionAccepted} 次判断，建议现在下载一次 JSON 备份。</Notice>}
-    {targetReady && <Notice tone="success">当前{BUDGET_MODE_COPY[budgetMode].label}模式要求的嵌套后验检查均已达标：至少 90% 的作品最多偏移一档。可以导出结果，也可以继续比较。</Notice>}
+    {targetReady && <Notice tone="success">当前{BUDGET_MODE_COPY[budgetMode].label}模式要求的嵌套后验检查均已达标：在 {scoreLevelCount} 档评分中，至少 90% 的作品最多偏移一档。可以导出结果，也可以继续比较。</Notice>}
     {!targetReady && projectionSuccesses === 0 && <Notice>本轮预测窗口内达标模拟为 {forecastProjectionProbability(forecast)}；未观察到成功不是不可达证明。再完成 {forecast?.nextCheckpoint} 次后会用新证据重估。</Notice>}
     {!targetReady && diagnostics && diagnostics.evidenceCount < diagnostics.evidenceRequired && <Notice>至少需要 {diagnostics.evidenceRequired} 次本会话有效判断；目前为 {diagnostics.evidenceCount} 次。</Notice>}
     {calibrationAvailable && <Notice>复问 {diagnostics?.calibration.consistent}/{diagnostics?.calibration.completed} 次一致；后验一致率 {percent(diagnostics?.calibration.posteriorMean)}，80% 区间 {percent(diagnostics?.calibration.credibleLow)}–{percent(diagnostics?.calibration.credibleHigh)}。该指标仅反映判断波动，不影响停止。</Notice>}
@@ -933,19 +997,19 @@ function ResultsView({ state, busy, onBack, onMode, onDistribution, onExportCsv,
 }) {
   const comparisons = toRankingComparisons(state.history);
   const result = buildRankedItems(state.items, state.model, comparisons, state.session.distribution);
-  const changed = result.filter((item) => item.newRate !== item.rate).length;
   const diagnostics = state.model.diagnostics;
   const budgetMode = sessionBudgetMode(state.session);
+  const scoreLevelCount = normalizeScoreLevelCount(state.session.distribution.levelCount);
   const priorCopy = budgetMode === "quick"
     ? "原评分作为强先验"
     : budgetMode === "standard"
       ? "原评分作为中等先验"
       : "模型未采用原评分顺序先验";
   return <>
-    <header className="page-header"><div><span className="eyebrow">排序结果 · {BUDGET_MODE_COPY[budgetMode].label}模式</span><h1>你的偏好序列</h1><p>{result.length} 个{SUBJECT_TYPES[state.session.subjectType]}条目 · {changed} 个评分发生变化 · {priorCopy}</p></div><div className="header-actions"><InferenceModeSelect id="result-budget-mode" value={budgetMode} busy={busy} onChange={onMode} /><button className="outline-button" onClick={onBack}>继续比较</button><button className="primary-button compact" onClick={() => onExportCsv(result)}>导出 CSV</button></div></header>
-    <section className="result-summary"><article className="panel"><div className="panel-title"><div><span className="eyebrow">评分分布对比</span><h2>原评分 → 新评分</h2></div><select id="result-distribution-preset" value={state.session.distribution.preset} disabled={busy} onChange={(event) => { const preset = event.target.value as DistributionPreset; void onDistribution(distributionConfig(preset, state.session.distribution.weights)); }}><option value="uniform">均匀 1–10</option><option value="preserve">保持原分布</option><option value="high-tail">高分辨率尾部</option><option value="reverse-j">反 J 分布</option><option value="custom">自定义权重</option></select></div>{state.session.distribution.preset === "custom" && <CustomDistributionEditor key={state.session.id} weights={state.session.distribution.weights} busy={busy} onApply={(weights) => onDistribution({ preset: "custom", weights })} />}<Histogram items={state.items} result={result} /><div className="chart-legend"><span><i className="old" />原评分</span><span><i className="new" />新评分</span></div></article><article className="summary-stat"><span>预计跨两档作品</span><strong>{crossTwoBucketValue(diagnostics)}</strong><small>{crossTwoBucketInterval(diagnostics)}</small><div className="summary-forecast"><span>动态剩余预测</span><b>{forecastRange(diagnostics)}</b><small>{stoppingCriterionDetail(diagnostics)}</small></div><hr /><span>最坏偏移</span><strong>{maxBucketDisplacementValue(diagnostics)}</strong><small>{maxBucketDisplacementInterval(diagnostics)}；仅作尾部诊断，停止条件允许最多 10% 的作品跨两档。{diagnostics?.calibration.completed ? `复问 ${diagnostics.calibration.consistent}/${diagnostics.calibration.completed} 次一致，后验 ${percent(diagnostics.calibration.posteriorMean)}（仅作诊断）` : "尚无校准复问；区间仅代表模型内近似"}</small></article></section>
+    <header className="page-header"><div><span className="eyebrow">排序结果 · {BUDGET_MODE_COPY[budgetMode].label}模式 · {scoreLevelCount} 档</span><h1>你的偏好序列</h1><p>{result.length} 个{SUBJECT_TYPES[state.session.subjectType]}条目 · 当前输出 {scoreLevelCount} 档评分 · {priorCopy}</p></div><div className="header-actions"><InferenceModeSelect id="result-budget-mode" value={budgetMode} busy={busy} onChange={onMode} /><button className="outline-button" onClick={onBack}>继续比较</button><button className="primary-button compact" onClick={() => onExportCsv(result)}>导出 CSV</button></div></header>
+    <section className="result-summary"><article className="panel"><div className="panel-title"><div><span className="eyebrow">{scoreLevelCount === DEFAULT_SCORE_LEVELS ? "评分分布对比" : "评分分布"}</span><h2>{scoreLevelCount === DEFAULT_SCORE_LEVELS ? "原评分 → 新评分" : `原评分与 ${scoreLevelCount} 档新评分`}</h2></div><div className="distribution-controls"><ScoreLevelSelect id="result-score-level-count" className="header-select" value={scoreLevelCount} disabled={busy} onChange={(levelCount) => void onDistribution(distributionWithLevelCount(state.session.distribution, levelCount))} /><select id="result-distribution-preset" value={state.session.distribution.preset} disabled={busy} onChange={(event) => { const preset = event.target.value as DistributionPreset; void onDistribution(distributionConfig(preset, scoreLevelCount, state.session.distribution.weights)); }}><option value="uniform">均匀 {scoreLevelCount} 档</option><option value="preserve">保持原分布</option><option value="high-tail">高分辨率尾部</option><option value="reverse-j">反 J 分布</option><option value="custom">自定义权重</option></select></div></div>{state.session.distribution.preset === "custom" && <CustomDistributionEditor key={`${state.session.id}:${scoreLevelCount}`} weights={state.session.distribution.weights} busy={busy} onApply={(weights) => onDistribution(distributionConfig("custom", scoreLevelCount, weights))} />}{scoreLevelCount === DEFAULT_SCORE_LEVELS ? <><TenLevelComparisonHistogram items={state.items} result={result} /><div className="chart-legend"><span><i className="old" />原评分</span><span><i className="new" />新评分</span></div></> : <div className="distribution-charts"><div className="distribution-chart"><strong>原评分 · 1–10</strong><OriginalScoreHistogram items={state.items} /></div><div className="distribution-chart"><strong>新评分 · 1–{scoreLevelCount}</strong><NewScoreHistogram result={result} levelCount={scoreLevelCount} /></div></div>}</article><article className="summary-stat"><span>预计跨两档作品</span><strong>{crossTwoBucketValue(diagnostics)}</strong><small>{crossTwoBucketInterval(diagnostics)}</small><div className="summary-forecast"><span>动态剩余预测</span><b>{forecastRange(diagnostics)}</b><small>{stoppingCriterionDetail(diagnostics)}</small></div><hr /><span>最坏偏移</span><strong>{maxBucketDisplacementValue(diagnostics)}</strong><small>{maxBucketDisplacementInterval(diagnostics)}；仅作尾部诊断，停止条件允许最多 10% 的作品跨两档。{diagnostics?.calibration.completed ? `复问 ${diagnostics.calibration.consistent}/${diagnostics.calibration.completed} 次一致，后验 ${percent(diagnostics.calibration.posteriorMean)}（仅作诊断）` : "尚无校准复问；区间仅代表模型内近似"}</small></article></section>
     <ComparisonManager key={state.session.id} items={result} history={state.history} sessionId={state.session.id} busy={busy} onAdd={onAddComparison} onDelete={onDeleteComparison} />
-    <section className="ranking-table-wrap"><table className="ranking-table"><thead><tr><th>名次</th><th>条目</th><th>原评分</th><th>新评分</th><th>精确分桶稳定度</th><th>模型分</th><th>后验标准差</th><th /></tr></thead><tbody>{result.map((item) => <tr key={item.subjectId}><td><strong>#{item.rank}</strong></td><td><div className="title-cell"><Poster item={item} /><div><strong>{primaryName(item)}</strong><small>{item.nameCn ? item.name : `${item.date?.slice(0, 4) || ""} · ${SUBJECT_TYPES[item.subjectType]}`}</small></div></div></td><td><span className="score-pill old">{item.rate}</span></td><td><span className={`score-pill new ${item.newRate !== item.rate ? "changed" : ""}`}>{item.newRate}</span></td><td>{item.bucketStability === undefined ? "—" : percent(item.bucketStability)}</td><td>{item.ability.toFixed(3)}</td><td>{item.uncertainty.toFixed(3)}</td><td><a href={`https://bgm.tv/subject/${item.subjectId}`} target="_blank" rel="noreferrer" aria-label={`在 Bangumi 打开 ${primaryName(item)}`}>↗</a></td></tr>)}</tbody></table></section>
+    <section className="ranking-table-wrap"><table className="ranking-table"><thead><tr><th>名次</th><th>条目</th><th>原评分（10 档）</th><th>新评分（{scoreLevelCount} 档）</th><th>精确分桶稳定度</th><th title="模型内部仍用于排序；其数值不直接参与停止判定">连续潜在分数（仅供解释）</th><th>后验标准差</th><th /></tr></thead><tbody>{result.map((item) => <tr key={item.subjectId}><td><strong>#{item.rank}</strong></td><td><div className="title-cell"><Poster item={item} /><div><strong>{primaryName(item)}</strong><small>{item.nameCn ? item.name : `${item.date?.slice(0, 4) || ""} · ${SUBJECT_TYPES[item.subjectType]}`}</small></div></div></td><td><span className="score-pill old">{item.rate}</span></td><td><span className={`score-pill new ${scoreLevelCount === DEFAULT_SCORE_LEVELS && item.newRate !== item.rate ? "changed" : ""}`}>{item.newRate}</span></td><td>{item.bucketStability === undefined ? "—" : percent(item.bucketStability)}</td><td>{item.ability.toFixed(3)}</td><td>{item.uncertainty.toFixed(3)}</td><td><a href={`https://bgm.tv/subject/${item.subjectId}`} target="_blank" rel="noreferrer" aria-label={`在 Bangumi 打开 ${primaryName(item)}`}>↗</a></td></tr>)}</tbody></table></section>
   </>;
 }
 
@@ -1224,7 +1288,7 @@ export default function ResorterApp() {
     if (profile) setSessions(await listSessions(profile.id));
   }
 
-  async function exportCsv(result: RankedItem[]) { if (!snapshot) return; downloadText(downloadName("bangumi-resorter-results", snapshot.username, "csv"), resultsCsv(result), "text/csv;charset=utf-8"); }
+  async function exportCsv(result: RankedItem[]) { if (!snapshot) return; downloadText(downloadName("bangumi-resorter-results", snapshot.username, "csv"), resultsCsv(result, normalizeScoreLevelCount(compare?.session.distribution.levelCount)), "text/csv;charset=utf-8"); }
 
   const shellContent = (() => {
     if (!snapshot || !profile) return null;

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { analyzeRanking, buildRankedItems, chooseNextPair, fitModel, forecastStoppingTime } from "../lib/ranking/engine";
 import type { CollectionItem, DistributionConfig, RankingHistoryInput, RankingItemInput } from "../lib/types";
 
-const reverseJ: DistributionConfig = { preset: "reverse-j", weights: [50, 25, 14, 4, 2, 1, 1, 1, 1, 1] };
+const reverseJ: DistributionConfig = { preset: "reverse-j", levelCount: 10, weights: [50, 25, 14, 4, 2, 1, 1, 1, 1, 1] };
 
 function randomGenerator(seed: number) {
   let state = seed >>> 0;
@@ -124,7 +124,7 @@ describe("ranking strategy simulation", () => {
   });
 
   it("reports a held-out stopping time without overclaiming forecast certainty", () => {
-    const distribution: DistributionConfig = { preset: "high-tail", weights: [3, 5, 8, 14, 20, 20, 12, 8, 6, 4] };
+    const distribution: DistributionConfig = { preset: "high-tail", levelCount: 10, weights: [3, 5, 8, 14, 20, 20, 12, 8, 6, 4] };
     const rated = Array.from({ length: 8 }, (_, index) => ({
       subjectId: index + 1,
       rate: 10 - Math.floor(index / 2),

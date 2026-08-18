@@ -67,6 +67,8 @@ export interface Snapshot {
 
 export interface DistributionConfig {
   preset: DistributionPreset;
+  /** Number of output score buckets. Legacy sessions without this field use 10. */
+  levelCount: number;
   weights: number[];
 }
 
@@ -202,7 +204,7 @@ export interface RankingDiagnostics {
   bucketStability: Record<number, number>;
   /** Per-item probability of remaining within one bucket of the current assignment. */
   adjacentBucketStabilityByItem: Record<number, number>;
-  /** Posterior probability that every item simultaneously remains in its current 1-10 bucket. */
+  /** Posterior probability that every item simultaneously remains in its current score bucket. */
   jointBucketStability: number;
   jointBucketStableSamples: number;
   /** Central 90% Monte Carlo interval for jointBucketStability. */
@@ -360,4 +362,4 @@ export const DISTRIBUTIONS: Record<Exclude<DistributionPreset, "custom">, number
   "reverse-j": [50, 25, 14, 4, 2, 1, 1, 1, 1, 1],
 };
 
-export const APP_VERSION = "0.13.0";
+export const APP_VERSION = "0.14.0";

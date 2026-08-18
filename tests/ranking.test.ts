@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { analyzeRanking, buildRankedItems, calibrationPosterior, chooseNextPair, fitModel, forecastStoppingTime } from "../lib/ranking/engine";
+import { distributionConfig } from "../lib/distribution";
 import {
   allowedCrossTwoBucketCount,
   comparisonBudget,
@@ -24,7 +25,7 @@ function item(subjectId: number, rate: number): CollectionItem {
   return { snapshotId: "s", subjectId, subjectType: 2, collectionType: 2, rate, name: `Item ${subjectId}`, nameCn: "", private: false, tags: [] };
 }
 
-const uniform: DistributionConfig = { preset: "uniform", weights: Array(10).fill(10) };
+const uniform: DistributionConfig = { preset: "uniform", levelCount: 10, weights: Array(10).fill(10) };
 
 function history(
   recordId: string,
@@ -125,18 +126,58 @@ describe("Bradley–Terry ranking engine", () => {
   it("maps scores to uniform, reverse-J, preserved, and zero-safe custom distributions", () => {
     const items = Array.from({ length: 20 }, (_, index) => item(index + 1, index < 5 ? 10 : index < 12 ? 7 : 4));
     const fit = fitModel(items, []);
-    const uniform = buildRankedItems(items, fit, [], { preset: "uniform", weights: Array(10).fill(10) });
+    const uniform = buildRankedItems(items, fit, [], { preset: "uniform", levelCount: 10, weights: Array(10).fill(10) });
     expect(new Set(uniform.map((entry) => entry.newRate))).toEqual(new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]));
     const reverseItems = Array.from({ length: 100 }, (_, index) => item(index + 1, 7));
     const reverseFit = fitModel(reverseItems, []);
-    const reverseJ = buildRankedItems(reverseItems, reverseFit, [], { preset: "reverse-j", weights: [50, 25, 14, 4, 2, 1, 1, 1, 1, 1] });
+    const reverseJ = buildRankedItems(reverseItems, reverseFit, [], { preset: "reverse-j", levelCount: 10, weights: [50, 25, 14, 4, 2, 1, 1, 1, 1, 1] });
     expect(Array.from({ length: 10 }, (_, index) => reverseJ.filter((entry) => entry.newRate === index + 1).length)).toEqual([50, 25, 14, 4, 2, 1, 1, 1, 1, 1]);
-    const preserved = buildRankedItems(items, fit, [], { preset: "preserve", weights: Array(10).fill(10) });
+    const preserved = buildRankedItems(items, fit, [], { preset: "preserve", levelCount: 10, weights: Array(10).fill(10) });
     for (let score = 1; score <= 10; score += 1) {
       expect(preserved.filter((entry) => entry.newRate === score)).toHaveLength(items.filter((entry) => entry.rate === score).length);
     }
-    const zeroSafe = buildRankedItems(items, fit, [], { preset: "custom", weights: Array(10).fill(0) });
+    const zeroSafe = buildRankedItems(items, fit, [], { preset: "custom", levelCount: 10, weights: Array(10).fill(0) });
     expect(new Set(zeroSafe.map((entry) => entry.newRate)).size).toBeGreaterThan(1);
+  });
+
+  it("maps the same latent order to any supported K without using ability magnitude as a score", () => {
+    const items = Array.from({ length: 60 }, (_, index) => item(index + 1, 7));
+    const abilities = Object.fromEntries(items.map((entry, index) => [entry.subjectId, 60 - index]));
+    const scaledAbilities = Object.fromEntries(items.map((entry, index) => [entry.subjectId, (60 - index) * 100]));
+    const uncertainty = Object.fromEntries(items.map((entry) => [entry.subjectId, 0.5]));
+    for (const levelCount of [3, 5, 10, 20]) {
+      const distribution = distributionConfig("uniform", levelCount);
+      const rates = buildRankedItems(items, { abilities, uncertainty }, [], distribution).map((entry) => entry.newRate);
+      const scaledRates = buildRankedItems(items, { abilities: scaledAbilities, uncertainty }, [], distribution).map((entry) => entry.newRate);
+      expect(Math.min(...rates)).toBe(1);
+      expect(Math.max(...rates)).toBe(levelCount);
+      expect(new Set(rates).size).toBe(levelCount);
+      expect(scaledRates).toEqual(rates);
+    }
+  });
+
+  it("uses the active K buckets for the stopping event", () => {
+    const rated = Array.from({ length: 40 }, (_, index) => ({ subjectId: index + 1, rate: 7 }));
+    const abilities = Object.fromEntries(rated.map((entry, index) => [entry.subjectId, 40 - index]));
+    const shiftedOrder = [...rated.slice(4), ...rated.slice(0, 4)];
+    const shifted = new Float64Array(rated.length);
+    shiftedOrder.forEach((entry, index) => { shifted[entry.subjectId - 1] = rated.length - index; });
+    const evidence = Array.from({ length: 7 }, (_, index) => history(`k-${index}`, index + 1, index + 8, "left", index));
+    const fit = {
+      abilities,
+      uncertainty: Object.fromEntries(rated.map((entry) => [entry.subjectId, 0])),
+      meanUncertainty: 0,
+      converged: true,
+      iterations: 1,
+      acceptedComparisons: evidence.length,
+      posteriorSamples: Array.from({ length: 64 }, () => shifted.slice()),
+    };
+    const coarse = analyzeRanking(rated, fit, distributionConfig("uniform", 3), evidence, "session");
+    const fine = analyzeRanking(rated, fit, distributionConfig("uniform", 20), evidence, "session");
+    expect(coarse.crossTwoBucketCountMedian).toBeLessThanOrEqual(coarse.allowedCrossTwoBucketCount);
+    expect(coarse.ready).toBe(true);
+    expect(fine.crossTwoBucketCountMedian).toBeGreaterThan(fine.allowedCrossTwoBucketCount);
+    expect(fine.ready).toBe(false);
   });
 
   it("uses the high-resolution tail distribution by default", () => {
@@ -329,7 +370,7 @@ describe("Bradley–Terry ranking engine", () => {
       outcome: (index % 2 ? "left" : "right") as "left" | "right",
     })).filter((entry) => entry.leftSubjectId !== entry.rightSubjectId);
     const entries = comparisons.map((entry, index) => history(String(index), entry.leftSubjectId, entry.rightSubjectId, entry.outcome, index));
-    const reverseJ: DistributionConfig = { preset: "reverse-j", weights: [50, 25, 14, 4, 2, 1, 1, 1, 1, 1] };
+    const reverseJ: DistributionConfig = { preset: "reverse-j", levelCount: 10, weights: [50, 25, 14, 4, 2, 1, 1, 1, 1, 1] };
     const uniformPair = nextPairFor(rated, entries, seed, 1, uniform, { maxRateGap: 2, maxRankDistance: 3 });
     const reversePair = nextPairFor(rated, entries, seed, 1, reverseJ, { maxRateGap: 2, maxRankDistance: 3 });
     expect(new Set([uniformPair?.leftSubjectId, uniformPair?.rightSubjectId])).not.toEqual(new Set([reversePair?.leftSubjectId, reversePair?.rightSubjectId]));

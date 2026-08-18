@@ -5,11 +5,11 @@ function csvCell(value: string | number | boolean | undefined) {
   return /[",\n\r]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
 }
 
-export function resultsCsv(items: RankedItem[]) {
-  const headers = ["subject_type", "subject_id", "name", "name_cn", "collection_type", "original_rate", "new_rate", "rank", "ability", "uncertainty", "bucket_stability", "comparison_count", "subject_url"];
+export function resultsCsv(items: RankedItem[], levelCount = 10) {
+  const headers = ["subject_type", "subject_id", "name", "name_cn", "collection_type", "original_rate", "new_rate", "level_count", "rank", "ability", "uncertainty", "bucket_stability", "comparison_count", "subject_url"];
   const rows = items.map((item) => [
     item.subjectType, item.subjectId, item.name, item.nameCn, item.collectionType,
-    item.rate, item.newRate, item.rank, item.ability.toFixed(6), item.uncertainty.toFixed(6),
+    item.rate, item.newRate, levelCount, item.rank, item.ability.toFixed(6), item.uncertainty.toFixed(6),
     item.bucketStability === undefined ? "" : item.bucketStability.toFixed(6),
     item.comparisonCount, `https://bgm.tv/subject/${item.subjectId}`,
   ]);

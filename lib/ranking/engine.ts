@@ -11,6 +11,7 @@ import {
   RankingItemInput,
   StoppingForecast,
 } from "../types";
+import { effectiveDistributionWeights, normalizeScoreLevelCount } from "../distribution";
 import {
   allowedCrossTwoBucketCount,
   forecastProjectionHorizon,
@@ -428,20 +429,9 @@ interface RateItem { subjectId: number; rate: number }
 
 function mappedRates<T extends RateItem>(ordered: T[], config: DistributionConfig) {
   const output = new Map<number, number>();
-  if (config.preset === "preserve") {
-    const counts = Array.from({ length: 10 }, (_, index) => ordered.filter((item) => item.rate === index + 1).length);
-    let cursor = 0;
-    for (let score = 10; score >= 1; score -= 1) {
-      for (let count = 0; count < counts[score - 1] && cursor < ordered.length; count += 1) output.set(ordered[cursor++].subjectId, score);
-    }
-    return output;
-  }
-  let weights = config.weights.length === 10 ? config.weights.map((value) => Math.max(0, value)) : Array(10).fill(10);
-  let total = weights.reduce((sum, value) => sum + value, 0);
-  if (total === 0) {
-    weights = Array(10).fill(10);
-    total = 100;
-  }
+  const levelCount = normalizeScoreLevelCount(config.levelCount);
+  const weights = effectiveDistributionWeights(ordered, config);
+  const total = weights.reduce((sum, value) => sum + value, 0);
   const topDown = [...weights].reverse().map((value) => value / total);
   ordered.forEach((item, rankIndex) => {
     const quantile = (rankIndex + 0.5) / ordered.length;
@@ -449,7 +439,7 @@ function mappedRates<T extends RateItem>(ordered: T[], config: DistributionConfi
     let score = 1;
     for (let index = 0; index < topDown.length; index += 1) {
       cumulative += topDown[index];
-      if (quantile <= cumulative + 1e-12) { score = 10 - index; break; }
+      if (quantile <= cumulative + 1e-12) { score = levelCount - index; break; }
     }
     output.set(item.subjectId, score);
   });
