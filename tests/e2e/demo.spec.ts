@@ -21,6 +21,15 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await expect(page.getByRole("heading", { name: "哪一部在你的偏好中更靠前？" })).toBeVisible();
   await expect(page.getByText(/原评分 \d/)).toHaveCount(0);
   const originalPair = await page.locator(".media-card h2").allTextContents();
+  await page.locator(".media-card h2").nth(1).evaluate((heading) => {
+    heading.textContent = "用于验证多行标题时两侧卡片仍然保持相同高度";
+  });
+  const cardHeights = await page.locator(".media-card").evaluateAll((cards) =>
+    cards.map((card) => card.getBoundingClientRect().height));
+  const buttonBottoms = await page.locator(".media-card .choice-button").evaluateAll((buttons) =>
+    buttons.map((button) => button.getBoundingClientRect().bottom));
+  expect(Math.abs(cardHeights[0] - cardHeights[1])).toBeLessThan(1);
+  expect(Math.abs(buttonBottoms[0] - buttonBottoms[1])).toBeLessThan(1);
   await page.getByRole("button", { name: /更喜欢这部/ }).first().click();
   await expect(page.getByText(/本次已完成/)).toContainText("1");
   await expect(page.locator("#compare-budget-mode")).toHaveValue("quick");
