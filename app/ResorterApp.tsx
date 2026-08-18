@@ -1082,7 +1082,8 @@ function InferenceModeSelect({ id, value, busy, onChange }: {
   />;
 }
 
-function CompareSessionPicker({ sessions, currentSnapshotId, busy, onResume, onBack }: {
+function SessionPicker({ purpose, sessions, currentSnapshotId, busy, onResume, onBack }: {
+  purpose: "compare" | "results";
   sessions: SortingSession[];
   currentSnapshotId: string;
   busy: boolean;
@@ -1091,12 +1092,16 @@ function CompareSessionPicker({ sessions, currentSnapshotId, busy, onResume, onB
 }) {
   const orderedSessions = [...sessions].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   const hasSessions = orderedSessions.length > 0;
+  const isResults = purpose === "results";
+  const actionLabel = isResults ? "查看结果" : "进入会话";
 
   return <section className="center-message session-picker" aria-labelledby="session-picker-title" aria-busy={busy}>
     <div className="session-picker-header">
-      <span className="eyebrow">两两比较</span>
-      <h1 id="session-picker-title">{hasSessions ? "选择一个排序会话继续比较" : "还没有排序会话"}</h1>
-      <p>{hasSessions ? "选择最近的会话即可恢复判断；每个会话会保留自己的范围和推断设置。" : "先在收藏概览创建一个排序会话，之后就可以从这里直接进入。"}</p>
+      <span className="eyebrow">{isResults ? "排序结果" : "两两比较"}</span>
+      <h1 id="session-picker-title">{hasSessions ? (isResults ? "选择一个排序会话查看结果" : "选择一个排序会话继续比较") : "还没有排序会话"}</h1>
+      <p>{hasSessions
+        ? (isResults ? "选择最近的会话即可直接查看排序结果；每个会话会保留自己的范围和推断设置。" : "选择最近的会话即可恢复判断；每个会话会保留自己的范围和推断设置。")
+        : "先在收藏概览创建一个排序会话，之后就可以从这里直接进入。"}</p>
     </div>
     {hasSessions ? <div className="session-picker-list" role="list" aria-label="可进入的排序会话">
       {orderedSessions.map((session) => {
@@ -1108,7 +1113,7 @@ function CompareSessionPicker({ sessions, currentSnapshotId, busy, onResume, onB
             className="session-picker-open"
             disabled={busy}
             onClick={() => void onResume(session.id)}
-            aria-label={`进入会话 ${session.title}`}
+            aria-label={`${actionLabel} ${session.title}`}
           >
             <span className="session-type">{SUBJECT_TYPES[session.subjectType]}</span>
             <span className="session-picker-copy">
@@ -1693,7 +1698,7 @@ export default function ResorterApp() {
     return result;
   }
 
-  async function openSession(sessionId: string) {
+  async function openSession(sessionId: string, target: "compare" | "results" = "compare") {
     setBusy(true); setGlobalError("");
     try {
       const bundle = await getSessionBundle(sessionId); if (!bundle) throw new Error("会话不存在。");
@@ -1702,7 +1707,7 @@ export default function ResorterApp() {
       const refreshed = await getSessionBundle(sessionId); if (!refreshed) throw new Error("会话不存在。");
       setCompare({ session: refreshed.session, items: refreshed.items, history: refreshed.history, model: calculated.model, nextPair: calculated.nextPair });
       setSessions(await listSessions(refreshed.session.profileId));
-      navigate("compare");
+      navigate(target);
     } catch (cause) { setGlobalError(cause instanceof Error ? cause.message : "无法打开会话。"); }
     finally { setBusy(false); }
   }
@@ -1901,7 +1906,8 @@ export default function ResorterApp() {
     if (view === "compare" && compare) return <CompareView state={compare} busy={busy} scoresVisible={scoresVisible} onToggleScores={() => setScoresVisible((value) => !value)} onMode={changeBudgetMode} onAnswer={answer} onUndo={undo} onPause={() => navigate("library")} onResults={() => navigate("results")} />;
     if (view === "results" && compare) return <ResultsView state={compare} username={snapshot.username} busy={busy} onBack={() => navigate("compare")} onMode={changeBudgetMode} onDistribution={changeDistribution} onExportCsv={exportCsv} onAddComparison={addManualComparison} onDeleteComparison={removeComparison} onResync={() => setResyncOpen(true)} />;
     if (view === "backup") return <BackupView snapshot={snapshot} items={items} profile={profile} sessions={sessions} storage={storeStatus} onImported={async () => { const saved = await latestSnapshot(); if (saved) await loadSnapshot(saved, "backup"); }} />;
-    if (view === "compare") return <CompareSessionPicker sessions={sessions} currentSnapshotId={snapshot.id} busy={busy} onResume={openSession} onBack={() => navigate("library")} />;
+    if (view === "compare") return <SessionPicker purpose="compare" sessions={sessions} currentSnapshotId={snapshot.id} busy={busy} onResume={openSession} onBack={() => navigate("library")} />;
+    if (view === "results") return <SessionPicker purpose="results" sessions={sessions} currentSnapshotId={snapshot.id} busy={busy} onResume={(sessionId) => openSession(sessionId, "results")} onBack={() => navigate("library")} />;
     return <div className="center-message"><h2>请先选择一个排序会话</h2><button className="primary-button compact" onClick={() => navigate("library")}>返回收藏概览</button></div>;
   })();
 
