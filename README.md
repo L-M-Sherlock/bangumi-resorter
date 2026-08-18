@@ -46,19 +46,11 @@ npm run test:e2e
 
 ## 部署
 
-这个项目没有服务端数据库和密钥，适合 GitHub Pages、Vercel、Cloudflare Pages 等静态托管。运行时只会从浏览器直接请求 `https://api.bgm.tv/v0`；用户数据留在对应域名的 IndexedDB 中。因此更换域名不会自动带走本地数据，需要先下载 JSON，再到新站点导入。
+这个项目没有服务端数据库和密钥，适合 GitHub Pages、Cloudflare Pages 等静态托管。运行时只会从浏览器直接请求 `https://api.bgm.tv/v0`；用户数据留在对应域名的 IndexedDB 中。因此更换域名不会自动带走本地数据，需要先下载 JSON，再到新站点导入。
 
 ### GitHub Pages
 
 仓库已包含 `.github/workflows/deploy-pages.yml`。在仓库 Settings → Pages 中把 Source 设为 GitHub Actions，推送 `main` 即会测试、按仓库子路径构建并部署。工作流也支持 `username.github.io` 这类根站点仓库。
-
-### Vercel
-
-直接导入仓库即可；`vercel.json` 会运行 `npm run build` 并发布 `dist/client`。建议给正式域名设置环境变量：
-
-```text
-NEXT_PUBLIC_SITE_URL=https://你的正式域名
-```
 
 ### 其他子路径托管
 
