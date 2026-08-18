@@ -10,6 +10,8 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await expect(page.getByText(/每次回答后动态重估剩余区间/)).toBeVisible();
   await expect(page.getByText(/答题次数上限/)).toHaveCount(0);
   await expect(page.getByText(/疲劳安全上限/)).toHaveCount(0);
+  await expect(page.locator(".distribution-panel .distribution-stats")).toHaveCount(1);
+  await expect(page.locator(".distribution-panel .distribution-stats")).toContainText(/平均值 .*标准差/);
   await expect(page.locator("#score-level-count")).toHaveValue("10");
   await expect(page.locator("#distribution-preset option")).toHaveText(["均匀 10 档", "保持原分布", "高分辨率尾部", "反 J 分布", "自定义权重"]);
   await expect(page.locator("#distribution-preset")).toHaveValue("high-tail");
@@ -68,6 +70,8 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await expect(page.locator("#result-score-level-count")).toHaveValue("5");
   await expect(page.locator('.distribution-chart .histogram[data-level-count="10"]')).toHaveCount(1);
   await expect(page.locator('.distribution-chart .histogram[data-level-count="5"]')).toHaveCount(1);
+  await expect(page.locator('.distribution-chart .distribution-stats[data-series="原评分"]')).toHaveCount(1);
+  await expect(page.locator('.distribution-chart .distribution-stats[data-series="新评分"]')).toHaveCount(1);
   await expect(page.getByText("预计跨两档作品")).toBeVisible();
   await expect(page.getByText(/80% 后验区间/)).toBeVisible();
   await expect(page.getByText("最坏偏移")).toBeVisible();
@@ -97,6 +101,7 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await expect(page.locator("#result-score-level-count")).toHaveValue("10");
   await expect(page.getByRole("heading", { name: "原评分 → 新评分" })).toBeVisible();
   await expect(page.locator('.result-summary .histogram[data-level-count="10"]')).toHaveCount(1);
+  await expect(page.locator('.comparison-histogram .distribution-stats')).toHaveCount(2);
   await expect(page.locator(".result-summary .histogram .bar-old")).toHaveCount(10);
   await expect(page.locator(".result-summary .histogram .bar-new")).toHaveCount(10);
   expect(await page.locator(".score-pill.new.changed").count()).toBeGreaterThan(0);

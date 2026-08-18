@@ -6,10 +6,22 @@ import {
   normalizeDistributionConfig,
   normalizeScoreLevelCount,
   resampleDistributionWeights,
+  scoreDistributionStats,
 } from "../lib/distribution";
 import { DISTRIBUTIONS } from "../lib/types";
 
 describe("score distributions", () => {
+  it("calculates population statistics from score bucket counts", () => {
+    expect(scoreDistributionStats([1, 1, 1])).toEqual({ mean: 2, standardDeviation: Math.sqrt(2 / 3) });
+    expect(scoreDistributionStats([0, 0, 4])).toEqual({ mean: 3, standardDeviation: 0 });
+  });
+
+  it("returns no statistics for an empty distribution and ignores invalid negative mass", () => {
+    expect(scoreDistributionStats([])).toBeUndefined();
+    expect(scoreDistributionStats([0, 0, 0])).toBeUndefined();
+    expect(scoreDistributionStats([Number.NaN, -2, 2])).toEqual({ mean: 3, standardDeviation: 0 });
+  });
+
   it("normalizes score levels to the supported 3-20 range and defaults legacy data to 10", () => {
     expect(normalizeScoreLevelCount(undefined)).toBe(DEFAULT_SCORE_LEVELS);
     expect(normalizeScoreLevelCount(2)).toBe(3);

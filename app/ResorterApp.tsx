@@ -47,6 +47,7 @@ import {
   distributionWithLevelCount,
   normalizeScoreLevelCount,
   resampleDistributionWeights,
+  scoreDistributionStats,
 } from "@/lib/distribution";
 import { bangumiCoverVariant } from "@/lib/images";
 import { LOCAL_PROJECT_MARKER_KEY, PRINCIPLES_RETURN_PENDING_KEY, PRINCIPLES_RETURN_TARGET_KEY, sitePath } from "@/lib/site-path";
@@ -451,49 +452,73 @@ function ResyncDialog({ snapshot, onCancel, onConnected }: {
   </div>;
 }
 
-function ScoreHistogram({ counts, tone, label }: { counts: number[]; tone: "old" | "new"; label: string }) {
+function DistributionStats({ counts, label }: { counts: number[]; label: string }) {
+  const stats = scoreDistributionStats(counts);
+  const mean = stats?.mean.toFixed(1) ?? "—";
+  const standardDeviation = stats?.standardDeviation.toFixed(1) ?? "—";
+  return <span
+    className="distribution-stats"
+    data-series={label}
+    aria-label={`${label}：平均值 ${mean}，标准差 ${standardDeviation}`}
+  >
+    <b>{label}</b>
+    <span>平均值 <strong>{mean}</strong></span>
+    <span>标准差 <strong>{standardDeviation}</strong></span>
+  </span>;
+}
+
+function ScoreHistogram({ counts, tone, label, statsLabel }: { counts: number[]; tone: "old" | "new"; label: string; statsLabel: string }) {
   const max = Math.max(1, ...counts);
-  return <div className="histogram-scroll">
-    <div
-      className={`histogram single-series ${tone}`}
-      aria-label={label}
-      data-level-count={counts.length}
-      style={{ gridTemplateColumns: `repeat(${counts.length}, minmax(16px, 1fr))`, minWidth: `${Math.max(0, counts.length * 28)}px` }}
-    >
-      {counts.map((count, index) => <div className="histogram-column" key={index} title={`${index + 1} 分：${count} 个`}>
-        <div className="bar-space"><i className={`bar-${tone}`} style={{ height: `${count / max * 100}%` }} /></div><span>{index + 1}</span>
-      </div>)}
+  return <div className="score-histogram">
+    <DistributionStats counts={counts} label={statsLabel} />
+    <div className="histogram-scroll">
+      <div
+        className={`histogram single-series ${tone}`}
+        aria-label={label}
+        data-level-count={counts.length}
+        style={{ gridTemplateColumns: `repeat(${counts.length}, minmax(16px, 1fr))`, minWidth: `${Math.max(0, counts.length * 28)}px` }}
+      >
+        {counts.map((count, index) => <div className="histogram-column" key={index} title={`${index + 1} 分：${count} 个`}>
+          <div className="bar-space"><i className={`bar-${tone}`} style={{ height: `${count / max * 100}%` }} /></div><span>{index + 1}</span>
+        </div>)}
+      </div>
     </div>
   </div>;
 }
 
 function OriginalScoreHistogram({ items }: { items: CollectionItem[] }) {
   const counts = Array.from({ length: DEFAULT_SCORE_LEVELS }, (_, index) => items.filter((item) => item.rate === index + 1).length);
-  return <ScoreHistogram counts={counts} tone="old" label="原评分 1 至 10 分布图" />;
+  return <ScoreHistogram counts={counts} tone="old" label="原评分 1 至 10 分布图" statsLabel="原评分" />;
 }
 
 function NewScoreHistogram({ result, levelCount }: { result: RankedItem[]; levelCount: number }) {
   const counts = Array.from({ length: levelCount }, (_, index) => result.filter((item) => item.newRate === index + 1).length);
-  return <ScoreHistogram counts={counts} tone="new" label={`新评分 1 至 ${levelCount} 分布图`} />;
+  return <ScoreHistogram counts={counts} tone="new" label={`新评分 1 至 ${levelCount} 分布图`} statsLabel="新评分" />;
 }
 
 function TenLevelComparisonHistogram({ items, result }: { items: CollectionItem[]; result: RankedItem[] }) {
   const original = Array.from({ length: DEFAULT_SCORE_LEVELS }, (_, index) => items.filter((item) => item.rate === index + 1).length);
   const updated = Array.from({ length: DEFAULT_SCORE_LEVELS }, (_, index) => result.filter((item) => item.newRate === index + 1).length);
   const max = Math.max(1, ...original, ...updated);
-  return <div className="histogram-scroll">
-    <div
-      className="histogram"
-      aria-label="原评分与新评分 1 至 10 分布对比图"
-      data-level-count={DEFAULT_SCORE_LEVELS}
-      style={{ gridTemplateColumns: `repeat(${DEFAULT_SCORE_LEVELS}, minmax(16px, 1fr))` }}
-    >
-      {original.map((count, index) => <div className="histogram-column" key={index} title={`${index + 1} 分：原评分 ${count} 个，新评分 ${updated[index]} 个`}>
-        <div className="bar-space">
-          <i className="bar-new" style={{ height: `${updated[index] / max * 100}%` }} />
-          <i className="bar-old" style={{ height: `${count / max * 100}%` }} />
-        </div><span>{index + 1}</span>
-      </div>)}
+  return <div className="score-histogram comparison-histogram">
+    <div className="distribution-stats-row">
+      <DistributionStats counts={original} label="原评分" />
+      <DistributionStats counts={updated} label="新评分" />
+    </div>
+    <div className="histogram-scroll">
+      <div
+        className="histogram"
+        aria-label="原评分与新评分 1 至 10 分布对比图"
+        data-level-count={DEFAULT_SCORE_LEVELS}
+        style={{ gridTemplateColumns: `repeat(${DEFAULT_SCORE_LEVELS}, minmax(16px, 1fr))` }}
+      >
+        {original.map((count, index) => <div className="histogram-column" key={index} title={`${index + 1} 分：原评分 ${count} 个，新评分 ${updated[index]} 个`}>
+          <div className="bar-space">
+            <i className="bar-new" style={{ height: `${updated[index] / max * 100}%` }} />
+            <i className="bar-old" style={{ height: `${count / max * 100}%` }} />
+          </div><span>{index + 1}</span>
+        </div>)}
+      </div>
     </div>
   </div>;
 }

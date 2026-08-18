@@ -120,7 +120,15 @@ input:focus, select:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgb
 .panel-title h2 { margin-bottom: 0; }
 .legend { color: var(--muted); font-size: 10px; }
 .legend i { display: inline-block; width: 8px; height: 8px; margin-right: 5px; background: var(--teal); border-radius: 2px; }
+.score-histogram { min-width: 0; }
+.distribution-stats, .distribution-stats-row { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 10px; color: var(--muted); font-size: 9px; line-height: 1.4; }
+.distribution-stats { margin-top: 12px; }
+.distribution-stats b { color: var(--ink); font-weight: 700; }
+.distribution-stats > span { white-space: nowrap; }
+.distribution-stats strong { color: var(--ink); font-size: 10px; font-weight: 700; }
+.distribution-stats-row { margin-top: 12px; gap: 16px; }
 .histogram-scroll { max-width: 100%; overflow-x: auto; overflow-y: hidden; }
+.score-histogram > .histogram-scroll .histogram { margin-top: 10px; }
 .histogram { height: 210px; margin-top: 22px; display: grid; align-items: end; gap: min(1.2vw, 12px); }
 .histogram-column { height: 100%; min-width: 0; display: grid; grid-template-rows: 1fr 18px; gap: 5px; text-align: center; color: var(--muted); font-size: 9px; }
 .bar-space { position: relative; display: flex; align-items: end; justify-content: center; border-bottom: 1px solid #d8d4cb; }

@@ -8,6 +8,24 @@ export const MIN_SCORE_LEVELS = 3;
 export const MAX_SCORE_LEVELS = 20;
 export const DEFAULT_SCORE_LEVELS = 10;
 
+export interface ScoreDistributionStats {
+  mean: number;
+  standardDeviation: number;
+}
+
+/** Calculate population statistics for score buckets whose values are 1..K. */
+export function scoreDistributionStats(counts: number[]): ScoreDistributionStats | undefined {
+  const normalizedCounts = counts.map((count) => Number.isFinite(count) ? Math.max(0, count) : 0);
+  const total = normalizedCounts.reduce((sum, count) => sum + count, 0);
+  if (total <= 0) return undefined;
+  const mean = normalizedCounts.reduce((sum, count, index) => sum + count * (index + 1), 0) / total;
+  const variance = normalizedCounts.reduce((sum, count, index) => {
+    const difference = index + 1 - mean;
+    return sum + count * difference * difference;
+  }, 0) / total;
+  return { mean, standardDeviation: Math.sqrt(variance) };
+}
+
 export function normalizeScoreLevelCount(value: unknown) {
   if (value === undefined || value === null || value === "") return DEFAULT_SCORE_LEVELS;
   const numeric = Number(value);
