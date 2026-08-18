@@ -653,7 +653,6 @@ function CompareView({ state, busy, scoresVisible, onToggleScores, onMode, onAns
     {currentSessionAccepted > 0 && currentSessionAccepted % 20 === 0 && <Notice tone="warning">你已经完成 {currentSessionAccepted} 次判断，建议现在下载一次 JSON 备份。</Notice>}
     {targetReady && <Notice tone="success">当前{BUDGET_MODE_COPY[budgetMode].label}模式要求的嵌套后验检查均已达标：至少 90% 的作品最多偏移一档。可以导出结果，也可以继续比较。</Notice>}
     {!targetReady && projectionSuccesses === 0 && <Notice>本轮预测窗口内达标模拟为 {forecastProjectionProbability(forecast)}；未观察到成功不是不可达证明。再完成 {forecast?.nextCheckpoint} 次后会用新证据重估。</Notice>}
-    {!targetReady && projectionSuccesses !== 0 && (forecast?.nextCheckpoint ?? 0) > 0 && <Notice>这是模型模拟，不是承诺题量；再完成 {forecast?.nextCheckpoint} 次后系统会用新证据重新估计。</Notice>}
     {!targetReady && diagnostics && diagnostics.evidenceCount < diagnostics.evidenceRequired && <Notice>至少需要 {diagnostics.evidenceRequired} 次本会话有效判断；目前为 {diagnostics.evidenceCount} 次。</Notice>}
     {calibrationAvailable && <Notice>复问 {diagnostics?.calibration.consistent}/{diagnostics?.calibration.completed} 次一致；后验一致率 {percent(diagnostics?.calibration.posteriorMean)}，80% 区间 {percent(diagnostics?.calibration.credibleLow)}–{percent(diagnostics?.calibration.credibleHigh)}。该指标仅反映判断波动，不影响停止。</Notice>}
     <section className={`comparison-stage ${busy ? "busy" : ""}`} aria-busy={busy}>
