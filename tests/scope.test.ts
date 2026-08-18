@@ -28,7 +28,7 @@ describe("personal collection tag scopes", () => {
     expect(collectionTagFilter([" 百合 ", "百合", "原创"])).toEqual({
       source: "collection",
       match: "all",
-      tags: ["原创", "百合"],
+      tags: ["百合", "原创"],
     });
     expect(collectionTagFilter(["  "])).toBeUndefined();
   });
@@ -52,8 +52,8 @@ describe("personal collection tag scopes", () => {
       item(3, ["经典"]),
     ]);
     expect(options).toEqual([
-      { key: "demo", label: "Demo", count: 2 },
       { key: "经典", label: "经典", count: 2 },
+      { key: "demo", label: "Demo", count: 2 },
     ]);
     expect(sameTagFilter(collectionTagFilter(["经典", "DEMO"]), collectionTagFilter(["ｄｅｍｏ", "经典"]))).toBe(true);
     expect(sameTagFilter(collectionTagFilter(["经典"]), undefined)).toBe(false);

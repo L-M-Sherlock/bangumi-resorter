@@ -12,7 +12,7 @@ export function collectionTagFilter(tags: string[]): SessionTagFilter | undefine
     if (key && !unique.has(key)) unique.set(key, label);
   }
   const normalized = [...unique.entries()]
-    .sort(([left], [right]) => left.localeCompare(right))
+    .sort(([left], [right]) => left.localeCompare(right, "zh-CN"))
     .map(([, label]) => label);
   return normalized.length > 0
     ? { source: "collection", match: "all", tags: normalized }
@@ -68,7 +68,7 @@ export function collectionTagOptions(items: CollectionItem[]): CollectionTagOpti
   }
   return [...grouped.entries()]
     .map(([key, value]) => ({ key, label: value.label, count: value.subjects.size }))
-    .sort((left, right) => right.count - left.count || left.label.localeCompare(right.label));
+    .sort((left, right) => right.count - left.count || left.label.localeCompare(right.label, "zh-CN"));
 }
 
 export function tagFilterSummary(filter?: SessionTagFilter) {
