@@ -822,7 +822,7 @@ function CompareView({ state, busy, scoresVisible, onToggleScores, onMode, onAns
       <div className="versus" aria-hidden="true"><span>{busy ? "…" : "VS"}</span></div>
       <MediaCard item={right} side="right" showScore={scoresVisible} disabled={busy} onChoose={() => onAnswer("right")} />
     </section>
-    <div className="secondary-actions"><button disabled={busy} onClick={() => onAnswer("tie")}><span>＝</span>差不多喜欢 <kbd>↑</kbd></button><button disabled={busy} onClick={() => onAnswer("skip")}><span>↷</span>这次跳过 <kbd>↓</kbd></button><button disabled={busy} onClick={onUndo}><span>↶</span>撤销上次</button></div>
+    <div className="secondary-actions"><button disabled={busy} onClick={() => onAnswer("tie")}><span>＝</span>差不多喜欢 <kbd>↑</kbd></button><button disabled={busy} onClick={() => onAnswer("skip")}><span>↷</span>这次跳过 <kbd>↓</kbd></button><button disabled={busy} onClick={onUndo} title="快捷键：Ctrl+Z（Windows / Linux）或 ⌘Z（macOS）"><span>↶</span>撤销上次 <kbd>⌘/Ctrl Z</kbd></button></div>
     <footer className="session-footer"><span><Term term="inference-mode">{BUDGET_MODE_COPY[budgetMode].label}模式</Term>：{BUDGET_MODE_COPY[budgetMode].description}</span><div><button onClick={onResults}>查看当前结果</button><button onClick={onPause}>暂停并返回收藏</button></div></footer>
   </>;
 }

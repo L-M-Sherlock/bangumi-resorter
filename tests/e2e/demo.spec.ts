@@ -49,7 +49,9 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await expect(page.getByText("未来 20 次内达标")).toHaveCount(0);
   await expect(page.getByText("安全余量")).toHaveCount(0);
   await expect(page.getByText(/\/ 参考/)).toHaveCount(0);
-  await page.getByRole("button", { name: "撤销上次" }).click();
+  const undoButton = page.getByRole("button", { name: /撤销上次.*⌘\/Ctrl Z/ });
+  await expect(undoButton).toHaveAttribute("title", /Ctrl\+Z.*⌘Z/);
+  await undoButton.click();
   await expect(page.getByText(/本次已完成/)).toContainText("0");
   await expect(page.locator(".media-card h2").nth(0)).toHaveText(originalPair[0]);
   await expect(page.locator(".media-card h2").nth(1)).toHaveText(originalPair[1]);
