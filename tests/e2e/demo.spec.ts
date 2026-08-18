@@ -78,6 +78,14 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await expect(page.getByText("完全零错桶概率")).toHaveCount(0);
   await expect(page.getByText("未来 20 次内达标")).toHaveCount(0);
   await expect(page.getByText(/区间仅代表模型内近似/)).toBeVisible();
+  let dangerZone = page.locator(".rating-write-danger");
+  await expect(dangerZone).toBeVisible();
+  await expect(page.locator(".comparison-manager + .rating-write-danger + .ranking-table-wrap")).toHaveCount(1);
+  expect(await dangerZone.locator(":scope > summary strong").evaluate((element) => getComputedStyle(element).fontSize)).toBe("14px");
+  await dangerZone.locator(":scope > summary").click();
+  await expect(dangerZone.getByText(/当前结果是 5 档/)).toBeVisible();
+  await expect(dangerZone.getByRole("button", { name: "检查写回变更" })).toHaveCount(0);
+  await dangerZone.locator(":scope > summary").click();
   await page.locator("#result-score-level-count").selectOption("12");
   await expect(page.locator("#result-score-level-count")).toHaveValue("12");
   await expect(page.getByText("本会话判断记录（1）")).toBeVisible();
@@ -92,8 +100,74 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await expect(page.locator(".result-summary .histogram .bar-old")).toHaveCount(10);
   await expect(page.locator(".result-summary .histogram .bar-new")).toHaveCount(10);
   expect(await page.locator(".score-pill.new.changed").count()).toBeGreaterThan(0);
+  const ratingRows = await page.locator(".ranking-table tbody tr").evaluateAll((rows) => rows.map((row) => {
+    const href = row.querySelector<HTMLAnchorElement>("a[href*='/subject/']")?.href ?? "";
+    return {
+      subjectId: Number(href.split("/").pop()),
+      snapshotRate: Number(row.querySelector(".score-pill.old")?.textContent),
+      targetRate: Number(row.querySelector(".score-pill.new")?.textContent),
+    };
+  }));
+  const readyCandidate = ratingRows.find((entry) => entry.snapshotRate !== entry.targetRate);
+  expect(readyCandidate).toBeDefined();
+  const unchangedCandidate = ratingRows.find((entry) => entry.subjectId !== readyCandidate?.subjectId)!;
+  const conflictCandidate = ratingRows.find((entry) => ![readyCandidate?.subjectId, unchangedCandidate.subjectId].includes(entry.subjectId))!;
+  const missingCandidate = ratingRows.find((entry) => ![readyCandidate?.subjectId, unchangedCandidate.subjectId, conflictCandidate.subjectId].includes(entry.subjectId))!;
+  const conflictRate = Array.from({ length: 10 }, (_, index) => index + 1).find((rate) => rate !== conflictCandidate.snapshotRate && rate !== conflictCandidate.targetRate)!;
+  const liveRatings = new Map(ratingRows.map((entry) => [entry.subjectId, entry.snapshotRate]));
+  liveRatings.set(unchangedCandidate.subjectId, unchangedCandidate.targetRate);
+  liveRatings.set(conflictCandidate.subjectId, conflictRate);
+  liveRatings.delete(missingCandidate.subjectId);
+  const patchedSubjectIds: number[] = [];
+  await page.route("https://api.bgm.tv/v0/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (url.pathname.endsWith("/me")) {
+      await route.fulfill({ json: { username: "demo" } });
+      return;
+    }
+    if (request.method() === "GET" && url.pathname.endsWith("/users/demo/collections")) {
+      const data = ratingRows
+        .filter((entry) => liveRatings.has(entry.subjectId))
+        .map((entry) => ({ subject_id: entry.subjectId, subject_type: 2, rate: liveRatings.get(entry.subjectId), type: 2, private: false }));
+      await route.fulfill({ json: { total: data.length, limit: 50, offset: 0, data } });
+      return;
+    }
+    if (request.method() === "PATCH" && url.pathname.includes("/users/-/collections/")) {
+      const subjectId = Number(url.pathname.split("/").pop());
+      const body = request.postDataJSON() as { rate: number };
+      patchedSubjectIds.push(subjectId);
+      liveRatings.set(subjectId, body.rate);
+      await route.fulfill({ status: 204, body: "" });
+      return;
+    }
+    await route.abort();
+  });
+  dangerZone = page.locator(".rating-write-danger");
+  await dangerZone.locator(":scope > summary").click();
+  await expect(dangerZone.getByText(/尚未达到停止条件/)).toBeVisible();
+  await dangerZone.getByLabel(/Bangumi 个人令牌/).fill("write-token");
+  await dangerZone.getByRole("button", { name: "检查写回变更" }).click();
+  await expect(dangerZone.getByRole("heading", { name: "写回预览" })).toBeVisible();
+  await expect(dangerZone).toContainText("1 线上冲突");
+  await expect(dangerZone).toContainText("1 已移出");
+  const confirmInput = dangerZone.getByLabel(/输入账号名/);
+  const writeButton = dangerZone.getByRole("button", { name: /永久写回/ });
+  await confirmInput.fill("someone-else");
+  await expect(writeButton).toBeDisabled();
+  await confirmInput.fill("DEMO");
+  await expect(writeButton).toBeEnabled();
+  await writeButton.click();
+  await expect(dangerZone.getByText(/已验证写回 \d+ 条/)).toBeVisible();
+  await expect(dangerZone.getByRole("button", { name: "重新同步当前账号" })).toBeVisible();
+  expect(patchedSubjectIds.length).toBeGreaterThan(0);
+  expect(patchedSubjectIds).not.toContain(conflictCandidate.subjectId);
+  expect(patchedSubjectIds).not.toContain(missingCandidate.subjectId);
+  await expect(dangerZone.getByLabel(/Bangumi 个人令牌/)).toHaveValue("");
   await page.locator("#result-score-level-count").selectOption("12");
   await expect(page.locator("#result-score-level-count")).toHaveValue("12");
+  await expect(page.locator(".rating-write-danger")).not.toHaveAttribute("open", "");
+  await expect(page.getByRole("heading", { name: "写回预览" })).toHaveCount(0);
   await page.locator("#result-budget-mode").selectOption("quick");
   await expect(page.locator("#result-budget-mode")).toHaveValue("quick");
   const quickSummary = await page.locator(".summary-stat").textContent();

@@ -154,6 +154,7 @@ export default function PrinciplesPage() {
             <li>“已稳定”不表示你以后不会改主意，只表示现有证据下，大多数作品不太可能发生跨两档变化。</li>
             <li>高分辨率分布提高高分区分力的代价，是压缩其他区域；选择分布本身就是价值判断。</li>
             <li>校准复问只报告判断波动，不会秘密调整你的答案、似然温度或停止结论。</li>
+            <li>写回评分是显式的可选操作：仅接受 10 档结果，先比较线上评分与会话快照，跳过冲突后才会逐条修改 Bangumi 收藏。</li>
           </ul>
         </section>
 
@@ -166,7 +167,7 @@ export default function PrinciplesPage() {
             <li><a href="https://doi.org/10.1080/01621459.1927.10502953" target="_blank" rel="noreferrer">Wilson (1927)</a>：二项比例区间。</li>
             <li><a href="https://doi.org/10.1080/01621459.1986.10478240" target="_blank" rel="noreferrer">Tierney &amp; Kadane (1986)</a>：贝叶斯后验的 Laplace 近似。</li>
           </ol>
-          <p>实现细节以当前版本代码为准。本站不会修改你的 Bangumi 原评分，收藏与判断只保存在当前站点的浏览器存储中。</p>
+          <p>实现细节以当前版本代码为准。本站默认只读；只有在结果页 Danger Zone 输入令牌、检查变更并确认账号后才会写回评分。收藏快照与判断仍只保存在当前站点的浏览器存储中。</p>
         </footer>
       </article>
     </div>

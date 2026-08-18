@@ -3,7 +3,16 @@
 
 import { FormEvent, KeyboardEvent as ReactKeyboardEvent, ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { Term } from "@/app/Term";
-import { syncBangumi, SyncProgress } from "@/lib/bangumi";
+import {
+  previewBangumiRatingWrite,
+  RatingWriteCandidate,
+  RatingWritePreview,
+  RatingWriteProgress,
+  RatingWriteResult,
+  syncBangumi,
+  SyncProgress,
+  writeBangumiRatings,
+} from "@/lib/bangumi";
 import { createDemoItems } from "@/lib/demo";
 import {
   commitComparisonDeletion,
@@ -314,7 +323,7 @@ function Shell({ view, onNavigate, profile, children }: { view: View; onNavigate
           {profile.avatar ? <img src={profile.avatar} alt="" /> : <span className="avatar-fallback">{profile.username[0]?.toUpperCase()}</span>}
           <div><strong>{profile.nickname || profile.username}</strong><small>@{profile.username}</small></div>
         </div>}
-        <div className="sidebar-note"><span className="status-dot" /><div><strong>所有数据仅存于本机</strong><small>不会修改 Bangumi 评分</small></div></div>
+        <div className="sidebar-note"><span className="status-dot" /><div><strong>排序数据仅存于本机</strong><small>默认只读；确认后才会写回</small></div></div>
       </aside>
       <section className="workspace">{children}</section>
     </main>
@@ -374,14 +383,14 @@ function ConnectView({ onConnected, onCancel, currentUsername }: {
         <div className="method-steps">
           <span><b>01</b>同步已评分收藏</span><i />
           <span><b>02</b>两两比较</span><i />
-          <span><b>03</b>导出新排名</span>
+          <span><b>03</b>导出或写回结果</span>
         </div>
       </section>
       <section className="connect-panel">
         <div className="connect-card">
           <span className="eyebrow">{currentUsername ? "切换账号" : "开始使用"}</span>
           <h2>{currentUsername ? "连接其他 Bangumi 账号" : "连接 Bangumi 收藏"}</h2>
-          <p>{currentUsername ? `当前账号 @${currentUsername} 的本地数据会完整保留。` : "只读取你的收藏和评分，不会向 Bangumi 写入任何内容。"}</p>
+          <p>{currentUsername ? `当前账号 @${currentUsername} 的本地数据会完整保留。` : "同步阶段只读取你的收藏和评分；只有在结果页 Danger Zone 明确确认后才会写回。"}</p>
           <form onSubmit={submit}>
             <label>Bangumi 用户名<input required value={username} onChange={(event) => setUsername(event.target.value)} placeholder="例如：sai" autoComplete="username" /></label>
             <label>个人令牌 <span>可选，用于私有收藏</span>
@@ -1000,8 +1009,186 @@ function ComparisonManager({ items, history, sessionId, busy, onAdd, onDelete }:
   </section>;
 }
 
-function ResultsView({ state, busy, onBack, onMode, onDistribution, onExportCsv, onAddComparison, onDeleteComparison }: {
+const RATING_WRITE_STATUS_COPY: Record<RatingWriteCandidate["status"], string> = {
+  ready: "将写回",
+  unchanged: "已一致",
+  conflict: "线上已变化",
+  missing: "已移出收藏",
+};
+
+function RatingWriteDangerZone({
+  username,
+  subjectType,
+  items,
+  scoreLevelCount,
+  stoppingReady,
+  externalBusy,
+  onResync,
+}: {
+  username: string;
+  subjectType: SubjectType;
+  items: RankedItem[];
+  scoreLevelCount: number;
+  stoppingReady: boolean;
+  externalBusy: boolean;
+  onResync: () => void;
+}) {
+  const [token, setToken] = useState("");
+  const [showToken, setShowToken] = useState(false);
+  const [confirmation, setConfirmation] = useState("");
+  const [preview, setPreview] = useState<RatingWritePreview>();
+  const [writeResult, setWriteResult] = useState<RatingWriteResult>();
+  const [progress, setProgress] = useState<RatingWriteProgress>();
+  const [stage, setStage] = useState<"preview" | "write">();
+  const [error, setError] = useState("");
+  const abortRef = useRef<AbortController | undefined>(undefined);
+  const busy = externalBusy || Boolean(stage);
+  const tenLevel = scoreLevelCount === DEFAULT_SCORE_LEVELS;
+  const confirmationMatches = confirmation.trim().toLowerCase() === username.toLowerCase();
+  const readyCount = preview?.candidates.filter((candidate) => candidate.status === "ready").length ?? 0;
+  const unchangedCount = preview?.candidates.filter((candidate) => candidate.status === "unchanged").length ?? 0;
+  const conflictCount = preview?.candidates.filter((candidate) => candidate.status === "conflict").length ?? 0;
+  const missingCount = preview?.candidates.filter((candidate) => candidate.status === "missing").length ?? 0;
+  const writeOutcomeRows = writeResult ? [
+    ...writeResult.succeeded.map((candidate) => ({ candidate, status: "已验证写回" })),
+    ...writeResult.unchanged.map((candidate) => ({ candidate, status: "原本已一致" })),
+    ...writeResult.skipped.map((candidate) => ({ candidate, status: `已跳过：${RATING_WRITE_STATUS_COPY[candidate.status]}` })),
+    ...writeResult.failed.map(({ candidate, message }) => ({ candidate, status: `失败：${message}` })),
+    ...writeResult.pending.map((candidate) => ({ candidate, status: "尚未执行" })),
+    ...writeResult.unverified.map((candidate) => ({ candidate, status: "已提交，未能验证" })),
+  ] : [];
+
+  useEffect(() => () => abortRef.current?.abort(), []);
+
+  function clearSensitiveState() {
+    abortRef.current?.abort();
+    abortRef.current = undefined;
+    setToken("");
+    setShowToken(false);
+    setConfirmation("");
+    setPreview(undefined);
+    setWriteResult(undefined);
+    setProgress(undefined);
+    setStage(undefined);
+    setError("");
+  }
+
+  function changeToken(value: string) {
+    setToken(value);
+    setConfirmation("");
+    setPreview(undefined);
+    setWriteResult(undefined);
+    setProgress(undefined);
+    setError("");
+  }
+
+  async function checkPreview(event: FormEvent) {
+    event.preventDefault();
+    if (!tenLevel || busy) return;
+    const controller = new AbortController();
+    abortRef.current?.abort();
+    abortRef.current = controller;
+    setStage("preview");
+    setError("");
+    setPreview(undefined);
+    setWriteResult(undefined);
+    setConfirmation("");
+    setProgress(undefined);
+    try {
+      const checked = await previewBangumiRatingWrite(
+        username,
+        token,
+        subjectType,
+        items.map((item) => ({
+          subjectId: item.subjectId,
+          name: primaryName(item),
+          snapshotRate: item.rate,
+          targetRate: item.newRate,
+        })),
+        controller.signal,
+      );
+      if (!controller.signal.aborted) setPreview(checked);
+    } catch (cause) {
+      if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "无法生成写回预览。");
+    } finally {
+      if (abortRef.current === controller) abortRef.current = undefined;
+      if (!controller.signal.aborted) setStage(undefined);
+    }
+  }
+
+  async function commitWrite() {
+    if (!preview || !confirmationMatches || readyCount === 0 || busy) return;
+    const controller = new AbortController();
+    abortRef.current?.abort();
+    abortRef.current = controller;
+    setStage("write");
+    setError("");
+    setWriteResult(undefined);
+    setProgress({ completed: 0, total: readyCount, subjectId: 0 });
+    try {
+      const completed = await writeBangumiRatings(username, token, preview, setProgress, controller.signal);
+      if (!controller.signal.aborted) {
+        setWriteResult(completed);
+        setPreview(undefined);
+        setToken("");
+        setShowToken(false);
+        setConfirmation("");
+      }
+    } catch (cause) {
+      if (!controller.signal.aborted) setError(cause instanceof Error ? cause.message : "无法写回 Bangumi 评分。");
+    } finally {
+      if (abortRef.current === controller) abortRef.current = undefined;
+      if (!controller.signal.aborted) setStage(undefined);
+    }
+  }
+
+  return <details
+    className="rating-write-danger"
+    onToggle={(event) => {
+      if (event.currentTarget.open || busy) return;
+      clearSensitiveState();
+    }}
+  >
+    <summary onClick={(event) => { if (busy) event.preventDefault(); }}>
+      <span><b>Danger Zone</b><strong>写回 Bangumi 评分</strong></span>
+      <small>永久修改当前账号中本会话的收藏评分</small>
+    </summary>
+    <div className="rating-write-body">
+      <p>这里只会提交当前会话的 10 档新评分。操作不会修改本地快照，也不会创建已经移出收藏的条目。</p>
+      {!tenLevel && <Notice tone="warning">当前结果是 {scoreLevelCount} 档。Bangumi 只接受 1–10 的整数评分；请先把结果切换回 10 档，系统不会自动映射。</Notice>}
+      {tenLevel && !stoppingReady && <Notice tone="warning">当前会话尚未达到停止条件。你仍可写回，但这些评分的模型内稳定度还没有达到当前模式的要求。</Notice>}
+      {tenLevel && <form className="rating-write-auth" onSubmit={checkPreview}>
+        <label className="field-label">Bangumi 个人令牌 <small>必须属于 @{username}，仅保存在当前页面内存</small>
+          <div className="token-field"><input required value={token} onChange={(event) => changeToken(event.target.value)} type={showToken ? "text" : "password"} placeholder="需要 write:collection 权限" autoComplete="off" /><button type="button" disabled={busy} onClick={() => setShowToken((value) => !value)}>{showToken ? "隐藏" : "显示"}</button></div>
+        </label>
+        <button className="outline-button danger-outline" disabled={busy || !token.trim()}>{stage === "preview" ? "正在读取线上评分…" : "检查写回变更"}</button>
+      </form>}
+      {error && <Notice tone="error">{error}</Notice>}
+      {preview && <section className="rating-write-preview" aria-labelledby="rating-write-preview-title">
+        <div className="panel-title"><div><span className="eyebrow">线上检查完成</span><h2 id="rating-write-preview-title">写回预览</h2></div><small>@{preview.username} · {formatDateTime(preview.checkedAt)}</small></div>
+        <div className="rating-write-counts"><span><b>{readyCount}</b> 将写回</span><span><b>{unchangedCount}</b> 已一致</span><span><b>{conflictCount}</b> 线上冲突</span><span><b>{missingCount}</b> 已移出</span></div>
+        {(conflictCount > 0 || missingCount > 0) && <Notice tone="warning">线上发生变化或已经移出收藏的条目将被跳过。请重新同步后再处理这些条目。</Notice>}
+        <div className="rating-write-table-wrap"><table className="rating-write-table"><thead><tr><th>条目</th><th>快照评分</th><th>线上评分</th><th>目标评分</th><th>处理</th></tr></thead><tbody>{preview.candidates.map((candidate) => <tr className={candidate.status} key={candidate.subjectId}><td><strong>{candidate.name}</strong><small>ID {candidate.subjectId}</small></td><td>{candidate.snapshotRate}</td><td>{candidate.liveRate ?? "—"}</td><td>{candidate.targetRate}</td><td>{RATING_WRITE_STATUS_COPY[candidate.status]}</td></tr>)}</tbody></table></div>
+        {readyCount > 0 ? <div className="rating-write-confirm">
+          {!stoppingReady && <strong>注意：当前排序尚未达到停止条件。</strong>}
+          <label className="field-label">输入账号名 <code>{username}</code> 以确认<input value={confirmation} disabled={busy} onChange={(event) => setConfirmation(event.target.value)} autoComplete="off" /></label>
+          <button className="danger-button" type="button" disabled={busy || !confirmationMatches} onClick={() => void commitWrite()}>{stage === "write" ? `正在写回 ${progress?.completed ?? 0}/${progress?.total ?? readyCount}` : `永久写回 ${readyCount} 条评分`}</button>
+        </div> : <Notice tone="info">当前没有可以安全写回的评分。</Notice>}
+      </section>}
+      {stage === "write" && progress && <div className="write-progress" role="status"><span>正在逐条写入并验证 · {progress.completed}/{progress.total}</span><div><i style={{ width: `${progress.total ? progress.completed / progress.total * 100 : 0}%` }} /></div></div>}
+      {writeResult && <section className="rating-write-result" aria-live="polite">
+        <Notice tone={writeResult.failed.length || writeResult.pending.length || writeResult.unverified.length ? "warning" : "success"}>已验证写回 {writeResult.succeeded.length} 条；原本已一致 {writeResult.unchanged.length} 条；跳过 {writeResult.skipped.length} 条。{writeResult.failed.length > 0 && `失败 ${writeResult.failed.length} 条。`}{writeResult.pending.length > 0 && `尚未执行 ${writeResult.pending.length} 条。`}{writeResult.unverified.length > 0 && `有 ${writeResult.unverified.length} 条无法验证。`}</Notice>
+        {writeResult.message && <Notice tone="error">{writeResult.message}</Notice>}
+        <details className="write-outcomes"><summary>查看逐条执行结果（{writeOutcomeRows.length}）</summary><div className="rating-write-table-wrap"><table className="rating-write-table"><thead><tr><th>条目</th><th>目标评分</th><th>结果</th></tr></thead><tbody>{writeOutcomeRows.map(({ candidate, status }) => <tr key={`${candidate.subjectId}:${status}`}><td><strong>{candidate.name}</strong><small>ID {candidate.subjectId}</small></td><td>{candidate.targetRate}</td><td>{status}</td></tr>)}</tbody></table></div></details>
+        <div className="rating-write-result-actions"><button className="outline-button" type="button" onClick={() => { setWriteResult(undefined); setError(""); }}>重新输入令牌并检查</button><button className="primary-button compact" type="button" onClick={() => { clearSensitiveState(); onResync(); }}>重新同步当前账号</button></div>
+      </section>}
+    </div>
+  </details>;
+}
+
+function ResultsView({ state, username, busy, onBack, onMode, onDistribution, onExportCsv, onAddComparison, onDeleteComparison, onResync }: {
   state: CompareState;
+  username: string;
   busy: boolean;
   onBack: () => void;
   onMode: (mode: ComparisonBudgetMode) => Promise<void>;
@@ -1009,6 +1196,7 @@ function ResultsView({ state, busy, onBack, onMode, onDistribution, onExportCsv,
   onExportCsv: (result: RankedItem[]) => void;
   onAddComparison: (leftSubjectId: number, rightSubjectId: number, outcome: Exclude<ComparisonOutcome, "skip">) => Promise<void>;
   onDeleteComparison: (recordId: string) => Promise<void>;
+  onResync: () => void;
 }) {
   const comparisons = toRankingComparisons(state.history);
   const result = buildRankedItems(state.items, state.model, comparisons, state.session.distribution);
@@ -1024,6 +1212,16 @@ function ResultsView({ state, busy, onBack, onMode, onDistribution, onExportCsv,
     <header className="page-header"><div><span className="eyebrow">排序结果 · {BUDGET_MODE_COPY[budgetMode].label}模式 · <Term term="score-bucket">{scoreLevelCount} 档</Term></span><h1>你的偏好序列</h1><p>{result.length} 个{SUBJECT_TYPES[state.session.subjectType]}条目 · 当前输出 <Term term="score-bucket">{scoreLevelCount} 档评分</Term> · <Term term="prior">{priorCopy}</Term></p></div><div className="header-actions"><InferenceModeSelect id="result-budget-mode" value={budgetMode} busy={busy} onChange={onMode} /><button className="outline-button" onClick={onBack}>继续比较</button><button className="primary-button compact" onClick={() => onExportCsv(result)}>导出 CSV</button></div></header>
     <section className="result-summary"><article className="panel"><div className="panel-title"><div><span className="eyebrow"><Term term="score-distribution">{scoreLevelCount === DEFAULT_SCORE_LEVELS ? "评分分布对比" : "评分分布"}</Term></span><h2>{scoreLevelCount === DEFAULT_SCORE_LEVELS ? "原评分 → 新评分" : `原评分与 ${scoreLevelCount} 档新评分`}</h2></div><div className="distribution-controls"><ScoreLevelSelect id="result-score-level-count" className="header-select" value={scoreLevelCount} disabled={busy} onChange={(levelCount) => void onDistribution(distributionWithLevelCount(state.session.distribution, levelCount))} /><select id="result-distribution-preset" value={state.session.distribution.preset} disabled={busy} onChange={(event) => { const preset = event.target.value as DistributionPreset; void onDistribution(distributionConfig(preset, scoreLevelCount, state.session.distribution.weights)); }}><option value="uniform">均匀 {scoreLevelCount} 档</option><option value="preserve">保持原分布</option><option value="high-tail">高分辨率尾部</option><option value="reverse-j">反 J 分布</option><option value="custom">自定义权重</option></select></div></div>{state.session.distribution.preset === "custom" && <CustomDistributionEditor key={`${state.session.id}:${scoreLevelCount}`} weights={state.session.distribution.weights} busy={busy} onApply={(weights) => onDistribution(distributionConfig("custom", scoreLevelCount, weights))} />}{scoreLevelCount === DEFAULT_SCORE_LEVELS ? <><TenLevelComparisonHistogram items={state.items} result={result} /><div className="chart-legend"><span><i className="old" />原评分</span><span><i className="new" />新评分</span></div></> : <div className="distribution-charts"><div className="distribution-chart"><strong>原评分 · 1–10</strong><OriginalScoreHistogram items={state.items} /></div><div className="distribution-chart"><strong>新评分 · 1–{scoreLevelCount}</strong><NewScoreHistogram result={result} levelCount={scoreLevelCount} /></div></div>}</article><article className="summary-stat"><span><Term term="cross-two-buckets">预计跨两档作品</Term></span><strong>{crossTwoBucketValue(diagnostics)}</strong><small><Term term="posterior-interval">{crossTwoBucketInterval(diagnostics)}</Term></small><div className="summary-forecast"><span><Term term="dynamic-forecast">动态剩余预测</Term></span><b>{forecastRange(diagnostics)}</b><small><StoppingCriterionDetail diagnostics={diagnostics} /></small></div><hr /><span><Term term="maximum-displacement">最坏偏移</Term></span><strong>{maxBucketDisplacementValue(diagnostics)}</strong><small>{maxBucketDisplacementInterval(diagnostics)}；仅作尾部诊断，停止条件允许最多 10% 的作品<Term term="cross-two-buckets">跨两档</Term>。{diagnostics?.calibration.completed ? <><Term term="calibration-repeat">复问</Term> {diagnostics.calibration.consistent}/{diagnostics.calibration.completed} 次一致，<Term term="posterior">后验</Term> {percent(diagnostics.calibration.posteriorMean)}（仅作诊断）</> : "尚无校准复问；区间仅代表模型内近似"}</small></article></section>
     <ComparisonManager key={state.session.id} items={result} history={state.history} sessionId={state.session.id} busy={busy} onAdd={onAddComparison} onDelete={onDeleteComparison} />
+    <RatingWriteDangerZone
+      key={`${state.session.id}:${state.model.version}:${scoreLevelCount}:${state.session.distribution.preset}:${state.session.distribution.weights.join(",")}`}
+      username={username}
+      subjectType={state.session.subjectType}
+      items={result}
+      scoreLevelCount={scoreLevelCount}
+      stoppingReady={Boolean(diagnostics?.ready)}
+      externalBusy={busy}
+      onResync={onResync}
+    />
     <section className="ranking-table-wrap"><table className="ranking-table"><thead><tr><th>名次</th><th>条目</th><th>原评分（10 档）</th><th>新评分（{scoreLevelCount} 档）</th><th><Term term="bucket-stability">精确分桶稳定度</Term></th><th><Term term="latent-preference">连续潜在分数（仅供解释）</Term></th><th><Term term="posterior-standard-deviation">后验标准差</Term></th><th /></tr></thead><tbody>{result.map((item) => <tr key={item.subjectId}><td><strong>#{item.rank}</strong></td><td><div className="title-cell"><Poster item={item} /><div><strong>{primaryName(item)}</strong><small>{item.nameCn ? item.name : `${item.date?.slice(0, 4) || ""} · ${SUBJECT_TYPES[item.subjectType]}`}</small></div></div></td><td><span className="score-pill old">{item.rate}</span></td><td><span className={`score-pill new ${scoreLevelCount === DEFAULT_SCORE_LEVELS && item.newRate !== item.rate ? "changed" : ""}`}>{item.newRate}</span></td><td>{item.bucketStability === undefined ? "—" : percent(item.bucketStability)}</td><td>{item.ability.toFixed(3)}</td><td>{item.uncertainty.toFixed(3)}</td><td><a href={`https://bgm.tv/subject/${item.subjectId}`} target="_blank" rel="noreferrer" aria-label={`在 Bangumi 打开 ${primaryName(item)}`}>↗</a></td></tr>)}</tbody></table></section>
   </>;
 }
@@ -1350,7 +1548,7 @@ export default function ResorterApp() {
     if (!snapshot || !profile) return null;
     if (view === "library") return <LibraryView snapshot={snapshot} items={items} sessions={sessions} onStart={startSession} onResume={openSession} onUpgradeSession={upgradeSession} onDeriveSession={deriveSession} onDeleteSession={removeSession} onSyncAgain={() => setResyncOpen(true)} onSwitchAccount={() => navigate("connect")} />;
     if (view === "compare" && compare) return <CompareView state={compare} busy={busy} scoresVisible={scoresVisible} onToggleScores={() => setScoresVisible((value) => !value)} onMode={changeBudgetMode} onAnswer={answer} onUndo={undo} onPause={() => navigate("library")} onResults={() => navigate("results")} />;
-    if (view === "results" && compare) return <ResultsView state={compare} busy={busy} onBack={() => navigate("compare")} onMode={changeBudgetMode} onDistribution={changeDistribution} onExportCsv={exportCsv} onAddComparison={addManualComparison} onDeleteComparison={removeComparison} />;
+    if (view === "results" && compare) return <ResultsView state={compare} username={snapshot.username} busy={busy} onBack={() => navigate("compare")} onMode={changeBudgetMode} onDistribution={changeDistribution} onExportCsv={exportCsv} onAddComparison={addManualComparison} onDeleteComparison={removeComparison} onResync={() => setResyncOpen(true)} />;
     if (view === "backup") return <BackupView snapshot={snapshot} items={items} profile={profile} sessions={sessions} storage={storeStatus} onImported={async () => { const saved = await latestSnapshot(); if (saved) await loadSnapshot(saved, "backup"); }} />;
     return <div className="center-message"><h2>请先选择一个排序会话</h2><button className="primary-button compact" onClick={() => navigate("library")}>返回收藏概览</button></div>;
   })();
