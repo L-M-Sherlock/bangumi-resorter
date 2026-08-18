@@ -304,6 +304,8 @@ function Brand() {
   );
 }
 
+const GITHUB_REPOSITORY_URL = "https://github.com/L-M-Sherlock/bangumi-resorter";
+
 function Shell({ view, onNavigate, profile, children }: { view: View; onNavigate: (view: View) => void; profile?: Profile; children: ReactNode }) {
   const nav: Array<[View, string, string]> = [
     ["library", "⌂", "收藏概览"], ["compare", "⇄", "两两比较"], ["results", "≋", "排序结果"], ["backup", "↓", "备份与导出"],
@@ -319,6 +321,7 @@ function Shell({ view, onNavigate, profile, children }: { view: View; onNavigate
             </button>
           ))}
           <a href={sitePath("/principles")}><span className="nav-icon">§</span><span className="nav-label">原理</span></a>
+          <a href={GITHUB_REPOSITORY_URL} target="_blank" rel="noreferrer" title="在 GitHub 上打开项目并 Star"><span className="nav-icon" aria-hidden="true">★</span><span className="nav-label">GitHub Star</span></a>
         </nav>
         {profile && <div className="profile-mini">
           {profile.avatar ? <img src={profile.avatar} alt="" /> : <span className="avatar-fallback">{profile.username[0]?.toUpperCase()}</span>}
@@ -380,7 +383,10 @@ function ConnectView({ onConnected, onCancel, currentUsername }: {
         <span className="hero-kicker">PERSONAL MEDIA RANKING</span>
         <h1>让你的评分，<br />重新变得有意义。</h1>
         <p>不再纠结“它值 8 分还是 9 分”。只需回答哪一部更喜欢，Resorter 会用 <Term term="bradley-terry">Bradley–Terry 模型</Term>得到可检查、逐步稳定的个人偏好顺序。</p>
-        <a className="principles-entry" href={sitePath("/principles")}>为什么这样排序？阅读方法、证据与限制 <span aria-hidden="true">→</span></a>
+        <div className="hero-links">
+          <a className="principles-entry" href={sitePath("/principles")}>为什么这样排序？阅读方法、证据与限制 <span aria-hidden="true">→</span></a>
+          <a className="github-star-button" href={GITHUB_REPOSITORY_URL} target="_blank" rel="noreferrer"><span aria-hidden="true">★</span>在 GitHub 上 Star</a>
+        </div>
         <div className="method-steps">
           <span><b>01</b>同步已评分收藏</span><i />
           <span><b>02</b>两两比较</span><i />

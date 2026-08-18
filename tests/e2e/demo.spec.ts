@@ -3,8 +3,12 @@ import { expect, test } from "@playwright/test";
 test("demo project can filter, compare, derive, upgrade, edit records, and delete sessions", async ({ page }) => {
   await page.goto("/");
   await page.locator("html[data-resorter-ready='true']").waitFor();
+  const landingStar = page.getByRole("link", { name: "在 GitHub 上 Star" });
+  await expect(landingStar).toHaveAttribute("href", "https://github.com/L-M-Sherlock/bangumi-resorter");
+  await expect(landingStar).toHaveAttribute("target", "_blank");
   await page.getByRole("button", { name: "先用演示数据体验" }).click();
   await expect(page.getByRole("heading", { name: /demo 的已评分收藏/ })).toBeVisible();
+  await expect(page.getByRole("link", { name: "GitHub Star" })).toHaveAttribute("href", "https://github.com/L-M-Sherlock/bangumi-resorter");
   await expect(page.getByRole("link", { name: /原理/ })).toHaveAttribute("href", "/principles");
   await expect(page.getByText(/强依赖原评分.*低频探索全局/)).toBeVisible();
   await expect(page.getByText(/每次回答后动态重估剩余区间/)).toBeVisible();

@@ -39,8 +39,12 @@ html[data-resorter-restoring]:not([data-resorter-ready]) .restore-splash { posit
 .hero-kicker { margin-top: auto; padding-top: 80px; color: var(--accent-dark); font-size: 11px; font-weight: 800; letter-spacing: .16em; }
 .connect-intro h1 { max-width: 690px; margin: 20px 0; font: 700 clamp(48px, 6.4vw, 90px)/.98 Georgia, "Songti SC", serif; letter-spacing: -.05em; }
 .connect-intro > p { max-width: 600px; margin: 0; color: #64615b; font-size: 16px; line-height: 1.8; }
-.principles-entry { position: relative; z-index: 1; width: fit-content; margin-top: 18px; color: var(--teal); font-size: 11px; font-weight: 700; text-decoration: none; }
+.hero-links { position: relative; z-index: 1; margin-top: 18px; display: flex; align-items: center; flex-wrap: wrap; gap: 12px 20px; }
+.principles-entry { width: fit-content; color: var(--teal); font-size: 11px; font-weight: 700; text-decoration: none; }
 .principles-entry:hover { color: var(--accent-dark); }
+.github-star-button { min-height: 34px; padding: 0 13px; display: inline-flex; align-items: center; gap: 7px; color: white; border: 1px solid #1b1f23; border-radius: 7px; background: #24292f; box-shadow: 0 2px 0 rgba(0,0,0,.16); font-size: 10px; font-weight: 700; text-decoration: none; }
+.github-star-button:hover { background: #343a40; transform: translateY(-1px); }
+.github-star-button:focus-visible { outline: 3px solid rgba(45,102,98,.3); outline-offset: 3px; }
 .method-steps { position: relative; z-index: 1; margin-top: auto; padding-top: 60px; display: flex; align-items: center; gap: 14px; color: #5b5953; font-size: 11px; }
 .method-steps span { white-space: nowrap; }
 .method-steps b { margin-right: 7px; color: var(--accent); font: 700 11px Georgia, serif; }
