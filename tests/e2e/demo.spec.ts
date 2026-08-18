@@ -109,8 +109,61 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await page.getByRole("button", { name: /收藏概览/ }).click();
   await expect(page.locator(".session-row")).toHaveCount(2);
   await expect(page.getByText("标签范围：全部标签")).toBeVisible();
+
+  await page.getByRole("button", { name: "切换账号" }).click();
+  await expect(page).toHaveURL(/#connect$/);
+  await expect(page.getByRole("heading", { name: "连接其他 Bangumi 账号" })).toBeVisible();
+  await expect(page.getByText("当前账号 @demo 的本地数据会完整保留。")).toBeVisible();
+  await page.getByRole("button", { name: "返回当前账号 · @demo" }).click();
+  await expect(page).toHaveURL(/#library$/);
+  await expect(page.getByRole("heading", { name: /demo 的已评分收藏/ })).toBeVisible();
+
+  await page.route("https://api.bgm.tv/v0/**", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/v0/users/demo") {
+      await route.fulfill({
+        json: { username: "demo", nickname: "演示项目" },
+        headers: { "access-control-allow-origin": "*" },
+      });
+      return;
+    }
+    if (url.pathname === "/v0/users/demo/collections") {
+      await route.fulfill({
+        json: {
+          total: 16,
+          limit: 50,
+          offset: 0,
+          data: Array.from({ length: 16 }, (_, index) => ({
+            subject_id: 900000 + index,
+            subject_type: 2,
+            rate: index < 7 ? 9 : 8,
+            type: 2,
+            private: false,
+            tags: index % 3 === 0 ? ["demo", "经典"] : ["demo"],
+            subject: {
+              id: 900000 + index,
+              type: 2,
+              name: `同步作品 ${index + 1}`,
+              name_cn: `同步作品 ${index + 1}`,
+              date: `${2000 + index}-01-01`,
+            },
+          })),
+        },
+        headers: { "access-control-allow-origin": "*" },
+      });
+      return;
+    }
+    await route.abort();
+  });
   await page.getByRole("button", { name: "重新同步" }).click();
-  await page.getByRole("button", { name: "先用演示数据体验" }).click();
+  await expect(page).toHaveURL(/#library$/);
+  const resyncDialog = page.getByRole("dialog", { name: "重新同步 demo" });
+  await expect(resyncDialog).toBeVisible();
+  await expect(resyncDialog.getByText("@demo")).toBeVisible();
+  await resyncDialog.getByRole("button", { name: "同步当前账号" }).click();
+  await expect(resyncDialog).toHaveCount(0);
+  await expect(page).toHaveURL(/#library$/);
+  await expect(page.getByText(/共 16 个条目/)).toBeVisible();
   await expect(page.getByRole("button", { name: "升级到当前收藏" }).first()).toBeVisible();
   page.once("dialog", async (dialog) => {
     expect(dialog.message()).toContain("作品：16 → 16");

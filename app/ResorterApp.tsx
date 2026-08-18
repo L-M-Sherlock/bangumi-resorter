@@ -318,7 +318,11 @@ function Notice({ tone = "info", children }: { tone?: "info" | "warning" | "erro
   return <div className={`notice notice-${tone}`} role={tone === "error" ? "alert" : "status"}>{children}</div>;
 }
 
-function ConnectView({ onConnected }: { onConnected: (snapshot: Snapshot) => Promise<void> }) {
+function ConnectView({ onConnected, onCancel, currentUsername }: {
+  onConnected: (snapshot: Snapshot) => Promise<void>;
+  onCancel?: () => void;
+  currentUsername?: string;
+}) {
   const [username, setUsername] = useState("");
   const [token, setToken] = useState("");
   const [showToken, setShowToken] = useState(false);
@@ -363,9 +367,9 @@ function ConnectView({ onConnected }: { onConnected: (snapshot: Snapshot) => Pro
       </section>
       <section className="connect-panel">
         <div className="connect-card">
-          <span className="eyebrow">开始使用</span>
-          <h2>连接 Bangumi 收藏</h2>
-          <p>只读取你的收藏和评分，不会向 Bangumi 写入任何内容。</p>
+          <span className="eyebrow">{currentUsername ? "切换账号" : "开始使用"}</span>
+          <h2>{currentUsername ? "连接其他 Bangumi 账号" : "连接 Bangumi 收藏"}</h2>
+          <p>{currentUsername ? `当前账号 @${currentUsername} 的本地数据会完整保留。` : "只读取你的收藏和评分，不会向 Bangumi 写入任何内容。"}</p>
           <form onSubmit={submit}>
             <label>Bangumi 用户名<input required value={username} onChange={(event) => setUsername(event.target.value)} placeholder="例如：sai" autoComplete="username" /></label>
             <label>个人令牌 <span>可选，用于私有收藏</span>
@@ -378,10 +382,52 @@ function ConnectView({ onConnected }: { onConnected: (snapshot: Snapshot) => Pro
           <div className="or-divider"><span>或者</span></div>
           <button className="demo-button" onClick={demo} disabled={busy}>先用演示数据体验</button>
           <small className="privacy-copy">令牌不会写入浏览器存储、日志或导出文件，刷新页面后即消失。</small>
+          {onCancel && <button className="outline-button full connect-return" type="button" disabled={busy} onClick={onCancel}>返回当前账号 · @{currentUsername}</button>}
         </div>
       </section>
     </main>
   );
+}
+
+function ResyncDialog({ snapshot, onCancel, onConnected }: {
+  snapshot: Snapshot;
+  onCancel: () => void;
+  onConnected: (snapshot: Snapshot) => Promise<void>;
+}) {
+  const [token, setToken] = useState("");
+  const [showToken, setShowToken] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState<SyncProgress>();
+  const [error, setError] = useState("");
+
+  async function submit(event: FormEvent) {
+    event.preventDefault(); setBusy(true); setError(""); setProgress(undefined);
+    const snapshotId = crypto.randomUUID();
+    try {
+      const result = await syncBangumi(snapshot.username, token, snapshotId, setProgress);
+      const saved = await saveSnapshot(result.profile, snapshotId, result.items);
+      await onConnected(saved);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : "重新同步失败，请重试。"); }
+    finally { setBusy(false); }
+  }
+
+  const progressPercent = progress?.total ? Math.min(100, Math.round(progress.loaded / progress.total * 100)) : 0;
+  return <div className="scope-modal-backdrop">
+    <section className="scope-modal resync-modal" role="dialog" aria-modal="true" aria-labelledby="resync-modal-title">
+      <div className="scope-modal-header"><div><span className="eyebrow">当前账号</span><h2 id="resync-modal-title">重新同步 {snapshot.username}</h2></div><button type="button" aria-label="关闭重新同步窗口" disabled={busy} onClick={onCancel}>×</button></div>
+      <p>系统会创建当前账号的新收藏快照；旧快照、排序会话和判断记录都会保留。</p>
+      <form onSubmit={submit}>
+        <div className="resync-account"><span>Bangumi 用户名</span><strong>@{snapshot.username}</strong></div>
+        <label className="field-label">个人令牌 <small>{snapshot.containsPrivate ? "必填，用于继续同步私有收藏" : "可选，用于私有收藏"}</small>
+          <div className="token-field"><input required={snapshot.containsPrivate} value={token} onChange={(event) => setToken(event.target.value)} type={showToken ? "text" : "password"} placeholder="仅保存在当前页面内存" autoComplete="off" /><button type="button" onClick={() => setShowToken((value) => !value)}>{showToken ? "隐藏" : "显示"}</button></div>
+        </label>
+        {snapshot.containsPrivate && <Notice tone="warning">上次快照包含私有收藏。为避免新快照遗漏这些条目，请重新提供个人令牌。</Notice>}
+        {error && <Notice tone="error">{error}</Notice>}
+        {busy && progress && <div className="sync-progress"><span>{progress.phase === "collections" ? "正在读取收藏" : "正在补全条目信息"} · {progress.loaded}/{progress.total}</span><div><i style={{ width: `${progressPercent}%` }} /></div></div>}
+        <div className="scope-modal-actions"><button className="outline-button" type="button" disabled={busy} onClick={onCancel}>取消</button><button className="primary-button compact" disabled={busy}>{busy ? "正在同步…" : "同步当前账号"}</button></div>
+      </form>
+    </section>
+  </div>;
 }
 
 function Histogram({ items, result }: { items: CollectionItem[]; result?: RankedItem[] }) {
@@ -481,7 +527,7 @@ interface TagDerivationDraft {
   selectedTags: string[];
 }
 
-function LibraryView({ snapshot, items, sessions, onStart, onResume, onUpgradeSession, onDeriveSession, onDeleteSession, onSyncAgain }: {
+function LibraryView({ snapshot, items, sessions, onStart, onResume, onUpgradeSession, onDeriveSession, onDeleteSession, onSyncAgain, onSwitchAccount }: {
   snapshot: Snapshot; items: CollectionItem[]; sessions: SortingSession[];
   onStart: (
     type: SubjectType,
@@ -496,6 +542,7 @@ function LibraryView({ snapshot, items, sessions, onStart, onResume, onUpgradeSe
   onDeriveSession: (sessionId: string, tagFilter?: SessionTagFilter) => Promise<void>;
   onDeleteSession: (sessionId: string) => Promise<void>;
   onSyncAgain: () => void;
+  onSwitchAccount: () => void;
 }) {
   const availableTypes = subjectEntries.filter(([type]) => items.some((item) => item.subjectType === type));
   const initialType = availableTypes[0]?.[0] ?? 2;
@@ -608,7 +655,7 @@ function LibraryView({ snapshot, items, sessions, onStart, onResume, onUpgradeSe
   }
 
   return <>
-    <header className="page-header"><div><span className="eyebrow">收藏概览</span><h1>{snapshot.username} 的已评分收藏</h1><p>上次同步于 {formatDate(snapshot.syncedAt)} · 共 {items.length} 个条目</p></div><button className="outline-button" onClick={onSyncAgain}>重新同步</button></header>
+    <header className="page-header"><div><span className="eyebrow">收藏概览</span><h1>{snapshot.username} 的已评分收藏</h1><p>上次同步于 {formatDate(snapshot.syncedAt)} · 共 {items.length} 个条目</p></div><div className="header-actions"><button className="outline-button" onClick={onSyncAgain}>重新同步</button><button className="outline-button" onClick={onSwitchAccount}>切换账号</button></div></header>
     <section className="metric-grid">
       {availableTypes.map(([type, label]) => { const count = items.filter((item) => item.subjectType === type).length; const mean = items.filter((item) => item.subjectType === type).reduce((sum, item) => sum + item.rate, 0) / count; return <button key={type} className={`metric-card ${selectedType === type ? "selected" : ""}`} onClick={() => { setSelectedType(type); setSelectedTags([]); }}><span>{label}</span><strong>{count}</strong><small>平均 {mean.toFixed(1)} 分</small></button>; })}
     </section>
@@ -920,12 +967,14 @@ export default function ResorterApp() {
   const [compare, setCompare] = useState<CompareState>();
   const [busy, setBusy] = useState(false);
   const [scoresVisible, setScoresVisible] = useState(false);
+  const [resyncOpen, setResyncOpen] = useState(false);
   const [globalError, setGlobalError] = useState("");
   const [storeStatus, setStoreStatus] = useState({ usage: 0, quota: 0, persisted: false });
   const workerRef = useRef<RankingWorkerClient | null>(null);
 
   const navigate = useCallback((target: View) => {
     setGlobalError("");
+    setResyncOpen(false);
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     setView(target);
     window.history.replaceState(null, "", `#${target}`);
@@ -1179,13 +1228,13 @@ export default function ResorterApp() {
 
   const shellContent = (() => {
     if (!snapshot || !profile) return null;
-    if (view === "library") return <LibraryView snapshot={snapshot} items={items} sessions={sessions} onStart={startSession} onResume={openSession} onUpgradeSession={upgradeSession} onDeriveSession={deriveSession} onDeleteSession={removeSession} onSyncAgain={() => navigate("connect")} />;
+    if (view === "library") return <LibraryView snapshot={snapshot} items={items} sessions={sessions} onStart={startSession} onResume={openSession} onUpgradeSession={upgradeSession} onDeriveSession={deriveSession} onDeleteSession={removeSession} onSyncAgain={() => setResyncOpen(true)} onSwitchAccount={() => navigate("connect")} />;
     if (view === "compare" && compare) return <CompareView state={compare} busy={busy} scoresVisible={scoresVisible} onToggleScores={() => setScoresVisible((value) => !value)} onMode={changeBudgetMode} onAnswer={answer} onUndo={undo} onPause={() => navigate("library")} onResults={() => navigate("results")} />;
     if (view === "results" && compare) return <ResultsView state={compare} busy={busy} onBack={() => navigate("compare")} onMode={changeBudgetMode} onDistribution={changeDistribution} onExportCsv={exportCsv} onAddComparison={addManualComparison} onDeleteComparison={removeComparison} />;
     if (view === "backup") return <BackupView snapshot={snapshot} items={items} profile={profile} sessions={sessions} storage={storeStatus} onImported={async () => { const saved = await latestSnapshot(); if (saved) await loadSnapshot(saved, "backup"); }} />;
     return <div className="center-message"><h2>请先选择一个排序会话</h2><button className="primary-button compact" onClick={() => navigate("library")}>返回收藏概览</button></div>;
   })();
 
-  if (view === "connect" || !snapshot || !profile) return <ConnectView onConnected={(saved) => loadSnapshot(saved, "library")} />;
-  return <Shell view={view} onNavigate={navigate} profile={profile}>{globalError && <Notice tone="error">{globalError}</Notice>}{busy && view !== "compare" && <div className="loading-line">正在准备排序模型…</div>}{shellContent}</Shell>;
+  if (view === "connect" || !snapshot || !profile) return <ConnectView onConnected={(saved) => loadSnapshot(saved, "library")} onCancel={snapshot && profile ? () => navigate("library") : undefined} currentUsername={snapshot && profile ? snapshot.username : undefined} />;
+  return <Shell view={view} onNavigate={navigate} profile={profile}>{globalError && <Notice tone="error">{globalError}</Notice>}{busy && view !== "compare" && <div className="loading-line">正在准备排序模型…</div>}{shellContent}{resyncOpen && <ResyncDialog snapshot={snapshot} onCancel={() => setResyncOpen(false)} onConnected={async (saved) => { setResyncOpen(false); await loadSnapshot(saved, "library"); }} />}</Shell>;
 }

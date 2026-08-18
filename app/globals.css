@@ -62,6 +62,7 @@ input:focus, select:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgb
 .or-divider span { padding: 0 10px; }
 .demo-button { width: 100%; min-height: 43px; border: 1px solid var(--line); border-radius: 7px; background: transparent; color: #56534e; font-size: 12px; }
 .privacy-copy { display: block; margin-top: 18px; color: #97938a; line-height: 1.6; text-align: center; }
+.connect-return { margin-top: 14px; }
 .sync-progress { display: grid; gap: 6px; color: var(--muted); font-size: 10px; }
 .sync-progress div { height: 3px; background: #e5e1d8; border-radius: 9px; overflow: hidden; }
 .sync-progress i { display: block; height: 100%; background: var(--accent); }
@@ -174,6 +175,15 @@ input:focus, select:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgb
 .scope-preview strong { grid-row: span 2; align-self: center; font: 700 22px Georgia, "Songti SC", serif; }
 .scope-preview small { color: var(--muted); font-size: 9px; }
 .scope-modal-actions { margin-top: 18px; display: flex; justify-content: flex-end; gap: 8px; }
+.resync-modal { width: min(520px, 100%); }
+.resync-modal form { display: grid; gap: 16px; }
+.resync-modal .field-label { gap: 7px; }
+.resync-modal .field-label > small { color: var(--muted); font-size: 9px; font-weight: 400; }
+.resync-modal .notice { margin-bottom: 0; }
+.resync-modal .scope-modal-actions { margin-top: 2px; }
+.resync-account { padding: 12px 14px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,.4); }
+.resync-account span { color: var(--muted); font-size: 10px; }
+.resync-account strong { font-size: 12px; }
 
 .progress-row { margin: 26px 0 28px; }
 .progress-copy { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; }
