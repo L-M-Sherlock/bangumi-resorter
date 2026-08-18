@@ -176,7 +176,7 @@ function forecastRange(diagnostics?: ModelState["diagnostics"]) {
   if (!forecast) return "正在建立预测";
   if (forecast.status === "ready") return "无需追加";
   if (forecast.lowerAdditional !== undefined && forecast.upperAdditional !== undefined) {
-    return `${forecast.lowerAdditional}–${forecast.upperAdditional} 次`;
+    return `约 ${forecast.lowerAdditional}–${forecast.upperAdditional} 次`;
   }
   if (forecast.medianAdditional !== undefined) return `约 ${forecast.medianAdditional} 次，上界未定`;
   if ((forecast.withinProjectionSuccesses ?? forecast.beforeLimitSuccesses ?? -1) === 0) return "尚未观察到达标路径";

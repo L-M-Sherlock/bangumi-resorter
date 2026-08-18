@@ -335,9 +335,11 @@ describe("Bradley–Terry ranking engine", () => {
 
     const evidenceLimited = analyzeRanking(rated, adjacentFit, uniform, evidence.slice(0, 9), "session");
     expect(evidenceLimited.ready).toBe(false);
-    expect(forecastStoppingTime(rated, adjacentFit, uniform, evidence.slice(0, 9), "session", evidenceLimited, {
+    const evidenceLimitedForecast = forecastStoppingTime(rated, adjacentFit, uniform, evidence.slice(0, 9), "session", evidenceLimited, {
       projectionHorizon: 100, randomSeed: 12, forecastEfficiency: 16,
-    }).medianAdditional).toBe(5);
+    });
+    expect(evidenceLimitedForecast.method).toBe("posterior-contraction-mc-v5");
+    expect(evidenceLimitedForecast.medianAdditional).toBe(1);
 
     const globallyStable = analyzeRanking(rated, {
       ...fit,

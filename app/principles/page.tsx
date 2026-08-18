@@ -123,7 +123,7 @@ export default function PrinciplesPage() {
 
         <section>
           <SectionHeading id="remaining-forecast">剩余次数如何预测</SectionHeading>
-          <p><Term term="dynamic-forecast">动态剩余预测</Term>不是把当前进度除以平均速度。系统从当前后验出发，模拟 64 条未来证据逐步收缩的路径；每条路径记录所有必需模式最晚何时通过，再报告其 10%、50% 与 90% 分位数。</p>
+          <p><Term term="dynamic-forecast">动态剩余预测</Term>不是把当前进度除以平均速度。系统从当前后验出发，模拟 64 条未来证据逐步收缩的路径；每条路径利用单调收缩曲线，以单次比较为粒度二分定位所有必需模式最晚通过的时刻，再报告其 10%、50% 与 90% 分位数。</p>
           <p>所以区间可能变宽、变窄甚至暂时上升：新答案可能暴露此前被先验掩盖的不确定性。预测窗口内没有成功路径也不证明目标不可达。它只说明，在当前模型和有限前瞻下，还没有足够证据给出有限上界。</p>
         </section>
 

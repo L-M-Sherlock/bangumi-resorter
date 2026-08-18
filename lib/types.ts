@@ -171,10 +171,10 @@ export interface CalibrationDiagnostics {
 export type StoppingForecastStatus = "ready" | "forecast" | "uncertain" | "limit";
 
 export interface StoppingForecast {
-  method: "posterior-contraction-mc-v1" | "posterior-contraction-mc-v2" | "posterior-contraction-mc-v3" | "posterior-contraction-mc-v4";
+  method: "posterior-contraction-mc-v1" | "posterior-contraction-mc-v2" | "posterior-contraction-mc-v3" | "posterior-contraction-mc-v4" | "posterior-contraction-mc-v5";
   status: StoppingForecastStatus;
   rolloutCount: number;
-  /** Additional accepted answers at the 10th, 50th, and 90th stopping-time percentiles. */
+  /** Integer additional accepted answers at the 10th, 50th, and 90th stopping-time percentiles. */
   lowerAdditional?: number;
   medianAdditional?: number;
   upperAdditional?: number;

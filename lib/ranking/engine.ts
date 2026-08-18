@@ -930,6 +930,23 @@ function interpolatedRisk(points: Array<{ scale: number; risk: number }>, scale:
   return last.risk;
 }
 
+/** Finds the first integer accepted by a monotone false-to-true predicate. */
+function firstPassingInteger(
+  minimum: number,
+  maximum: number,
+  passes: (value: number) => boolean,
+) {
+  let low = Math.ceil(minimum);
+  let high = Math.floor(maximum);
+  if (low > high || !passes(high)) return Number.POSITIVE_INFINITY;
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2);
+    if (passes(middle)) high = middle;
+    else low = middle + 1;
+  }
+  return low;
+}
+
 export interface StoppingForecastSimulation {
   forecast: StoppingForecast;
   stoppingTimes: number[];
@@ -945,7 +962,7 @@ function summarizeStoppingTimes(
 ): StoppingForecast {
   const rolloutCount = stoppingTimes.length;
   const base = {
-    method: "posterior-contraction-mc-v4" as const,
+    method: "posterior-contraction-mc-v5" as const,
     rolloutCount,
     nextCheckpoint,
     projectionHorizon,
@@ -1046,9 +1063,7 @@ export function forecastStoppingTimeSimulation(
   const forecastSampleCount = Math.min(12, fit.posteriorSamples.length);
   const forecastSamples = Array.from({ length: forecastSampleCount }, (_, index) =>
     fit.posteriorSamples[Math.floor(index * fit.posteriorSamples.length / forecastSampleCount)]);
-  const horizons: number[] = [];
-  for (let additional = 5; additional <= projectionHorizon; additional += 5) horizons.push(additional);
-  if (horizons[horizons.length - 1] !== projectionHorizon) horizons.push(projectionHorizon);
+  const minimumAdditional = Math.max(1, diagnostics.evidenceRequired - diagnostics.evidenceCount);
 
   for (let rollout = 0; rollout < rolloutCount; rollout += 1) {
     const truth = fit.posteriorSamples[Math.floor(random() * fit.posteriorSamples.length)];
@@ -1057,14 +1072,11 @@ export function forecastStoppingTimeSimulation(
     );
     const efficiency = baseEfficiency
       * Math.exp(0.55 * normal() - 0.5 * 0.55 ** 2);
-    let stop = Number.POSITIVE_INFINITY;
-    for (const additional of horizons) {
+    const stop = firstPassingInteger(minimumAdditional, projectionHorizon, (additional) => {
       const scale = Math.sqrt(effectiveEvidence / (effectiveEvidence + efficiency * additional));
-      if (interpolatedRisk(curve, scale) > 1 + 1e-9) continue;
-      if (diagnostics.evidenceCount + additional < diagnostics.evidenceRequired) continue;
-      stop = additional;
-      break;
-    }
+      return interpolatedRisk(curve, scale) <= 1 + 1e-9
+        && diagnostics.evidenceCount + additional >= diagnostics.evidenceRequired;
+    });
     stoppingTimes.push(stop);
   }
 
