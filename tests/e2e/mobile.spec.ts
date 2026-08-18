@@ -160,6 +160,14 @@ test.describe("移动端 UI/UX", () => {
     await page.getByRole("button", { name: "先用演示数据体验" }).click();
     await expect(page.getByRole("heading", { name: /demo 的已评分收藏/ })).toBeVisible();
 
+    await page.getByRole("button", { name: "两两比较", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "还没有排序会话" })).toBeVisible();
+    await expect(page.getByText("暂无可恢复的会话")).toBeVisible();
+    await expect(page.locator(".session-picker-open")).toHaveCount(0);
+    await expectNoHorizontalOverflow(page);
+    await page.getByRole("button", { name: "返回收藏概览" }).click();
+    await expect(page.getByRole("heading", { name: /demo 的已评分收藏/ })).toBeVisible();
+
     for (const viewport of mobileViewports) {
       await page.setViewportSize(viewport);
       await expectNoHorizontalOverflow(page);
@@ -249,6 +257,28 @@ test.describe("移动端 UI/UX", () => {
     await page.getByRole("button", { name: "继续比较" }).click();
     await page.getByRole("button", { name: "暂停并返回收藏" }).click();
     await expect(page.getByRole("heading", { name: /demo 的已评分收藏/ })).toBeVisible();
+
+    await page.reload();
+    await page.locator("html[data-resorter-ready='true']").waitFor();
+    await expect(page.getByRole("heading", { name: /demo 的已评分收藏/ })).toBeVisible();
+    await page.getByRole("button", { name: "两两比较", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "选择一个排序会话继续比较" })).toBeVisible();
+    await expect(page.getByRole("list", { name: "可进入的排序会话" })).toBeVisible();
+    await expect(page.locator(".session-picker-open")).toHaveCount(1);
+    for (const viewport of mobileViewports) {
+      await page.setViewportSize(viewport);
+      await expectNoHorizontalOverflow(page);
+      const pickerButton = page.locator(".session-picker-open");
+      const bounds = await pickerButton.boundingBox();
+      expect(bounds?.x ?? -1).toBeGreaterThanOrEqual(0);
+      expect((bounds?.x ?? 0) + (bounds?.width ?? Number.POSITIVE_INFINITY)).toBeLessThanOrEqual(viewport.width);
+      expect(bounds?.height ?? 0).toBeGreaterThanOrEqual(44);
+    }
+    await page.getByRole("button", { name: /进入会话/ }).click();
+    await expect(page.getByRole("heading", { name: "哪一部在你的偏好中更靠前？" })).toBeVisible();
+    await page.getByRole("button", { name: "暂停并返回收藏" }).click();
+    await expect(page.getByRole("heading", { name: /demo 的已评分收藏/ })).toBeVisible();
+
     await page.getByRole("button", { name: "调整标签范围" }).click();
     await expect(page.getByRole("dialog", { name: "调整标签范围" })).toBeVisible();
     await expectNoHorizontalOverflow(page);

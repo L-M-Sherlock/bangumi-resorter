@@ -1082,6 +1082,51 @@ function InferenceModeSelect({ id, value, busy, onChange }: {
   />;
 }
 
+function CompareSessionPicker({ sessions, currentSnapshotId, busy, onResume, onBack }: {
+  sessions: SortingSession[];
+  currentSnapshotId: string;
+  busy: boolean;
+  onResume: (sessionId: string) => Promise<void>;
+  onBack: () => void;
+}) {
+  const orderedSessions = [...sessions].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  const hasSessions = orderedSessions.length > 0;
+
+  return <section className="center-message session-picker" aria-labelledby="session-picker-title" aria-busy={busy}>
+    <div className="session-picker-header">
+      <span className="eyebrow">两两比较</span>
+      <h1 id="session-picker-title">{hasSessions ? "选择一个排序会话继续比较" : "还没有排序会话"}</h1>
+      <p>{hasSessions ? "选择最近的会话即可恢复判断；每个会话会保留自己的范围和推断设置。" : "先在收藏概览创建一个排序会话，之后就可以从这里直接进入。"}</p>
+    </div>
+    {hasSessions ? <div className="session-picker-list" role="list" aria-label="可进入的排序会话">
+      {orderedSessions.map((session) => {
+        const budgetMode = sessionBudgetMode(session);
+        const statusLabel = session.status === "complete" ? "已稳定" : "进行中";
+        return <div key={session.id} role="listitem">
+          <button
+            type="button"
+            className="session-picker-open"
+            disabled={busy}
+            onClick={() => void onResume(session.id)}
+            aria-label={`进入会话 ${session.title}`}
+          >
+            <span className="session-type">{SUBJECT_TYPES[session.subjectType]}</span>
+            <span className="session-picker-copy">
+              <strong>{session.title}</strong>
+              <small>{BUDGET_MODE_COPY[budgetMode].label}模式 · {normalizeScoreLevelCount(session.distribution.levelCount)} 档 · {session.snapshotId === currentSnapshotId ? "当前收藏" : "旧收藏"} · {statusLabel}</small>
+              <small>更新于 {formatDateTime(session.updatedAt)} · 标签范围：{tagFilterSummary(session.tagFilter)}</small>
+            </span>
+            <span className={`session-status ${session.status}`}>{statusLabel}</span>
+            <b className="session-picker-arrow" aria-hidden="true">{busy ? "…" : "→"}</b>
+          </button>
+        </div>;
+      })}
+    </div> : <div className="session-picker-empty" role="status"><span aria-hidden="true">⇄</span><strong>暂无可恢复的会话</strong><small>返回收藏概览后，选择范围并开始第一次比较。</small></div>}
+    {busy && <p className="session-picker-status" role="status">正在准备排序模型…</p>}
+    <button className="outline-button session-picker-back" type="button" onClick={onBack}>返回收藏概览</button>
+  </section>;
+}
+
 function CompareView({ state, busy, scoresVisible, onToggleScores, onMode, onAnswer, onUndo, onPause, onResults }: {
   state: CompareState; busy: boolean; scoresVisible: boolean; onToggleScores: () => void;
   onMode: (mode: ComparisonBudgetMode) => Promise<void>;
@@ -1856,6 +1901,7 @@ export default function ResorterApp() {
     if (view === "compare" && compare) return <CompareView state={compare} busy={busy} scoresVisible={scoresVisible} onToggleScores={() => setScoresVisible((value) => !value)} onMode={changeBudgetMode} onAnswer={answer} onUndo={undo} onPause={() => navigate("library")} onResults={() => navigate("results")} />;
     if (view === "results" && compare) return <ResultsView state={compare} username={snapshot.username} busy={busy} onBack={() => navigate("compare")} onMode={changeBudgetMode} onDistribution={changeDistribution} onExportCsv={exportCsv} onAddComparison={addManualComparison} onDeleteComparison={removeComparison} onResync={() => setResyncOpen(true)} />;
     if (view === "backup") return <BackupView snapshot={snapshot} items={items} profile={profile} sessions={sessions} storage={storeStatus} onImported={async () => { const saved = await latestSnapshot(); if (saved) await loadSnapshot(saved, "backup"); }} />;
+    if (view === "compare") return <CompareSessionPicker sessions={sessions} currentSnapshotId={snapshot.id} busy={busy} onResume={openSession} onBack={() => navigate("library")} />;
     return <div className="center-message"><h2>请先选择一个排序会话</h2><button className="primary-button compact" onClick={() => navigate("library")}>返回收藏概览</button></div>;
   })();
 
