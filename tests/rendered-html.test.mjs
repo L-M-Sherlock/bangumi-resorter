@@ -12,6 +12,8 @@ test("static export contains the complete first screen and metadata", async () =
   assert.match(html, /正在恢复本地排序/);
   assert.match(html, /principles-return-pending/);
   assert.match(html, /has-local-project/);
+  assert.match(html, /bangumi-resorter:theme/);
+  assert.match(html, /prefers-color-scheme: dark/);
   assert.match(html, /og:image/);
   assert.match(html, /https:\/\/github\.com\/L-M-Sherlock\/bangumi-resorter/);
   assert.match(html, /rel="preconnect" href="https:\/\/lain\.bgm\.tv"/);

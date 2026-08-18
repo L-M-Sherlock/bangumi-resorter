@@ -1,5 +1,29 @@
 import { expect, test } from "@playwright/test";
 
+test("theme toggle follows the system and persists explicit choices", async ({ page }) => {
+  await page.emulateMedia({ colorScheme: "dark" });
+  await page.goto("/");
+  await page.locator("html[data-resorter-ready='true']").waitFor();
+
+  const toggle = page.getByRole("button", { name: /当前主题：系统/ });
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  expect(await page.evaluate(() => getComputedStyle(document.body).backgroundColor)).toBe("rgb(27, 25, 23)");
+  await toggle.click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  expect(await page.evaluate(() => getComputedStyle(document.body).backgroundColor)).toBe("rgb(245, 242, 235)");
+  await expect(page.getByRole("button", { name: /当前主题：浅色/ })).toBeVisible();
+  expect(await page.evaluate(() => window.localStorage.getItem("bangumi-resorter:theme"))).toBe("light");
+
+  await page.reload();
+  await page.locator("html[data-resorter-ready='true']").waitFor();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await page.getByRole("button", { name: /当前主题：浅色/ }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await page.getByRole("button", { name: /当前主题：深色/ }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  expect(await page.evaluate(() => window.localStorage.getItem("bangumi-resorter:theme"))).toBe("system");
+});
+
 test("principles page is public and terminology popovers are keyboard accessible", async ({ page }) => {
   await page.goto("/");
   await page.locator("html[data-resorter-ready='true']").waitFor();

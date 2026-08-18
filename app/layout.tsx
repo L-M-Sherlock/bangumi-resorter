@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import { LOCAL_PROJECT_MARKER_KEY, PRINCIPLES_RETURN_PENDING_KEY } from "@/lib/site-path";
+import { ThemeToggle } from "@/app/ThemeToggle";
+import { LOCAL_PROJECT_MARKER_KEY, PRINCIPLES_RETURN_PENDING_KEY, THEME_PREFERENCE_KEY } from "@/lib/site-path";
 
 const basePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000";
@@ -38,11 +39,12 @@ export default function RootLayout({
   return (
     <html lang="zh-CN" suppressHydrationWarning>
       <head>
-        <script dangerouslySetInnerHTML={{ __html: `try{if(sessionStorage.getItem(${JSON.stringify(PRINCIPLES_RETURN_PENDING_KEY)})==="1"||localStorage.getItem(${JSON.stringify(LOCAL_PROJECT_MARKER_KEY)})==="1")document.documentElement.dataset.resorterRestoring="true"}catch{}` }} />
+        <script dangerouslySetInnerHTML={{ __html: `try{const k=${JSON.stringify(THEME_PREFERENCE_KEY)},v=localStorage.getItem(k),p=v==="light"||v==="dark"||v==="system"?v:"system",d=p==="dark"||(p==="system"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.dataset.themePreference=p;document.documentElement.dataset.theme=d?"dark":"light";if(sessionStorage.getItem(${JSON.stringify(PRINCIPLES_RETURN_PENDING_KEY)})==="1"||localStorage.getItem(${JSON.stringify(LOCAL_PROJECT_MARKER_KEY)})==="1")document.documentElement.dataset.resorterRestoring="true"}catch{}` }} />
+        <meta name="color-scheme" content="light dark" />
         <link rel="preconnect" href="https://lain.bgm.tv" />
         <link rel="dns-prefetch" href="//lain.bgm.tv" />
       </head>
-      <body>{children}</body>
+      <body>{children}<ThemeToggle /></body>
     </html>
   );
 }
