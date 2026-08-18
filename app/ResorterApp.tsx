@@ -472,7 +472,7 @@ function LibraryView({ snapshot, items, sessions, onStart, onResume, onUpgradeSe
   const baseItems = filterBaseItems(selectedType, statuses, items);
   const tagFilter = collectionTagFilter(selectedTags);
   const selectedItems = filterScopeItems({ subjectType: selectedType, collectionTypes: statuses, tagFilter }, items);
-  const preset = manualPreset ?? recommendedDistribution(selectedItems.length);
+  const preset = manualPreset ?? recommendedDistribution();
   const derivationTagFilter = collectionTagFilter(derivationDraft?.selectedTags ?? []);
   const derivationItems = derivationDraft
     ? filterScopeItems({ ...derivationDraft.session, tagFilter: derivationTagFilter }, derivationDraft.baseItems)

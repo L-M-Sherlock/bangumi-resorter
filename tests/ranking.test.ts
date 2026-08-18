@@ -139,9 +139,8 @@ describe("Bradley–Terry ranking engine", () => {
     expect(new Set(zeroSafe.map((entry) => entry.newRate)).size).toBeGreaterThan(1);
   });
 
-  it("uses scale-aware default distributions", () => {
-    expect(recommendedDistribution(99)).toBe("high-tail");
-    expect(recommendedDistribution(100)).toBe("reverse-j");
+  it("uses the high-resolution tail distribution by default", () => {
+    expect(recommendedDistribution()).toBe("high-tail");
   });
 
   it("draws deterministic Laplace samples with posterior marginal uncertainty", () => {

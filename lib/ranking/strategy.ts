@@ -59,8 +59,8 @@ export function sessionReusePolicy(
   return session.comparisonReusePolicy ?? "profile";
 }
 
-export function recommendedDistribution(itemCount: number): DistributionPreset {
-  return itemCount >= 100 ? "reverse-j" : "high-tail";
+export function recommendedDistribution(): DistributionPreset {
+  return "high-tail";
 }
 
 export function minimumEvidence(itemCount: number) {
