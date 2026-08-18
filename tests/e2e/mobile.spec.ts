@@ -71,6 +71,25 @@ test.describe("移动端 UI/UX", () => {
     await expect(page.getByRole("heading", { name: "哪一部在你的偏好中更靠前？" })).toBeVisible();
     await expect(page.getByRole("button", { name: "查看诊断" })).toBeVisible();
     await expect(page.locator("#compare-diagnostics")).toBeHidden();
+
+    for (const viewport of [{ width: 390, height: 844 }, { width: 488, height: 1024 }]) {
+      await page.setViewportSize(viewport);
+      const headerLayout = await page.evaluate(() => {
+        const scoreButton = document.querySelector<HTMLElement>(".compare-header .ghost-button")?.getBoundingClientRect();
+        const diagnostics = document.querySelector<HTMLElement>(".mobile-diagnostics-toggle")?.getBoundingClientRect();
+        return {
+          scoreButtonRight: scoreButton?.right ?? 0,
+          scoreButtonBottom: scoreButton?.bottom ?? 0,
+          diagnosticsRight: diagnostics?.right ?? 0,
+          diagnosticsTop: diagnostics?.top ?? 0,
+        };
+      });
+      expect(Math.abs(headerLayout.scoreButtonRight - headerLayout.diagnosticsRight)).toBeLessThan(1);
+      expect(headerLayout.diagnosticsTop - headerLayout.scoreButtonBottom).toBeGreaterThanOrEqual(12);
+      await expectNoHorizontalOverflow(page);
+    }
+
+    await page.setViewportSize({ width: 390, height: 844 });
     await page.getByRole("button", { name: "查看诊断" }).click();
     await expect(page.getByRole("button", { name: "收起诊断" })).toBeVisible();
     await expect(page.locator("#compare-diagnostics")).toBeVisible();
