@@ -5,7 +5,7 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await page.locator("html[data-resorter-ready='true']").waitFor();
   await page.getByRole("button", { name: "先用演示数据体验" }).click();
   await expect(page.getByRole("heading", { name: /demo 的已评分收藏/ })).toBeVisible();
-  await expect(page.getByText(/后验信息增益选择相邻作品/)).toBeVisible();
+  await expect(page.getByText(/强依赖原评分.*低频探索全局/)).toBeVisible();
   await expect(page.getByText(/每次回答后动态重估剩余区间/)).toBeVisible();
   await expect(page.getByText(/答题次数上限/)).toHaveCount(0);
   await expect(page.getByText(/疲劳安全上限/)).toHaveCount(0);
@@ -29,7 +29,7 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await expect(page.locator(".topbar .eyebrow")).toContainText("标准模式");
   await expect(page.getByText(/本次已完成/)).toContainText("1");
   await expect(page.getByText("动态剩余预测")).toBeVisible();
-  await expect(page.getByText(/预计跨两档/)).toBeVisible();
+  await expect(page.getByText(/后验期望相邻容差覆盖 \d+%/)).toBeVisible();
   await expect(page.getByText("跨两档作品分布")).toBeVisible();
   await expect(page.getByText("最坏偏移分布")).toBeVisible();
   await expect(page.getByText("相邻容差可信度")).toHaveCount(0);
@@ -55,6 +55,8 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await expect(page.getByText("最坏偏移")).toBeVisible();
   await expect(page.getByText(/仅作尾部诊断/)).toBeVisible();
   await expect(page.getByText(/达标样本 .*每个样本允许最多 0 部作品跨两档/)).toBeVisible();
+  await expect(page.getByText(/嵌套下界 快速 .*标准 .*精细/)).toBeVisible();
+  await expect(page.getByText(/模型未采用原评分顺序先验/)).toBeVisible();
   await expect(page.getByText("完全零错桶概率")).toHaveCount(0);
   await expect(page.getByText("未来 20 次内达标")).toHaveCount(0);
   await expect(page.getByText(/区间仅代表模型内近似/)).toBeVisible();

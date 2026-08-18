@@ -55,6 +55,9 @@ export interface FitOptions {
 export interface PairSelectionOptions {
   maxRateGap?: number;
   maxRankDistance?: number;
+  boundaryWindow?: number;
+  explorationInterval?: number;
+  explorationRadius?: number;
 }
 
 export interface StoppingForecastOptions {
@@ -693,6 +696,7 @@ function globalExplorationPair(
   cooled: Set<string>,
   version: number,
   randomSeed: number,
+  radius: number,
 ): { first: number; second: number; score: number } | undefined {
   const pairCounts = new Map<string, number>();
   const itemCounts = new Map(items.map((item) => [item.subjectId, 0]));
@@ -729,7 +733,7 @@ function globalExplorationPair(
   for (const first of firstCandidates) {
     const position = orderedIndex.get(first.subjectId);
     if (position === undefined) continue;
-    for (let distance = 1; distance <= 5; distance += 1) {
+    for (let distance = 1; distance <= radius; distance += 1) {
       for (const neighborIndex of [position - distance, position + distance]) {
         const second = ordered[neighborIndex];
         if (!second) continue;
@@ -789,9 +793,11 @@ export function chooseNextPair(
   const nonCalibrationCount = history.filter((entry) => entry.sessionId === sessionId && entry.queryKind !== "calibration").length;
   let selected: { first: number; second: number; score: number } | undefined;
   let queryKind: NextPair["queryKind"] = "adaptive";
-  if ((nonCalibrationCount + 1) % 10 === 0) {
+  const explorationInterval = Math.max(1, Math.round(options.explorationInterval ?? 10));
+  if ((nonCalibrationCount + 1) % explorationInterval === 0) {
+    const explorationRadius = Math.max(1, Math.round(options.explorationRadius ?? 5));
     const exploration = globalExplorationPair(
-      items, history, fit, diagnostics, cooled, version, randomSeed,
+      items, history, fit, diagnostics, cooled, version, randomSeed, explorationRadius,
     );
     if (exploration) {
       selected = exploration;
@@ -813,7 +819,7 @@ export function chooseNextPair(
       }
     }
     const mapRates = mappedRates(ordered, distribution);
-    const boundaryWindow = 3;
+    const boundaryWindow = Math.max(0, Math.round(options.boundaryWindow ?? 3));
     for (let cut = 1; cut < ordered.length; cut += 1) {
       if (mapRates.get(ordered[cut - 1].subjectId) === mapRates.get(ordered[cut].subjectId)) continue;
       for (let left = Math.max(0, cut - boundaryWindow); left < cut; left += 1) {
@@ -934,29 +940,27 @@ function interpolatedRisk(points: Array<{ scale: number; risk: number }>, scale:
   return last.risk;
 }
 
-export function forecastStoppingTime(
-  items: RankingItemInput[],
-  fit: FitResult,
-  distribution: DistributionConfig,
-  history: RankingHistoryInput[],
-  sessionId: string,
-  diagnostics: RankingDiagnostics,
-  options: StoppingForecastOptions,
+export interface StoppingForecastSimulation {
+  forecast: StoppingForecast;
+  stoppingTimes: number[];
+}
+
+function summarizeStoppingTimes(
+  stoppingTimes: number[],
+  projectionHorizon: number,
+  nextCheckpoint: number,
+  evidenceCount: number,
+  evidenceRequired: number,
+  ready: boolean,
 ): StoppingForecast {
-  const rolloutCount = Math.max(16, Math.round(options.rolloutCount ?? 64));
-  const targetReady = diagnostics.ready;
-  const projectionHorizon = Math.max(
-    5,
-    Math.round(options.projectionHorizon ?? forecastProjectionHorizon(items.length)),
-  );
-  const nextCheckpoint = 10;
+  const rolloutCount = stoppingTimes.length;
   const base = {
     method: "posterior-contraction-mc-v4" as const,
     rolloutCount,
     nextCheckpoint,
     projectionHorizon,
   };
-  if (targetReady) {
+  if (ready) {
     return {
       ...base, status: "ready", lowerAdditional: 0, medianAdditional: 0, upperAdditional: 0,
       probabilityWithin20: 1, probabilityWithinProjection: 1,
@@ -965,12 +969,75 @@ export function forecastStoppingTime(
       probabilityWithinProjectionLow: 1, probabilityWithinProjectionHigh: 1,
     };
   }
-  if (fit.posteriorSamples.length === 0) {
+  const reached = stoppingTimes.filter(Number.isFinite).length;
+  const probabilityWithinProjection = reached / rolloutCount;
+  const within20Successes = stoppingTimes.filter((value) => value <= 20).length;
+  const probabilityWithin20 = within20Successes / rolloutCount;
+  const within20Interval = wilsonInterval(within20Successes, rolloutCount);
+  const withinProjectionInterval = wilsonInterval(reached, rolloutCount);
+  const lowerAdditional = forecastQuantile(stoppingTimes, 0.1);
+  const medianAdditional = forecastQuantile(stoppingTimes, 0.5);
+  const upperAdditional = forecastQuantile(stoppingTimes, 0.9);
+  return {
+    ...base,
+    status: evidenceCount < evidenceRequired
+      ? "uncertain"
+      : medianAdditional !== undefined
+        ? "forecast"
+        : "uncertain",
+    lowerAdditional,
+    medianAdditional,
+    upperAdditional,
+    probabilityWithin20,
+    probabilityWithinProjection,
+    within20Successes,
+    probabilityWithin20Low: within20Interval.low,
+    probabilityWithin20High: within20Interval.high,
+    withinProjectionSuccesses: reached,
+    probabilityWithinProjectionLow: withinProjectionInterval.low,
+    probabilityWithinProjectionHigh: withinProjectionInterval.high,
+  };
+}
+
+export function forecastStoppingTimeSimulation(
+  items: RankingItemInput[],
+  fit: FitResult,
+  distribution: DistributionConfig,
+  history: RankingHistoryInput[],
+  sessionId: string,
+  diagnostics: RankingDiagnostics,
+  options: StoppingForecastOptions,
+): StoppingForecastSimulation {
+  const rolloutCount = Math.max(16, Math.round(options.rolloutCount ?? 64));
+  const targetReady = diagnostics.ready;
+  const projectionHorizon = Math.max(
+    5,
+    Math.round(options.projectionHorizon ?? forecastProjectionHorizon(items.length)),
+  );
+  const nextCheckpoint = 10;
+  if (targetReady) {
+    const stoppingTimes = Array<number>(rolloutCount).fill(0);
     return {
-      ...base, status: "uncertain", probabilityWithin20: 0, probabilityWithinProjection: 0,
-      within20Successes: 0, probabilityWithin20Low: 0, probabilityWithin20High: 1,
-      withinProjectionSuccesses: 0,
-      probabilityWithinProjectionLow: 0, probabilityWithinProjectionHigh: 1,
+      forecast: summarizeStoppingTimes(
+        stoppingTimes, projectionHorizon, nextCheckpoint,
+        diagnostics.evidenceCount, diagnostics.evidenceRequired, true,
+      ),
+      stoppingTimes,
+    };
+  }
+  if (fit.posteriorSamples.length === 0) {
+    const stoppingTimes = Array<number>(rolloutCount).fill(Number.POSITIVE_INFINITY);
+    const forecast = summarizeStoppingTimes(
+      stoppingTimes, projectionHorizon, nextCheckpoint,
+      diagnostics.evidenceCount, diagnostics.evidenceRequired, false,
+    );
+    return {
+      forecast: {
+        ...forecast,
+        probabilityWithin20High: 1,
+        probabilityWithinProjectionHigh: 1,
+      },
+      stoppingTimes,
     };
   }
 
@@ -1011,34 +1078,46 @@ export function forecastStoppingTime(
     stoppingTimes.push(stop);
   }
 
-  const reached = stoppingTimes.filter(Number.isFinite).length;
-  const probabilityWithinProjection = reached / rolloutCount;
-  const within20Successes = stoppingTimes.filter((value) => value <= 20).length;
-  const probabilityWithin20 = within20Successes / rolloutCount;
-  const within20Interval = wilsonInterval(within20Successes, rolloutCount);
-  const withinProjectionInterval = wilsonInterval(reached, rolloutCount);
-  const lowerAdditional = forecastQuantile(stoppingTimes, 0.1);
-  const medianAdditional = forecastQuantile(stoppingTimes, 0.5);
-  const upperAdditional = forecastQuantile(stoppingTimes, 0.9);
   return {
-    ...base,
-    status: diagnostics.evidenceCount < diagnostics.evidenceRequired
-      ? "uncertain"
-      : medianAdditional !== undefined
-        ? "forecast"
-        : "uncertain",
-    lowerAdditional,
-    medianAdditional,
-    upperAdditional,
-    probabilityWithin20,
-    probabilityWithinProjection,
-    within20Successes,
-    probabilityWithin20Low: within20Interval.low,
-    probabilityWithin20High: within20Interval.high,
-    withinProjectionSuccesses: reached,
-    probabilityWithinProjectionLow: withinProjectionInterval.low,
-    probabilityWithinProjectionHigh: withinProjectionInterval.high,
+    forecast: summarizeStoppingTimes(
+      stoppingTimes, projectionHorizon, nextCheckpoint,
+      diagnostics.evidenceCount, diagnostics.evidenceRequired, false,
+    ),
+    stoppingTimes,
   };
+}
+
+export function combineStoppingForecastSimulations(
+  simulations: StoppingForecastSimulation[],
+  diagnostics: Pick<RankingDiagnostics, "evidenceCount" | "evidenceRequired" | "ready">,
+): StoppingForecast {
+  if (simulations.length === 0) throw new Error("至少需要一个停止时间模拟。");
+  if (simulations.length === 1) return simulations[0].forecast;
+  const rolloutCount = Math.min(...simulations.map((simulation) => simulation.stoppingTimes.length));
+  const stoppingTimes = Array.from({ length: rolloutCount }, (_, index) =>
+    Math.max(...simulations.map((simulation) => simulation.stoppingTimes[index])));
+  return summarizeStoppingTimes(
+    stoppingTimes,
+    Math.min(...simulations.map((simulation) => simulation.forecast.projectionHorizon)),
+    Math.max(...simulations.map((simulation) => simulation.forecast.nextCheckpoint)),
+    diagnostics.evidenceCount,
+    diagnostics.evidenceRequired,
+    diagnostics.ready,
+  );
+}
+
+export function forecastStoppingTime(
+  items: RankingItemInput[],
+  fit: FitResult,
+  distribution: DistributionConfig,
+  history: RankingHistoryInput[],
+  sessionId: string,
+  diagnostics: RankingDiagnostics,
+  options: StoppingForecastOptions,
+): StoppingForecast {
+  return forecastStoppingTimeSimulation(
+    items, fit, distribution, history, sessionId, diagnostics, options,
+  ).forecast;
 }
 
 export function buildRankedItems(

@@ -242,6 +242,17 @@ export interface RankingDiagnostics {
   /** @deprecated Pre-0.13 diagnostics; no longer used to block comparisons. */
   fatigueReached?: boolean;
   ready: boolean;
+  /** Nested prior-robustness checks required by the selected inference mode. */
+  stoppingChecks?: Array<{
+    mode: ComparisonBudgetMode;
+    sampleCount: number;
+    stableSamples: number;
+    probability: number;
+    low: number;
+    high: number;
+    ready: boolean;
+  }>;
+  stoppingBottleneckMode?: ComparisonBudgetMode;
   calibration: CalibrationDiagnostics;
   forecast?: StoppingForecast;
 }

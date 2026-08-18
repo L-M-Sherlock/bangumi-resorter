@@ -1,4 +1,4 @@
-import { DistributionConfig, ModelState, NextPair, RankingHistoryInput, RankingItemInput } from "../types";
+import { ComparisonBudgetMode, DistributionConfig, ModelState, NextPair, RankingHistoryInput, RankingItemInput } from "../types";
 
 export type RankingOperation = "INIT_SESSION" | "APPLY_RESPONSE" | "UNDO" | "RECOMPUTE";
 
@@ -11,11 +11,15 @@ export interface RankingRequest {
   items: RankingItemInput[];
   history: RankingHistoryInput[];
   distribution: DistributionConfig;
+  budgetMode?: ComparisonBudgetMode;
   previousModel?: ModelState;
   priorStrength?: number;
   priorScale?: number;
   maxRateGap?: number;
   maxRankDistance?: number;
+  boundaryWindow?: number;
+  explorationInterval?: number;
+  explorationRadius?: number;
   forecastEfficiency?: number;
 }
 

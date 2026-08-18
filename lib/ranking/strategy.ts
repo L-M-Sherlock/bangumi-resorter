@@ -8,15 +8,15 @@ import type {
 export const BUDGET_MODE_COPY: Record<ComparisonBudgetMode, { label: string; description: string }> = {
   quick: {
     label: "快速",
-    description: "强使用原评分先验，按后验信息增益选择相邻作品",
+    description: "强依赖原评分，只校正局部顺序并低频探索全局",
   },
   standard: {
     label: "标准",
-    description: "中等使用原评分先验，按信息增益动态扩展比较范围",
+    description: "允许判断显著修正原评分，并保持均衡的边界与全局探索",
   },
   thorough: {
     label: "精细",
-    description: "只保留弱先验，并扩大候选范围以细化完整顺序",
+    description: "不采用原评分顺序，以高覆盖比较独立支撑完整排序",
   },
 };
 
@@ -70,10 +70,25 @@ export function minimumEvidence(itemCount: number) {
 
 export function rankingTuning(mode: ComparisonBudgetMode) {
   if (mode === "quick") {
-    return { priorStrength: 0.8, priorScale: 0.65, maxRateGap: 1, maxRankDistance: 2, forecastEfficiency: 16 };
+    return {
+      priorStrength: 1.2, priorScale: 0.7,
+      maxRateGap: 1, maxRankDistance: 1, boundaryWindow: 1,
+      explorationInterval: 25, explorationRadius: 2,
+      forecastEfficiency: 16,
+    };
   }
   if (mode === "thorough") {
-    return { priorStrength: 0.15, priorScale: 0.3, maxRateGap: 10, maxRankDistance: 5, forecastEfficiency: 12 };
+    return {
+      priorStrength: 0.05, priorScale: 0,
+      maxRateGap: 10, maxRankDistance: 10, boundaryWindow: 6,
+      explorationInterval: 5, explorationRadius: 12,
+      forecastEfficiency: 12,
+    };
   }
-  return { priorStrength: 0.35, priorScale: 0.45, maxRateGap: 2, maxRankDistance: 3, forecastEfficiency: 14 };
+  return {
+    priorStrength: 0.3, priorScale: 0.45,
+    maxRateGap: 2, maxRankDistance: 4, boundaryWindow: 3,
+    explorationInterval: 10, explorationRadius: 5,
+    forecastEfficiency: 14,
+  };
 }

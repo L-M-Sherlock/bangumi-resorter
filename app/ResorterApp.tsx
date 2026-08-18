@@ -177,6 +177,11 @@ function forecastProjectionProbability(forecast: StoppingForecast | undefined) {
 
 function stoppingStability(diagnostics?: ModelState["diagnostics"]) {
   if (!diagnostics) return "正在估计";
+  const bottleneck = diagnostics.stoppingChecks?.find((check) =>
+    check.mode === diagnostics.stoppingBottleneckMode);
+  if (bottleneck) {
+    return `${bottleneck.stableSamples}/${bottleneck.sampleCount} · ${percent(bottleneck.probability)}（90% MC ${percent(bottleneck.low)}–${percent(bottleneck.high)}）`;
+  }
   const successes = diagnostics.coverageTargetStableSamples
     ?? diagnostics.adjacentBucketStableSamples
     ?? diagnostics.jointBucketStableSamples;
@@ -196,7 +201,10 @@ function stoppingCriterionDetail(diagnostics?: ModelState["diagnostics"]) {
   if (!diagnostics) return "正在估计停止条件";
   const allowance = diagnostics.allowedCrossTwoBucketCount;
   const allowanceCopy = allowance === undefined ? "至多 10% 作品" : `最多 ${allowance} 部作品`;
-  return `达标样本 ${stoppingStability(diagnostics)}；每个样本允许${allowanceCopy}跨两档，停止要求 90% MC 下界达到 90%`;
+  const nested = diagnostics.stoppingChecks && diagnostics.stoppingChecks.length > 1
+    ? `；嵌套下界 ${diagnostics.stoppingChecks.map((check) => `${BUDGET_MODE_COPY[check.mode].label} ${percent(check.low)}`).join("、")}`
+    : "";
+  return `达标样本 ${stoppingStability(diagnostics)}${nested}；每个样本允许${allowanceCopy}跨两档，停止要求所有模式检查的 90% MC 下界达到 90%`;
 }
 
 function formatDate(date?: string) {
@@ -641,9 +649,9 @@ function CompareView({ state, busy, scoresVisible, onToggleScores, onMode, onAns
   if (!left || !right) return <div className="center-message"><h2>暂时没有可比较的条目</h2><p>你可以查看当前结果，或返回收藏调整范围。</p><button className="primary-button" onClick={onResults}>查看结果</button></div>;
   return <>
     <header className="topbar"><div><span className="eyebrow">{SUBJECT_TYPES[state.session.subjectType]} · {BUDGET_MODE_COPY[budgetMode].label}模式 · {state.session.title}</span><h1>哪一部在你的偏好中更靠前？</h1></div><div className="header-actions"><InferenceModeSelect id="compare-budget-mode" value={budgetMode} busy={busy} onChange={onMode} /><button className="ghost-button" onClick={onToggleScores}>{scoresVisible ? "隐藏原评分" : "显示原评分"}</button></div></header>
-    <div className="progress-row dynamic-progress"><div className="progress-copy"><span>本次已完成 <strong>{currentSessionAccepted}</strong> 次</span><span>预计跨两档 <strong>{crossTwoBucketValue(diagnostics)}</strong></span><span>最坏偏移中位数 <strong>{maxBucketDisplacementValue(diagnostics)}</strong></span></div><div className="progress-track" aria-label={`相邻容差平均覆盖 ${Math.round(toleranceCoverage)}%`}><span style={{ width: `${toleranceCoverage}%` }} /></div><div className="forecast-row"><span>跨两档作品分布 <strong>{crossTwoBucketInterval(diagnostics)}</strong></span><span>最坏偏移分布 <strong>{maxBucketDisplacementInterval(diagnostics)}</strong></span><span>动态剩余预测 <strong>{forecastRange(diagnostics)}</strong></span></div></div>
+    <div className="progress-row dynamic-progress"><div className="progress-copy"><span>本次已完成 <strong>{currentSessionAccepted}</strong> 次</span><span>后验期望相邻容差覆盖 <strong>{Math.round(toleranceCoverage)}%</strong></span><span>最坏偏移中位数 <strong>{maxBucketDisplacementValue(diagnostics)}</strong></span></div><div className="progress-track" aria-label={`后验期望相邻容差覆盖 ${Math.round(toleranceCoverage)}%`}><span style={{ width: `${toleranceCoverage}%` }} /></div><div className="forecast-row"><span>跨两档作品分布 <strong>{crossTwoBucketInterval(diagnostics)}</strong></span><span>最坏偏移分布 <strong>{maxBucketDisplacementInterval(diagnostics)}</strong></span><span>动态剩余预测 <strong>{forecastRange(diagnostics)}</strong></span></div></div>
     {currentSessionAccepted > 0 && currentSessionAccepted % 20 === 0 && <Notice tone="warning">你已经完成 {currentSessionAccepted} 次判断，建议现在下载一次 JSON 备份。</Notice>}
-    {targetReady && <Notice tone="success">“至少 90% 的作品最多偏移一档”的后验可信度下界已经达到 90%。可以导出结果，也可以继续比较。</Notice>}
+    {targetReady && <Notice tone="success">当前{BUDGET_MODE_COPY[budgetMode].label}模式要求的嵌套后验检查均已达标：至少 90% 的作品最多偏移一档。可以导出结果，也可以继续比较。</Notice>}
     {!targetReady && projectionSuccesses === 0 && <Notice>本轮预测窗口内达标模拟为 {forecastProjectionProbability(forecast)}；未观察到成功不是不可达证明。再完成 {forecast?.nextCheckpoint} 次后会用新证据重估。</Notice>}
     {!targetReady && projectionSuccesses !== 0 && (forecast?.nextCheckpoint ?? 0) > 0 && <Notice>这是模型模拟，不是承诺题量；再完成 {forecast?.nextCheckpoint} 次后系统会用新证据重新估计。</Notice>}
     {!targetReady && diagnostics && diagnostics.evidenceCount < diagnostics.evidenceRequired && <Notice>至少需要 {diagnostics.evidenceRequired} 次本会话有效判断；目前为 {diagnostics.evidenceCount} 次。</Notice>}
@@ -654,7 +662,7 @@ function CompareView({ state, busy, scoresVisible, onToggleScores, onMode, onAns
       <MediaCard item={right} side="right" showScore={scoresVisible} disabled={busy} onChoose={() => onAnswer("right")} />
     </section>
     <div className="secondary-actions"><button disabled={busy} onClick={() => onAnswer("tie")}><span>＝</span>差不多喜欢 <kbd>↑</kbd></button><button disabled={busy} onClick={() => onAnswer("skip")}><span>↷</span>这次跳过 <kbd>↓</kbd></button><button disabled={busy} onClick={onUndo}><span>↶</span>撤销上次</button></div>
-    <footer className="session-footer"><span>{budgetMode === "quick" ? "原评分作为强先验；模型按后验信息增益选题，并定期进行覆盖探索" : "模型按后验期望信息增益选题，并定期进行覆盖探索"}</span><div><button onClick={onResults}>查看当前结果</button><button onClick={onPause}>暂停并返回收藏</button></div></footer>
+    <footer className="session-footer"><span>{BUDGET_MODE_COPY[budgetMode].description}</span><div><button onClick={onResults}>查看当前结果</button><button onClick={onPause}>暂停并返回收藏</button></div></footer>
   </>;
 }
 
@@ -838,8 +846,14 @@ function ResultsView({ state, busy, onBack, onMode, onDistribution, onExportCsv,
   const result = buildRankedItems(state.items, state.model, comparisons, state.session.distribution);
   const changed = result.filter((item) => item.newRate !== item.rate).length;
   const diagnostics = state.model.diagnostics;
+  const budgetMode = sessionBudgetMode(state.session);
+  const priorCopy = budgetMode === "quick"
+    ? "原评分作为强先验"
+    : budgetMode === "standard"
+      ? "原评分作为中等先验"
+      : "模型未采用原评分顺序先验";
   return <>
-    <header className="page-header"><div><span className="eyebrow">排序结果 · {BUDGET_MODE_COPY[sessionBudgetMode(state.session)].label}模式</span><h1>你的偏好序列</h1><p>{result.length} 个{SUBJECT_TYPES[state.session.subjectType]}条目 · {changed} 个评分发生变化 · 原评分已作为模型先验</p></div><div className="header-actions"><InferenceModeSelect id="result-budget-mode" value={sessionBudgetMode(state.session)} busy={busy} onChange={onMode} /><button className="outline-button" onClick={onBack}>继续比较</button><button className="primary-button compact" onClick={() => onExportCsv(result)}>导出 CSV</button></div></header>
+    <header className="page-header"><div><span className="eyebrow">排序结果 · {BUDGET_MODE_COPY[budgetMode].label}模式</span><h1>你的偏好序列</h1><p>{result.length} 个{SUBJECT_TYPES[state.session.subjectType]}条目 · {changed} 个评分发生变化 · {priorCopy}</p></div><div className="header-actions"><InferenceModeSelect id="result-budget-mode" value={budgetMode} busy={busy} onChange={onMode} /><button className="outline-button" onClick={onBack}>继续比较</button><button className="primary-button compact" onClick={() => onExportCsv(result)}>导出 CSV</button></div></header>
     <section className="result-summary"><article className="panel"><div className="panel-title"><div><span className="eyebrow">评分分布对比</span><h2>原评分 → 新评分</h2></div><select id="result-distribution-preset" value={state.session.distribution.preset} disabled={busy} onChange={(event) => { const preset = event.target.value as DistributionPreset; void onDistribution(distributionConfig(preset, state.session.distribution.weights)); }}><option value="uniform">均匀 1–10</option><option value="preserve">保持原分布</option><option value="high-tail">高分辨率尾部</option><option value="reverse-j">反 J 分布</option><option value="custom">自定义权重</option></select></div>{state.session.distribution.preset === "custom" && <CustomDistributionEditor key={state.session.id} weights={state.session.distribution.weights} busy={busy} onApply={(weights) => onDistribution({ preset: "custom", weights })} />}<Histogram items={state.items} result={result} /><div className="chart-legend"><span><i className="old" />原评分</span><span><i className="new" />新评分</span></div></article><article className="summary-stat"><span>预计跨两档作品</span><strong>{crossTwoBucketValue(diagnostics)}</strong><small>{crossTwoBucketInterval(diagnostics)}</small><div className="summary-forecast"><span>动态剩余预测</span><b>{forecastRange(diagnostics)}</b><small>{stoppingCriterionDetail(diagnostics)}</small></div><hr /><span>最坏偏移</span><strong>{maxBucketDisplacementValue(diagnostics)}</strong><small>{maxBucketDisplacementInterval(diagnostics)}；仅作尾部诊断，停止条件允许最多 10% 的作品跨两档。{diagnostics?.calibration.completed ? `复问 ${diagnostics.calibration.consistent}/${diagnostics.calibration.completed} 次一致，后验 ${percent(diagnostics.calibration.posteriorMean)}（仅作诊断）` : "尚无校准复问；区间仅代表模型内近似"}</small></article></section>
     <ComparisonManager key={state.session.id} items={result} history={state.history} sessionId={state.session.id} busy={busy} onAdd={onAddComparison} onDelete={onDeleteComparison} />
     <section className="ranking-table-wrap"><table className="ranking-table"><thead><tr><th>名次</th><th>条目</th><th>原评分</th><th>新评分</th><th>精确分桶稳定度</th><th>模型分</th><th>后验标准差</th><th /></tr></thead><tbody>{result.map((item) => <tr key={item.subjectId}><td><strong>#{item.rank}</strong></td><td><div className="title-cell"><Poster item={item} /><div><strong>{primaryName(item)}</strong><small>{item.nameCn ? item.name : `${item.date?.slice(0, 4) || ""} · ${SUBJECT_TYPES[item.subjectType]}`}</small></div></div></td><td><span className="score-pill old">{item.rate}</span></td><td><span className={`score-pill new ${item.newRate !== item.rate ? "changed" : ""}`}>{item.newRate}</span></td><td>{item.bucketStability === undefined ? "—" : percent(item.bucketStability)}</td><td>{item.ability.toFixed(3)}</td><td>{item.uncertainty.toFixed(3)}</td><td><a href={`https://bgm.tv/subject/${item.subjectId}`} target="_blank" rel="noreferrer" aria-label={`在 Bangumi 打开 ${primaryName(item)}`}>↗</a></td></tr>)}</tbody></table></section>
@@ -915,7 +929,7 @@ export default function ResorterApp() {
     const tuning = rankingTuning(sessionBudgetMode(session));
     return workerRef.current.run({ type: operation, sessionId: session.id, version, randomSeed: session.randomSeed,
       items: sessionItems.map((item) => ({ subjectId: item.subjectId, rate: item.rate })),
-      history: toRankingHistory(history), distribution,
+      history: toRankingHistory(history), distribution, budgetMode: sessionBudgetMode(session),
       previousModel, ...tuning });
   }
 

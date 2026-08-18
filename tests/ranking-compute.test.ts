@@ -32,6 +32,7 @@ function request(mode: ComparisonBudgetMode, version: number, previousModel?: Mo
     items,
     history,
     distribution: { preset: "uniform", weights: Array(10).fill(10) },
+    budgetMode: mode,
     previousModel,
     ...rankingTuning(mode),
   };
@@ -68,5 +69,25 @@ describe("ranking computation", () => {
     expect(restoredQuick.model.uncertainty).toEqual(firstQuick.model.uncertainty);
     expect(restoredQuick.model.currentMeanUncertainty).toBe(firstQuick.model.currentMeanUncertainty);
     expect(restoredQuick.model.diagnostics).toEqual(firstQuick.model.diagnostics);
+  });
+
+  it("nests stopping checks and remaining forecasts by mode", () => {
+    const quick = computeRanking(request("quick", 1));
+    const standard = computeRanking(request("standard", 2));
+    const thorough = computeRanking(request("thorough", 3));
+    const quickDiagnostics = quick.model.diagnostics!;
+    const standardDiagnostics = standard.model.diagnostics!;
+    const thoroughDiagnostics = thorough.model.diagnostics!;
+
+    expect(quickDiagnostics.stoppingChecks?.map((check) => check.mode)).toEqual(["quick"]);
+    expect(standardDiagnostics.stoppingChecks?.map((check) => check.mode)).toEqual(["quick", "standard"]);
+    expect(thoroughDiagnostics.stoppingChecks?.map((check) => check.mode)).toEqual(["quick", "standard", "thorough"]);
+    expect(standardDiagnostics.ready).toBe(standardDiagnostics.stoppingChecks?.every((check) => check.ready));
+    expect(thoroughDiagnostics.ready).toBe(thoroughDiagnostics.stoppingChecks?.every((check) => check.ready));
+
+    const remaining = (diagnostics: typeof quickDiagnostics) =>
+      diagnostics.forecast?.medianAdditional ?? Number.POSITIVE_INFINITY;
+    expect(remaining(standardDiagnostics)).toBeGreaterThanOrEqual(remaining(quickDiagnostics));
+    expect(remaining(thoroughDiagnostics)).toBeGreaterThanOrEqual(remaining(standardDiagnostics));
   });
 });

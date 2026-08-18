@@ -92,7 +92,7 @@ describe("Bradley–Terry ranking engine", () => {
     const rated = [{ subjectId: 1, rate: 9 }, { subjectId: 2, rate: 9 }, { subjectId: 3, rate: 6 }];
     const tuning = rankingTuning("quick");
     const fit = fitModel(rated, [], undefined, { ...tuning, randomSeed: 9 });
-    expect(fit.abilities[1] - fit.abilities[3]).toBeCloseTo(1.95, 8);
+    expect(fit.abilities[1] - fit.abilities[3]).toBeCloseTo(2.1, 8);
     const pair = nextPairFor(rated, [], 9, 0, uniform, tuning);
     expect(new Set([pair?.leftSubjectId, pair?.rightSubjectId])).toEqual(new Set([1, 2]));
     expect(nextPairFor([{ subjectId: 1, rate: 10 }, { subjectId: 2, rate: 1 }], [], 9, 0, uniform, tuning)).toBeDefined();
@@ -163,6 +163,25 @@ describe("Bradley–Terry ranking engine", () => {
     const original = nineteen.find((entry) => entry.recordId === calibration?.calibrationOfComparisonId)!;
     expect(calibration?.leftSubjectId).toBe(original.rightSubjectId);
     expect(calibration?.rightSubjectId).toBe(original.leftSubjectId);
+
+    const four = Array.from({ length: 4 }, (_, index) => history(`m${index}`, index + 1, index + 2, "left", index));
+    expect(nextPairFor(rated, four, 5, 4, uniform, rankingTuning("quick"))?.queryKind).toBe("adaptive");
+    expect(nextPairFor(rated, four, 5, 4, uniform, rankingTuning("thorough"))?.queryKind).toBe("exploration");
+  });
+
+  it("uses materially separated inference-mode tuning", () => {
+    expect(rankingTuning("quick")).toMatchObject({
+      priorStrength: 1.2, priorScale: 0.7, maxRankDistance: 1,
+      boundaryWindow: 1, explorationInterval: 25, explorationRadius: 2,
+    });
+    expect(rankingTuning("standard")).toMatchObject({
+      priorStrength: 0.3, priorScale: 0.45, maxRankDistance: 4,
+      boundaryWindow: 3, explorationInterval: 10, explorationRadius: 5,
+    });
+    expect(rankingTuning("thorough")).toMatchObject({
+      priorStrength: 0.05, priorScale: 0, maxRankDistance: 10,
+      boundaryWindow: 6, explorationInterval: 5, explorationRadius: 12,
+    });
   });
 
   it("uses global exploration to cover low-count unstable items", () => {
