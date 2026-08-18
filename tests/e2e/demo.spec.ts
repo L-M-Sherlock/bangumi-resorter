@@ -5,6 +5,7 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await page.locator("html[data-resorter-ready='true']").waitFor();
   await page.getByRole("button", { name: "先用演示数据体验" }).click();
   await expect(page.getByRole("heading", { name: /demo 的已评分收藏/ })).toBeVisible();
+  await expect(page.getByRole("link", { name: /原理/ })).toHaveAttribute("href", "/principles");
   await expect(page.getByText(/强依赖原评分.*低频探索全局/)).toBeVisible();
   await expect(page.getByText(/每次回答后动态重估剩余区间/)).toBeVisible();
   await expect(page.getByText(/答题次数上限/)).toHaveCount(0);
@@ -15,7 +16,7 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await page.locator("#score-level-count").selectOption("5");
   await expect(page.locator("#distribution-preset option").first()).toHaveText("均匀 5 档");
   await page.locator("#distribution-preset").selectOption("reverse-j");
-  await expect(page.getByText(/低分档占比最高.*保持累计分布形状/)).toBeVisible();
+  await expect(page.getByText(/把最多作品放在低分档.*保持累计分布形状/)).toBeVisible();
   await page.locator("#new-session-tag-search").fill("经典");
   await page.getByRole("option", { name: /经典/ }).click();
   await expect(page.getByText("同时包含 1 个标签，匹配 6 部作品")).toBeVisible();
@@ -70,7 +71,7 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await expect(page.getByText("最坏偏移")).toBeVisible();
   await expect(page.getByText(/仅作尾部诊断/)).toBeVisible();
   await expect(page.getByText(/达标样本 .*每个样本允许最多 0 部作品跨两档/)).toBeVisible();
-  await expect(page.getByText(/嵌套下界 快速 .*标准 .*精细/)).toBeVisible();
+  await expect(page.getByText(/嵌套模式下界 快速 .*标准 .*精细/)).toBeVisible();
   await expect(page.getByText(/模型未采用原评分顺序先验/)).toBeVisible();
   await expect(page.getByText("完全零错桶概率")).toHaveCount(0);
   await expect(page.getByText("未来 20 次内达标")).toHaveCount(0);
