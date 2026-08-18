@@ -829,13 +829,127 @@ function LibraryView({ snapshot, items, sessions, onStart, onResume, onUpgradeSe
   </>;
 }
 
+const INFERENCE_MODE_OPTIONS: Array<{ value: ComparisonBudgetMode; label: string }> = [
+  { value: "quick", label: "快速模式" },
+  { value: "standard", label: "标准模式" },
+  { value: "thorough", label: "精细模式" },
+];
+
 function InferenceModeSelect({ id, value, busy, onChange }: {
   id: string;
   value: ComparisonBudgetMode;
   busy: boolean;
   onChange: (mode: ComparisonBudgetMode) => Promise<void>;
 }) {
-  return <select id={id} className="header-select" aria-label="当前推断模式" value={value} disabled={busy} title={BUDGET_MODE_COPY[value].description} onChange={(event) => void onChange(event.target.value as ComparisonBudgetMode)}><option value="quick">快速模式</option><option value="standard">标准模式</option><option value="thorough">精细模式</option></select>;
+  const [open, setOpen] = useState(false);
+  const selectedIndex = INFERENCE_MODE_OPTIONS.findIndex((option) => option.value === value);
+  const [activeIndex, setActiveIndex] = useState(selectedIndex);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const listboxId = `${id}-options`;
+
+  useEffect(() => {
+    if (!open) return;
+    const frame = requestAnimationFrame(() => optionRefs.current[selectedIndex]?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [open, selectedIndex]);
+
+  function focusOption(index: number) {
+    const nextIndex = (index + INFERENCE_MODE_OPTIONS.length) % INFERENCE_MODE_OPTIONS.length;
+    setActiveIndex(nextIndex);
+    if (open) optionRefs.current[nextIndex]?.focus();
+  }
+
+  function openMenu(index = selectedIndex) {
+    setOpen(true);
+    focusOption(index);
+  }
+
+  function closeMenu(restoreFocus = false) {
+    setOpen(false);
+    if (restoreFocus) requestAnimationFrame(() => triggerRef.current?.focus());
+  }
+
+  function choose(mode: ComparisonBudgetMode) {
+    closeMenu(true);
+    if (mode !== value) void onChange(mode);
+  }
+
+  function handleTriggerKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>) {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      if (open) focusOption(activeIndex + (event.key === "ArrowDown" ? 1 : -1));
+      else openMenu(selectedIndex);
+    } else if (event.key === "Escape" && open) {
+      event.preventDefault();
+      closeMenu();
+    }
+  }
+
+  function handleOptionKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>, index: number) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      focusOption(index + 1);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      focusOption(index - 1);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      focusOption(0);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      focusOption(INFERENCE_MODE_OPTIONS.length - 1);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      closeMenu(true);
+    } else if (event.key === "Tab") {
+      closeMenu();
+    }
+  }
+
+  return <div
+    className={`inference-mode-select${open ? " open" : ""}`}
+    onBlur={(event) => {
+      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) closeMenu();
+    }}
+  >
+    <button
+      id={id}
+      ref={triggerRef}
+      className="header-select inference-mode-trigger"
+      type="button"
+      data-value={value}
+      aria-label={`当前推断模式：${INFERENCE_MODE_OPTIONS[selectedIndex].label}`}
+      aria-haspopup="listbox"
+      aria-expanded={open}
+      aria-controls={listboxId}
+      disabled={busy}
+      title={BUDGET_MODE_COPY[value].description}
+      onClick={() => open ? closeMenu() : openMenu()}
+      onKeyDown={handleTriggerKeyDown}
+    >
+      <span>{INFERENCE_MODE_OPTIONS[selectedIndex].label}</span>
+      <span className="inference-mode-chevron" aria-hidden="true">⌄</span>
+    </button>
+    {open && <div id={listboxId} className="inference-mode-menu" role="listbox" aria-label="推断模式选项">
+      {INFERENCE_MODE_OPTIONS.map((option, index) => <button
+        key={option.value}
+        ref={(element) => { optionRefs.current[index] = element; }}
+        className={`inference-mode-option${activeIndex === index ? " active" : ""}`}
+        type="button"
+        data-value={option.value}
+        role="option"
+        aria-selected={option.value === value}
+        tabIndex={activeIndex === index ? 0 : -1}
+        onMouseEnter={() => setActiveIndex(index)}
+        onClick={(event) => choose(event.currentTarget.dataset.value as ComparisonBudgetMode)}
+        onKeyDown={(event) => handleOptionKeyDown(event, index)}
+      >
+        <span>{option.label}</span>
+        <span className="inference-mode-check" aria-hidden="true">{option.value === value ? "✓" : ""}</span>
+      </button>)}
+    </div>}
+  </div>;
 }
 
 function CompareView({ state, busy, scoresVisible, onToggleScores, onMode, onAnswer, onUndo, onPause, onResults }: {
@@ -1500,7 +1614,9 @@ export default function ResorterApp() {
 
   useEffect(() => {
     function keydown(event: KeyboardEvent) {
-      if (view !== "compare" || busy || event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) return;
+      const target = event.target;
+      const interactiveTarget = target instanceof Element && target.closest("input, select, textarea, [contenteditable='true'], [aria-haspopup='listbox'], [role='option'], [role='combobox'], [role='listbox']");
+      if (view !== "compare" || busy || event.defaultPrevented || interactiveTarget) return;
       if (event.key === "ArrowLeft") { event.preventDefault(); answer("left"); }
       else if (event.key === "ArrowRight") { event.preventDefault(); answer("right"); }
       else if (event.key === "ArrowUp") { event.preventDefault(); answer("tie"); }

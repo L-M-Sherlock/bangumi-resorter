@@ -44,6 +44,69 @@ test.describe("移动端 UI/UX", () => {
     }
   });
 
+  test("夜间模式的推断模式菜单风格统一且选项清晰", async ({ page }) => {
+    await page.emulateMedia({ colorScheme: "dark" });
+    await page.goto("/");
+    await page.locator("html[data-resorter-ready='true']").waitFor();
+    await page.getByRole("button", { name: "先用演示数据体验" }).click();
+    await page.getByRole("button", { name: /开始快速比较 · 动态停止/ }).click();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+
+    const trigger = page.locator("#compare-budget-mode");
+    await trigger.click();
+    const menu = page.getByRole("listbox", { name: "推断模式选项" });
+    await expect(menu).toBeVisible();
+    await expect(menu.getByRole("option")).toHaveText(["快速模式✓", "标准模式", "精细模式"]);
+
+    const appearance = await page.evaluate(() => {
+      const triggerElement = document.querySelector<HTMLElement>("#compare-budget-mode")!;
+      const menuElement = document.querySelector<HTMLElement>(".inference-mode-menu")!;
+      const menuStyle = getComputedStyle(menuElement);
+      const parseColor = (color: string) => {
+        const channels = color.match(/[\d.]+/g)?.map(Number) ?? [];
+        return { rgb: channels.slice(0, 3), alpha: channels[3] ?? 1 };
+      };
+      const luminance = (rgb: number[]) => {
+        const channels = rgb.map((value) => {
+          const channel = value / 255;
+          return channel <= .04045 ? channel / 12.92 : ((channel + .055) / 1.055) ** 2.4;
+        });
+        return .2126 * channels[0] + .7152 * channels[1] + .0722 * channels[2];
+      };
+      const contrast = (foreground: string, background: string) => {
+        const foregroundLuminance = luminance(parseColor(foreground).rgb);
+        const backgroundLuminance = luminance(parseColor(background).rgb);
+        return (Math.max(foregroundLuminance, backgroundLuminance) + .05)
+          / (Math.min(foregroundLuminance, backgroundLuminance) + .05);
+      };
+      return {
+        triggerRadius: getComputedStyle(triggerElement).borderRadius,
+        menuRadius: menuStyle.borderRadius,
+        menuBackground: menuStyle.backgroundColor,
+        menuShadow: menuStyle.boxShadow,
+        optionContrasts: [...menuElement.querySelectorAll<HTMLElement>("[role='option']")].map((option) => {
+          const style = getComputedStyle(option);
+          const optionBackground = parseColor(style.backgroundColor);
+          return contrast(style.color, optionBackground.alpha === 0 ? menuStyle.backgroundColor : style.backgroundColor);
+        }),
+      };
+    });
+    expect(appearance.triggerRadius).toBe(appearance.menuRadius);
+    expect(appearance.menuBackground).not.toBe("rgb(255, 255, 255)");
+    expect(appearance.menuShadow).not.toBe("none");
+    for (const ratio of appearance.optionContrasts) expect(ratio).toBeGreaterThanOrEqual(4.5);
+
+    const quickOption = menu.getByRole("option", { name: "快速模式", exact: true });
+    const standardOption = menu.getByRole("option", { name: "标准模式", exact: true });
+    await expect(quickOption).toBeFocused();
+    await quickOption.press("ArrowDown");
+    await expect(standardOption).toBeFocused();
+    await standardOption.press("Enter");
+    await expect(trigger).toHaveAttribute("data-value", "standard");
+    await expect(menu).toBeHidden();
+    await expect(page.getByRole("button", { name: /已完成 0 次/ })).toBeVisible();
+  });
+
   test("导航、比较和结果在移动端保持可达", async ({ page }) => {
     await page.goto("/");
     await page.locator("html[data-resorter-ready='true']").waitFor();

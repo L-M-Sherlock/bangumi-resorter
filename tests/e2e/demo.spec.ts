@@ -1,4 +1,13 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
+
+async function expectInferenceMode(page: Page, id: string, value: string) {
+  await expect(page.locator(`#${id}`)).toHaveAttribute("data-value", value);
+}
+
+async function selectInferenceMode(page: Page, id: string, label: string) {
+  await page.locator(`#${id}`).click();
+  await page.getByRole("listbox", { name: "推断模式选项" }).getByRole("option", { name: label, exact: true }).click();
+}
 
 test("demo project can filter, compare, derive, upgrade, edit records, and delete sessions", async ({ page }) => {
   await page.goto("/");
@@ -50,9 +59,9 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   expect(Math.abs(buttonBottoms[0] - buttonBottoms[1])).toBeLessThan(1);
   await page.getByRole("button", { name: /更喜欢这部/ }).first().click();
   await expect(page.getByText(/本次已完成/)).toContainText("1");
-  await expect(page.locator("#compare-budget-mode")).toHaveValue("quick");
-  await page.locator("#compare-budget-mode").selectOption("standard");
-  await expect(page.locator("#compare-budget-mode")).toHaveValue("standard");
+  await expectInferenceMode(page, "compare-budget-mode", "quick");
+  await selectInferenceMode(page, "compare-budget-mode", "标准模式");
+  await expectInferenceMode(page, "compare-budget-mode", "standard");
   await expect(page.locator(".topbar .eyebrow")).toContainText("标准模式");
   await expect(page.getByText(/本次已完成/)).toContainText("1");
   await expect(page.getByText("动态剩余预测")).toBeVisible();
@@ -73,9 +82,9 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await expect(page.getByText(/本次已完成/)).toContainText("1");
   await page.getByRole("button", { name: "查看当前结果" }).click();
   await expect(page.getByRole("heading", { name: "你的偏好序列" })).toBeVisible();
-  await expect(page.locator("#result-budget-mode")).toHaveValue("standard");
-  await page.locator("#result-budget-mode").selectOption("thorough");
-  await expect(page.locator("#result-budget-mode")).toHaveValue("thorough");
+  await expectInferenceMode(page, "result-budget-mode", "standard");
+  await selectInferenceMode(page, "result-budget-mode", "精细模式");
+  await expectInferenceMode(page, "result-budget-mode", "thorough");
   await expect(page.locator(".page-header .eyebrow")).toContainText("精细模式");
   await expect(page.getByText("本会话判断记录（1）")).toBeVisible();
   await expect(page.locator("#result-distribution-preset")).toHaveValue("reverse-j");
@@ -185,15 +194,15 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await expect(page.locator("#result-score-level-count")).toHaveValue("12");
   await expect(page.locator(".rating-write-danger")).not.toHaveAttribute("open", "");
   await expect(page.getByRole("heading", { name: "写回预览" })).toHaveCount(0);
-  await page.locator("#result-budget-mode").selectOption("quick");
-  await expect(page.locator("#result-budget-mode")).toHaveValue("quick");
+  await selectInferenceMode(page, "result-budget-mode", "快速模式");
+  await expectInferenceMode(page, "result-budget-mode", "quick");
   const quickSummary = await page.locator(".summary-stat").textContent();
-  await page.locator("#result-budget-mode").selectOption("standard");
-  await expect(page.locator("#result-budget-mode")).toHaveValue("standard");
-  await page.locator("#result-budget-mode").selectOption("thorough");
-  await expect(page.locator("#result-budget-mode")).toHaveValue("thorough");
-  await page.locator("#result-budget-mode").selectOption("quick");
-  await expect(page.locator("#result-budget-mode")).toHaveValue("quick");
+  await selectInferenceMode(page, "result-budget-mode", "标准模式");
+  await expectInferenceMode(page, "result-budget-mode", "standard");
+  await selectInferenceMode(page, "result-budget-mode", "精细模式");
+  await expectInferenceMode(page, "result-budget-mode", "thorough");
+  await selectInferenceMode(page, "result-budget-mode", "快速模式");
+  await expectInferenceMode(page, "result-budget-mode", "quick");
   await expect(page.locator(".summary-stat")).toHaveText(quickSummary ?? "");
   await expect(page.locator("tbody tr")).toHaveCount(6);
   await expect(page.locator("#stopping-target")).toHaveCount(0);

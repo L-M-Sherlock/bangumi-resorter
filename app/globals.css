@@ -149,6 +149,7 @@ html[data-resorter-restoring]:not([data-resorter-ready]) .restore-splash { posit
 .connect-card label, .field-group > label, .field-label { display: grid; gap: 7px; color: var(--text-label); font-size: 12px; font-weight: 700; }
 .connect-card label > span { color: var(--muted); font-size: 10px; font-weight: 400; }
 input, select { width: 100%; min-height: 45px; padding: 0 13px; color: var(--ink); border: 1px solid var(--line-strong); border-radius: 7px; outline: none; background: var(--field-bg); }
+select option { color: var(--ink); background: var(--field-bg); }
 input:focus, select:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgba(45,102,98,.09); }
 .token-field { position: relative; }
 .token-field input { padding-right: 60px; }
@@ -193,7 +194,19 @@ input:focus, select:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgb
 .page-header h1, .topbar h1 { margin: 8px 0 0; font: 700 clamp(27px, 3vw, 40px)/1.12 Georgia, "Songti SC", serif; letter-spacing: -.02em; }
 .page-header p { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
 .header-actions { display: flex; gap: 8px; }
-.header-select { width: auto; min-height: 40px; padding: 0 30px 0 12px; border-color: var(--line); background-color: var(--surface-soft); font-size: 11px; }
+.header-select { width: auto; min-height: 40px; padding: 0 30px 0 12px; color: var(--ink); border: 1px solid var(--line); border-radius: 8px; outline: none; background-color: var(--surface-soft); font-size: 11px; }
+.header-select:focus-visible { border-color: var(--teal); box-shadow: 0 0 0 3px color-mix(in srgb, var(--teal) 20%, transparent); }
+.inference-mode-select { position: relative; min-width: 118px; }
+.inference-mode-select.open { z-index: 40; }
+.inference-mode-trigger { width: 100%; padding-right: 11px; display: flex; align-items: center; justify-content: space-between; gap: 12px; text-align: left; }
+.inference-mode-trigger:hover:not(:disabled), .inference-mode-select.open .inference-mode-trigger { color: var(--ink); border-color: var(--teal); background: var(--panel); }
+.inference-mode-chevron { color: var(--muted); font-size: 15px; line-height: 1; transition: transform .16s ease; }
+.inference-mode-select.open .inference-mode-chevron { color: var(--teal); transform: rotate(180deg); }
+.inference-mode-menu { position: absolute; top: calc(100% + 6px); right: 0; z-index: 1; width: max(100%, 138px); padding: 5px; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--panel); box-shadow: 0 14px 36px var(--modal-shadow); }
+.inference-mode-option { width: 100%; min-height: 38px; padding: 0 9px; display: grid; grid-template-columns: minmax(0, 1fr) 16px; align-items: center; gap: 8px; color: var(--ink); border: 0; border-radius: 5px; background: transparent; text-align: left; font-size: 11px; }
+.inference-mode-option:hover, .inference-mode-option.active, .inference-mode-option:focus-visible { color: var(--teal); outline: none; background: var(--teal-bg-soft); }
+.inference-mode-option[aria-selected="true"] { color: var(--teal); background: var(--teal-bg); font-weight: 700; }
+.inference-mode-check { color: currentColor; text-align: center; }
 .ghost-button { padding: 9px 13px; color: var(--muted); border: 1px solid var(--line); border-radius: 7px; background: transparent; font-size: 12px; }
 .ghost-button:hover { color: var(--ink); background: var(--panel); }
 .notice { margin-bottom: 16px; padding: 12px 14px; border: 1px solid; border-radius: 8px; font-size: 12px; line-height: 1.5; }
@@ -636,7 +649,7 @@ kbd { padding: 2px 5px; border: 1px solid rgba(255,255,255,.35); border-radius: 
   .page-header .outline-button, .ghost-button { white-space: nowrap; }
   .page-header .header-actions, .topbar .header-actions { width: 100%; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
   .page-header .header-actions > *, .topbar .header-actions > * { width: 100%; min-width: 0; min-height: 44px; }
-  .results-header .header-actions .header-select { grid-column: 1 / -1; }
+  .results-header .header-actions .inference-mode-select { grid-column: 1 / -1; }
   .mobile-diagnostics-toggle { min-height: 44px; margin: 12px 0; padding: 0 12px; display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--teal); border: 1px solid var(--info-border); border-radius: 8px; background: var(--teal-bg); font-size: 12px; font-weight: 700; }
   .mobile-diagnostics-toggle span:last-child { color: var(--accent-dark); font-size: 11px; white-space: nowrap; }
   .mobile-diagnostics-toggle + .progress-row { display: none; }
@@ -673,6 +686,7 @@ kbd { padding: 2px 5px; border: 1px solid rgba(255,255,255,.35); border-radius: 
   .manual-comparison-form { grid-template-columns: 1fr; }
   .manual-comparison-form .primary-button { width: 100%; min-height: 44px; }
   input, select, .connect-card input, .tag-filter-control > input, .header-select, .panel-title select, .distribution-controls select, .manual-comparison-form select, .manual-comparison-form input, .inline-setting select { min-height: 44px; font-size: 16px; }
+  .inference-mode-option { min-height: 44px; font-size: 14px; }
   .field-help { font-size: 11px; line-height: 1.6; }
   .chip-row button, .tag-filter-options button { min-height: 44px; font-size: 12px; }
   .tag-filter-selected button { min-height: 44px; }
