@@ -788,11 +788,33 @@ function TenLevelComparisonHistogram({ items, result }: { items: CollectionItem[
 }
 
 function DistributionWeights({ weights, onChange }: { weights: number[]; onChange: (weights: number[]) => void }) {
+  const [inputValues, setInputValues] = useState(() => weights.map(String));
+  const editingIndex = useRef<number | undefined>(undefined);
+
+  useEffect(() => {
+    setInputValues((current) => weights.map((weight, index) =>
+      editingIndex.current === index ? (current[index] ?? String(weight)) : String(weight)));
+  }, [weights]);
+
+  function updateWeight(index: number, rawValue: string) {
+    const numeric = Number(rawValue);
+    const next = [...weights];
+    next[index] = rawValue === "" || !Number.isFinite(numeric) ? 0 : Math.max(0, numeric);
+    onChange(next);
+  }
+
   return <div className="weight-editor" aria-label="自定义评分权重">
-    {weights.map((weight, index) => <label key={index}><span>{index + 1} 分</span><input type="number" min="0" max="100" step="0.1" value={weight} onChange={(event) => {
-      const next = [...weights];
-      next[index] = Math.max(0, Number(event.target.value) || 0);
-      onChange(next);
+    {weights.map((_, index) => <label key={index}><span>{index + 1} 分</span><input type="number" min="0" max="100" step="0.1" value={inputValues[index] ?? ""} onFocus={() => { editingIndex.current = index; }} onChange={(event) => {
+      const rawValue = event.target.value;
+      setInputValues((current) => current.map((value, currentIndex) => currentIndex === index ? rawValue : value));
+      updateWeight(index, rawValue);
+    }} onBlur={(event) => {
+      const rawValue = event.target.value;
+      const numeric = Number(rawValue);
+      const normalized = rawValue === "" || !Number.isFinite(numeric) ? 0 : Math.max(0, numeric);
+      editingIndex.current = undefined;
+      setInputValues((current) => current.map((value, currentIndex) => currentIndex === index ? String(normalized) : value));
+      if (weights[index] !== normalized) updateWeight(index, String(normalized));
     }} /></label>)}
   </div>;
 }

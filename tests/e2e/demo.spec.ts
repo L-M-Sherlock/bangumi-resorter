@@ -333,3 +333,22 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   }
   await expect(page.getByText("还没有会话，选择范围后开始第一次比较。")).toBeVisible();
 });
+
+test("custom distribution weights allow replacing zero without creating a leading zero", async ({ page }) => {
+  await page.goto("/");
+  await page.locator("html[data-resorter-ready='true']").waitFor();
+  await page.getByRole("button", { name: "先用演示数据体验" }).click();
+  await page.locator(".start-settings > summary").click();
+  await selectThemedOption(page, "distribution-preset", "自定义权重");
+
+  const firstWeight = page.getByRole("spinbutton", { name: "1 分" });
+  await firstWeight.fill("0");
+  await expect(firstWeight).toHaveValue("0");
+  await firstWeight.press("ControlOrMeta+A");
+  await firstWeight.press("Backspace");
+  await expect(firstWeight).toHaveValue("");
+  await firstWeight.pressSequentially("1");
+  await expect(firstWeight).toHaveValue("1");
+  await firstWeight.press("Tab");
+  await expect(firstWeight).toHaveValue("1");
+});
