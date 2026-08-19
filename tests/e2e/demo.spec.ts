@@ -19,9 +19,10 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await expect(landingStar).toHaveAttribute("target", "_blank");
   await page.getByRole("button", { name: "先用演示数据体验" }).click();
   await expect(page.getByRole("heading", { name: /demo 的已评分收藏/ })).toBeVisible();
-  const startButton = page.getByRole("button", { name: /开始快速比较 · 动态停止/ });
+  const startButton = page.getByRole("button", { name: /开始快速比较/ });
   await expect(startButton).toBeVisible();
   expect(await startButton.evaluate((button) => button.getBoundingClientRect().bottom <= innerHeight)).toBe(true);
+  expect(await startButton.evaluate((button) => getComputedStyle(button).whiteSpace)).toBe("nowrap");
   await expect(page.locator(".start-settings")).not.toHaveAttribute("open", "");
   await page.locator(".start-settings > summary").click();
   await expect(page.getByRole("link", { name: "GitHub Star" })).toHaveAttribute("href", "https://github.com/L-M-Sherlock/bangumi-resorter");
@@ -50,7 +51,7 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await page.getByRole("option", { name: /经典/ }).click();
   await expect(page.getByText("同时包含 1 个标签，匹配 6 部作品")).toBeVisible();
   await expect(page.getByText(/当前 5 档分桶.*当前 6 部作品中，允许最多 0 部跨两档/)).toBeVisible();
-  await page.getByRole("button", { name: /开始快速比较 · 动态停止/ }).click();
+  await page.getByRole("button", { name: /开始快速比较/ }).click();
   await expect(page.getByRole("heading", { name: "哪一部在你的偏好中更靠前？" })).toBeVisible();
   await page.setViewportSize({ width: 375, height: 812 });
   for (const shortcut of [page.locator(".choice-button kbd"), page.locator(".secondary-actions kbd")]) {

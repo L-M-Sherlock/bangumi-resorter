@@ -1119,9 +1119,9 @@ function LibraryView({ snapshot, items, sessions, onStart, onResume, onUpgradeSe
           <div className="start-action-copy">
             <span>当前将排序</span>
             <strong>{SUBJECT_TYPES[selectedType]} · {selectedItems.length} 部</strong>
-            <small>{tagFilterSummary(tagFilter)} · {BUDGET_MODE_COPY[budgetMode].label}模式 · {scoreLevelCount} 档 · {sourceSessionId ? (currentImportPreview ? `导入 ${currentImportPreview.importableCount} 条历史判断` : "已选择历史来源") : "不导入历史判断"}</small>
+            <small>{tagFilterSummary(tagFilter)} · {BUDGET_MODE_COPY[budgetMode].label}模式 · {scoreLevelCount} 档 · 动态停止 · {sourceSessionId ? (currentImportPreview ? `导入 ${currentImportPreview.importableCount} 条历史判断` : "已选择历史来源") : "不导入历史判断"}</small>
           </div>
-          <button className="primary-button" onClick={start} disabled={busy || currentPreviewBusy || Boolean(currentPreviewError) || Boolean(sourceSessionId && !currentImportPreview) || selectedItems.length < 2}>{busy ? "正在准备模型…" : `开始${BUDGET_MODE_COPY[budgetMode].label}比较 · 动态停止`}<span>→</span></button>
+          <button className="primary-button" onClick={start} disabled={busy || currentPreviewBusy || Boolean(currentPreviewError) || Boolean(sourceSessionId && !currentImportPreview) || selectedItems.length < 2}>{busy ? "正在准备模型…" : `开始${BUDGET_MODE_COPY[budgetMode].label}比较`}<span>→</span></button>
         </div>
         <details className="start-settings">
           <summary><span><strong>调整范围与模型设置</strong><small>收藏状态、个人标签、推断模式、评分档数与历史导入</small></span><b aria-hidden="true">⌄</b></summary>

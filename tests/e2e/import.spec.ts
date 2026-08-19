@@ -64,7 +64,7 @@ test("new sessions preview and materialize one cross-snapshot history source", a
     .toHaveText(["不导入历史判断（默认）✓"]);
   await page.keyboard.press("Escape");
 
-  await page.getByRole("button", { name: /开始快速比较 · 动态停止/ }).click();
+  await page.getByRole("button", { name: /开始快速比较/ }).click();
   await page.getByRole("button", { name: /更喜欢这部/ }).first().click();
   await expect(page.locator(".progress-copy")).toContainText("有效证据 1 次（新回答 1 · 导入 0）");
   await page.getByRole("button", { name: "暂停并返回收藏" }).click();
@@ -87,7 +87,7 @@ test("new sessions preview and materialize one cross-snapshot history source", a
 
   await chooseHistorySource(page, 1);
   await expect(page.locator(".start-panel .scope-preview")).toContainText("跨快照导入");
-  await page.getByRole("button", { name: /开始快速比较 · 动态停止/ }).click();
+  await page.getByRole("button", { name: /开始快速比较/ }).click();
   await expect(page.locator(".progress-copy")).toContainText("有效证据 1 次（新回答 0 · 导入 1）");
 
   await page.getByRole("button", { name: /撤销上次/ }).click();

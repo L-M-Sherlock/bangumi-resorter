@@ -108,7 +108,7 @@ test.describe("移动端 UI/UX", () => {
       await page.keyboard.press("Escape");
     }
 
-    await page.getByRole("button", { name: /开始快速比较 · 动态停止/ }).click();
+    await page.getByRole("button", { name: /开始快速比较/ }).click();
 
     const trigger = page.locator("#compare-budget-mode");
     await trigger.click();
@@ -209,7 +209,7 @@ test.describe("移动端 UI/UX", () => {
     }
 
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.getByRole("button", { name: /开始快速比较 · 动态停止/ }).click();
+    await page.getByRole("button", { name: /开始快速比较/ }).click();
     await expect(page.getByRole("heading", { name: "哪一部在你的偏好中更靠前？" })).toBeVisible();
     await expect(page.getByRole("button", { name: "查看诊断" })).toBeVisible();
     await expect(page.locator("#compare-diagnostics")).toBeHidden();

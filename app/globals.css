@@ -259,7 +259,7 @@ input:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgba(45,102,98,.0
 .start-action-copy span { color: var(--accent-dark); font-size: 9px; font-weight: 800; letter-spacing: .1em; }
 .start-action-copy strong { margin: 4px 0 5px; font: 700 22px/1.15 Georgia, "Songti SC", serif; }
 .start-action-copy small { color: var(--muted); font-size: 9px; line-height: 1.5; }
-.start-action .primary-button { width: 100%; margin-top: 0; }
+.start-action .primary-button { width: 100%; margin-top: 0; white-space: nowrap; }
 .start-settings { border: 1px solid var(--line); border-radius: 9px; background: var(--surface-soft); }
 .start-settings > summary { min-height: 58px; padding: 10px 13px; display: flex; align-items: center; justify-content: space-between; gap: 12px; cursor: pointer; list-style: none; }
 .start-settings > summary::-webkit-details-marker { display: none; }
