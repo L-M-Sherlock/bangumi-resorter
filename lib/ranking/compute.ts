@@ -6,6 +6,9 @@ import {
   fitModel,
   forecastStoppingTimeSimulation,
   toModelState,
+  type FitResult,
+  type StoppingForecastOptions,
+  type StoppingForecastSimulation,
 } from "./engine";
 import type { RankingRequest, RankingSuccess } from "./protocol";
 import { rankingTuning, STOPPING_PROBABILITY_TARGET } from "./strategy";
@@ -45,7 +48,21 @@ function requiredStoppingModes(mode: ComparisonBudgetMode) {
   return MODE_ORDER.slice(0, MODE_ORDER.indexOf(mode) + 1);
 }
 
-export function computeRanking(request: RankingRequest): RankingSuccess {
+export interface PreparedStoppingForecast {
+  fit: FitResult;
+  diagnostics: RankingDiagnostics;
+  options: StoppingForecastOptions;
+}
+
+export interface PreparedRanking {
+  request: RankingRequest;
+  active: PreparedStoppingForecast;
+  forecasts: PreparedStoppingForecast[];
+  modes: ComparisonBudgetMode[];
+  activeTuning: ReturnType<typeof rankingTuning>;
+}
+
+export function prepareRanking(request: RankingRequest): PreparedRanking {
   const comparisons = request.history
     .filter((entry) => entry.outcome !== "skip")
     .map((entry) => ({
@@ -103,17 +120,28 @@ export function computeRanking(request: RankingRequest): RankingSuccess {
     return { mode, result, diagnostics };
   });
   const active = evaluations[evaluations.length - 1];
-  const simulations = evaluations.map((evaluation) => forecastStoppingTimeSimulation(
-    request.items,
-    evaluation.result,
-    request.distribution,
-    request.history,
-    request.sessionId,
-    evaluation.diagnostics,
-    { randomSeed: request.randomSeed, forecastEfficiency: activeTuning.forecastEfficiency },
-  ));
-  const stoppingChecks = evaluations.map(({ mode, diagnostics }) => ({
-    mode,
+  const forecastOptions = { randomSeed: request.randomSeed, forecastEfficiency: activeTuning.forecastEfficiency };
+  return {
+    request,
+    active: { fit: active.result, diagnostics: active.diagnostics, options: forecastOptions },
+    forecasts: evaluations.map((evaluation) => ({
+      fit: evaluation.result,
+      diagnostics: evaluation.diagnostics,
+      options: forecastOptions,
+    })),
+    modes: evaluations.map((evaluation) => evaluation.mode),
+    activeTuning,
+  };
+}
+
+export function finalizeRanking(
+  prepared: PreparedRanking,
+  simulations: StoppingForecastSimulation[],
+): RankingSuccess {
+  const { request, active, forecasts, modes, activeTuning } = prepared;
+  if (simulations.length !== forecasts.length) throw new Error("停止预测结果数量不匹配。");
+  const stoppingChecks = forecasts.map(({ diagnostics }, index) => ({
+    mode: modes[index],
     sampleCount: diagnostics.sampleCount,
     stableSamples: diagnostics.coverageTargetStableSamples,
     probability: diagnostics.coverageTargetStability,
@@ -126,19 +154,19 @@ export function computeRanking(request: RankingRequest): RankingSuccess {
   diagnostics.stoppingChecks = stoppingChecks;
   diagnostics.stoppingBottleneckMode = bottleneck.mode;
   diagnostics.ready = stoppingChecks.every((check) => check.ready);
-  diagnostics.decisionRiskRatio = Math.max(...evaluations.map((evaluation) => evaluation.diagnostics.decisionRiskRatio));
+  diagnostics.decisionRiskRatio = Math.max(...forecasts.map((evaluation) => evaluation.diagnostics.decisionRiskRatio));
   diagnostics.forecast = combineStoppingForecastSimulations(simulations, diagnostics);
   const model = toModelState(
     request.sessionId,
     request.version,
-    active.result,
+    active.fit,
     request.previousModel?.initialMeanUncertainty,
     diagnostics,
   );
   const nextPair = chooseNextPair(
     request.items,
     request.history,
-    active.result,
+    active.fit,
     diagnostics,
     request.distribution,
     request.sessionId,
@@ -153,4 +181,19 @@ export function computeRanking(request: RankingRequest): RankingSuccess {
     },
   );
   return { type: "MODEL_READY", requestId: request.requestId, model, nextPair };
+}
+
+export function computeRanking(request: RankingRequest): RankingSuccess {
+  const prepared = prepareRanking(request);
+  const simulations = prepared.forecasts.map(({ fit, diagnostics, options }) =>
+    forecastStoppingTimeSimulation(
+      request.items,
+      fit,
+      request.distribution,
+      request.history,
+      request.sessionId,
+      diagnostics,
+      options,
+    ));
+  return finalizeRanking(prepared, simulations);
 }

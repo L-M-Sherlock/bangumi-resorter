@@ -30,11 +30,12 @@ test("static export contains the public principles article", async () => {
   assert.match(html, /data-term-key="bradley-terry"/);
 });
 
-test("static export bundles the ranking worker and social preview", async () => {
+test("static export bundles the ranking workers and social preview", async () => {
   const [staticFiles, preview] = await Promise.all([
     readdir(new URL("../dist/client/_next/static/", import.meta.url), { recursive: true }),
     readFile(new URL("../dist/client/og.png", import.meta.url)),
   ]);
   assert.ok(staticFiles.some((filename) => /ranking\.worker.*\.js$/.test(filename)));
+  assert.ok(staticFiles.some((filename) => /forecast\.worker.*\.js$/.test(filename)));
   assert.ok(preview.byteLength > 100_000);
 });

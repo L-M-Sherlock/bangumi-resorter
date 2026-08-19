@@ -879,8 +879,8 @@ function wilsonInterval(successes: number, trials: number, z = 1.644853626951472
 
 function contractionRiskCurve(
   items: RankingItemInput[],
-  fit: FitResult,
-  distribution: DistributionConfig,
+  currentAbilities: Float64Array,
+  scoreByRank: Uint8Array,
   truth: Float64Array,
   forecastSamples: Float64Array[],
 ) {
@@ -891,30 +891,85 @@ function contractionRiskCurve(
     const scale = Math.exp(Math.log(0.025) * pointIndex / (pointCount - 1));
     const center = new Float64Array(items.length);
     for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
-      const current = fit.abilities[items[itemIndex].subjectId] ?? 0;
+      const current = currentAbilities[itemIndex];
       center[itemIndex] = current + (1 - scale) * (truth[itemIndex] - current);
     }
-    const referenceRates = mappedRates(orderBySample(items, center), distribution);
-    const contracted = forecastSamples.map((sample) => {
-      const output = new Float64Array(sample.length);
-      for (let itemIndex = 0; itemIndex < sample.length; itemIndex += 1) {
-        const current = fit.abilities[items[itemIndex].subjectId] ?? 0;
-        output[itemIndex] = center[itemIndex] + scale * (sample[itemIndex] - current);
-      }
-      return output;
-    });
-    const forecastMetrics = assignmentMetrics(
-      items, referenceRates, contracted, distribution,
+    const referenceRates = ratesByItem(items, center, scoreByRank);
+    // The forecast only needs the coverage count.  Computing all assignment
+    // diagnostics here (per-item stability, displacement quantiles, etc.)
+    // needlessly multiplies the hottest loop in the simulation.
+    const coverageTargetStableSamples = coverageTargetStableSampleCount(
+      items, referenceRates, forecastSamples, scoreByRank, center, currentAbilities, scale,
     );
     const conservativeStability = wilsonInterval(
-      forecastMetrics.coverageTargetStableSamples,
-      contracted.length,
+      coverageTargetStableSamples,
+      forecastSamples.length,
     ).low;
     const risk = decisionRiskRatio(conservativeStability);
     monotoneRisk = Math.min(monotoneRisk, risk);
     points.push({ scale, risk: monotoneRisk });
   }
   return points;
+}
+
+function coverageTargetStableSampleCount(
+  items: RankingItemInput[],
+  referenceRates: Uint8Array,
+  posteriorSamples: Float64Array[],
+  scoreByRank: Uint8Array,
+  center: Float64Array,
+  currentAbilities: Float64Array,
+  scale: number,
+) {
+  const allowedCrossCount = allowedCrossTwoBucketCount(items.length);
+  let stableSamples = 0;
+  for (const sample of posteriorSamples) {
+    const contracted = new Float64Array(items.length);
+    for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
+      contracted[itemIndex] = center[itemIndex]
+        + scale * (sample[itemIndex] - currentAbilities[itemIndex]);
+    }
+    const sampleRates = ratesByItem(items, contracted, scoreByRank);
+    let crossTwoBucketCount = 0;
+    for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
+      if (Math.abs(referenceRates[itemIndex] - sampleRates[itemIndex]) > 1) crossTwoBucketCount += 1;
+      if (crossTwoBucketCount > allowedCrossCount) break;
+    }
+    if (crossTwoBucketCount <= allowedCrossCount) stableSamples += 1;
+  }
+  return stableSamples;
+}
+
+function forecastScoreByRank(items: RankingItemInput[], distribution: DistributionConfig) {
+  const levelCount = normalizeScoreLevelCount(distribution.levelCount);
+  const weights = effectiveDistributionWeights(items, distribution);
+  const total = weights.reduce((sum, value) => sum + value, 0);
+  const topDown = [...weights].reverse().map((value) => value / total);
+  const output = new Uint8Array(items.length);
+  for (let rankIndex = 0; rankIndex < items.length; rankIndex += 1) {
+    const quantile = (rankIndex + 0.5) / items.length;
+    let cumulative = 0;
+    let score = 1;
+    for (let index = 0; index < topDown.length; index += 1) {
+      cumulative += topDown[index];
+      if (quantile <= cumulative + 1e-12) { score = levelCount - index; break; }
+    }
+    output[rankIndex] = score;
+  }
+  return output;
+}
+
+function ratesByItem(items: RankingItemInput[], sample: Float64Array, scoreByRank: Uint8Array) {
+  const indices = items.map((_, index) => index);
+  indices.sort((left, right) =>
+    sample[right] - sample[left]
+      || items[right].rate - items[left].rate
+      || items[left].subjectId - items[right].subjectId);
+  const output = new Uint8Array(items.length);
+  for (let rankIndex = 0; rankIndex < indices.length; rankIndex += 1) {
+    output[indices[rankIndex]] = scoreByRank[rankIndex];
+  }
+  return output;
 }
 
 function interpolatedRisk(points: Array<{ scale: number; risk: number }>, scale: number) {
@@ -951,6 +1006,110 @@ function firstPassingInteger(
 export interface StoppingForecastSimulation {
   forecast: StoppingForecast;
   stoppingTimes: number[];
+}
+
+function forecastRandomSeed(options: StoppingForecastOptions, diagnostics: RankingDiagnostics) {
+  return hash(`${options.randomSeed}:${diagnostics.evidenceCount}:coverage-90-adjacent:forecast`);
+}
+
+export interface StoppingForecastRolloutInput {
+  items: RankingItemInput[];
+  currentAbilities: Float64Array;
+  forecastSamples: Float64Array[];
+  truthSamples: Float64Array[];
+  efficiencyMultipliers: Float64Array;
+  scoreByRank: Uint8Array;
+  baseEfficiency: number;
+  effectiveEvidence: number;
+  minimumAdditional: number;
+  projectionHorizon: number;
+  evidenceCount: number;
+  ready: boolean;
+}
+
+export function prepareStoppingForecastRollouts(
+  items: RankingItemInput[],
+  fit: FitResult,
+  distribution: DistributionConfig,
+  history: RankingHistoryInput[],
+  sessionId: string,
+  diagnostics: RankingDiagnostics,
+  options: StoppingForecastOptions,
+  rolloutCount = Math.max(16, Math.round(options.rolloutCount ?? 64)),
+): StoppingForecastRolloutInput {
+  const touched = new Set<number>();
+  for (const entry of history) {
+    if (entry.sessionId !== sessionId || entry.outcome === "skip") continue;
+    touched.add(entry.leftSubjectId);
+    touched.add(entry.rightSubjectId);
+  }
+  const coverage = touched.size / Math.max(1, items.length);
+  const forecastSampleCount = Math.min(64, fit.posteriorSamples.length);
+  // Preserve the original shared random stream before distributing the
+  // expensive curves. Workers receive only the selected truths and scalar
+  // efficiencies, so splitting the rollouts cannot change their results.
+  const random = seededRandom(forecastRandomSeed(options, diagnostics));
+  const normal = normalGenerator(random);
+  const truthSamples: Float64Array[] = [];
+  const efficiencyMultipliers = new Float64Array(rolloutCount);
+  for (let rollout = 0; rollout < rolloutCount && fit.posteriorSamples.length > 0; rollout += 1) {
+    truthSamples.push(fit.posteriorSamples[Math.floor(random() * fit.posteriorSamples.length)]);
+    efficiencyMultipliers[rollout] = Math.exp(0.55 * normal() - 0.5 * 0.55 ** 2);
+  }
+  return {
+    items,
+    currentAbilities: new Float64Array(items.map((item) => fit.abilities[item.subjectId] ?? 0)),
+    forecastSamples: Array.from({ length: forecastSampleCount }, (_, index) =>
+      fit.posteriorSamples[Math.floor(index * fit.posteriorSamples.length / forecastSampleCount)]),
+    truthSamples,
+    efficiencyMultipliers,
+    scoreByRank: forecastScoreByRank(items, distribution),
+    baseEfficiency: Math.max(0.15, (options.forecastEfficiency ?? 1) * (0.65 + 0.7 * coverage)),
+    effectiveEvidence: Math.max(8, diagnostics.evidenceCount),
+    minimumAdditional: Math.max(1, diagnostics.evidenceRequired - diagnostics.evidenceCount),
+    projectionHorizon: Math.max(
+      5,
+      Math.round(options.projectionHorizon ?? forecastProjectionHorizon(items.length)),
+    ),
+    evidenceCount: diagnostics.evidenceCount,
+    ready: diagnostics.ready,
+  };
+}
+
+/**
+ * Calculate an independently seeded slice of the Monte Carlo rollouts.
+ *
+ * Random choices are precomputed by `prepareStoppingForecastRollouts`, making
+ * the result invariant when this slice is split among multiple workers.
+ */
+export function forecastStoppingTimeRollouts(
+  input: StoppingForecastRolloutInput,
+  rolloutStart: number,
+  rolloutCount: number,
+) {
+  if (rolloutCount <= 0) return [];
+  if (input.ready) return Array<number>(rolloutCount).fill(0);
+  if (input.forecastSamples.length === 0) return Array<number>(rolloutCount).fill(Number.POSITIVE_INFINITY);
+  const stoppingTimes: number[] = [];
+
+  for (let offset = 0; offset < rolloutCount; offset += 1) {
+    const absoluteIndex = rolloutStart + offset;
+    const truth = input.truthSamples[absoluteIndex];
+    if (!truth) {
+      stoppingTimes.push(Number.POSITIVE_INFINITY);
+      continue;
+    }
+    const curve = contractionRiskCurve(
+      input.items, input.currentAbilities, input.scoreByRank, truth, input.forecastSamples,
+    );
+    const efficiency = input.baseEfficiency * input.efficiencyMultipliers[absoluteIndex];
+    const stop = firstPassingInteger(input.minimumAdditional, input.projectionHorizon, (additional) => {
+      const scale = Math.sqrt(input.effectiveEvidence / (input.effectiveEvidence + efficiency * additional));
+      return interpolatedRisk(curve, scale) <= 1 + 1e-9;
+    });
+    stoppingTimes.push(stop);
+  }
+  return stoppingTimes;
 }
 
 function summarizeStoppingTimes(
@@ -1007,6 +1166,30 @@ function summarizeStoppingTimes(
   };
 }
 
+export function summarizeStoppingTimeRollouts(
+  stoppingTimes: number[],
+  projectionHorizon: number,
+  diagnostics: Pick<RankingDiagnostics, "evidenceCount" | "evidenceRequired" | "ready">,
+  posteriorAvailable = true,
+): StoppingForecastSimulation {
+  const forecast = summarizeStoppingTimes(
+    stoppingTimes,
+    projectionHorizon,
+    10,
+    diagnostics.evidenceCount,
+    diagnostics.evidenceRequired,
+    diagnostics.ready,
+  );
+  return {
+    forecast: posteriorAvailable ? forecast : {
+      ...forecast,
+      probabilityWithin20High: 1,
+      probabilityWithinProjectionHigh: 1,
+    },
+    stoppingTimes,
+  };
+}
+
 export function forecastStoppingTimeSimulation(
   items: RankingItemInput[],
   fit: FitResult,
@@ -1033,66 +1216,13 @@ export function forecastStoppingTimeSimulation(
       stoppingTimes,
     };
   }
-  if (fit.posteriorSamples.length === 0) {
-    const stoppingTimes = Array<number>(rolloutCount).fill(Number.POSITIVE_INFINITY);
-    const forecast = summarizeStoppingTimes(
-      stoppingTimes, projectionHorizon, nextCheckpoint,
-      diagnostics.evidenceCount, diagnostics.evidenceRequired, false,
-    );
-    return {
-      forecast: {
-        ...forecast,
-        probabilityWithin20High: 1,
-        probabilityWithinProjectionHigh: 1,
-      },
-      stoppingTimes,
-    };
-  }
-
-  const touched = new Set<number>();
-  for (const entry of history) {
-    if (entry.sessionId !== sessionId || entry.outcome === "skip") continue;
-    touched.add(entry.leftSubjectId);
-    touched.add(entry.rightSubjectId);
-  }
-  const coverage = touched.size / Math.max(1, items.length);
-  const baseEfficiency = Math.max(0.15, (options.forecastEfficiency ?? 1) * (0.65 + 0.7 * coverage));
-  const effectiveEvidence = Math.max(8, diagnostics.evidenceCount);
-  const random = seededRandom(hash(`${options.randomSeed}:${diagnostics.evidenceCount}:coverage-90-adjacent:forecast`));
-  const normal = normalGenerator(random);
-  const stoppingTimes: number[] = [];
-  // The stopping decision uses a Wilson lower bound. Twelve all-successful
-  // samples still have an 81.6% lower bound and therefore cannot support the
-  // 90% target. Keep 64 representative samples for a useful approximation of
-  // the active posterior while avoiding the full cost of refined 2,048-sample
-  // fits near the stopping boundary.
-  const forecastSampleCount = Math.min(64, fit.posteriorSamples.length);
-  const forecastSamples = Array.from({ length: forecastSampleCount }, (_, index) =>
-    fit.posteriorSamples[Math.floor(index * fit.posteriorSamples.length / forecastSampleCount)]);
-  const minimumAdditional = Math.max(1, diagnostics.evidenceRequired - diagnostics.evidenceCount);
-
-  for (let rollout = 0; rollout < rolloutCount; rollout += 1) {
-    const truth = fit.posteriorSamples[Math.floor(random() * fit.posteriorSamples.length)];
-    const curve = contractionRiskCurve(
-      items, fit, distribution, truth, forecastSamples,
-    );
-    const efficiency = baseEfficiency
-      * Math.exp(0.55 * normal() - 0.5 * 0.55 ** 2);
-    const stop = firstPassingInteger(minimumAdditional, projectionHorizon, (additional) => {
-      const scale = Math.sqrt(effectiveEvidence / (effectiveEvidence + efficiency * additional));
-      return interpolatedRisk(curve, scale) <= 1 + 1e-9
-        && diagnostics.evidenceCount + additional >= diagnostics.evidenceRequired;
-    });
-    stoppingTimes.push(stop);
-  }
-
-  return {
-    forecast: summarizeStoppingTimes(
-      stoppingTimes, projectionHorizon, nextCheckpoint,
-      diagnostics.evidenceCount, diagnostics.evidenceRequired, false,
-    ),
-    stoppingTimes,
-  };
+  const input = prepareStoppingForecastRollouts(
+    items, fit, distribution, history, sessionId, diagnostics, options, rolloutCount,
+  );
+  const stoppingTimes = forecastStoppingTimeRollouts(input, 0, rolloutCount);
+  return summarizeStoppingTimeRollouts(
+    stoppingTimes, projectionHorizon, diagnostics, fit.posteriorSamples.length > 0,
+  );
 }
 
 export function combineStoppingForecastSimulations(
