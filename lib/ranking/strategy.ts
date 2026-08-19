@@ -1,6 +1,5 @@
 import type {
   ComparisonBudgetMode,
-  ComparisonReusePolicy,
   DistributionPreset,
   SortingSession,
 } from "../types";
@@ -51,12 +50,6 @@ export function forecastProjectionHorizon(itemCount: number) {
 
 export function sessionBudgetMode(session: Pick<SortingSession, "budgetMode">): ComparisonBudgetMode {
   return session.budgetMode ?? "standard";
-}
-
-export function sessionReusePolicy(
-  session: Pick<SortingSession, "comparisonReusePolicy">,
-): ComparisonReusePolicy {
-  return session.comparisonReusePolicy ?? "profile";
 }
 
 export function recommendedDistribution(): DistributionPreset {

@@ -166,8 +166,8 @@ export const TERM_DEFINITIONS = {
     sectionId: "collection-drift",
   },
   "history-reuse": {
-    label: "历史判断复用",
-    summary: "把仍然适用于当前作品范围的旧比较作为证据；复用范围可限制在本会话、同快照或整个账号。",
+    label: "历史判断导入",
+    summary: "在创建会话时把仍然适用于当前作品范围的旧比较复制为本地证据；导入完成后与来源会话解耦。",
     sectionId: "collection-drift",
   },
 } as const satisfies Record<string, TermDefinition>;

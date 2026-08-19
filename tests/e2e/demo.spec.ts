@@ -62,12 +62,12 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   expect(Math.abs(cardHeights[0] - cardHeights[1])).toBeLessThan(1);
   expect(Math.abs(buttonBottoms[0] - buttonBottoms[1])).toBeLessThan(1);
   await page.getByRole("button", { name: /更喜欢这部/ }).first().click();
-  await expect(page.getByText(/本次已完成/)).toContainText("1");
+  await expect(page.locator(".progress-copy")).toContainText("有效证据 1 次（新回答 1 · 导入 0）");
   await expectThemedSelect(page, "compare-budget-mode", "quick");
   await selectThemedOption(page, "compare-budget-mode", "标准模式");
   await expectThemedSelect(page, "compare-budget-mode", "standard");
   await expect(page.locator(".topbar .eyebrow")).toContainText("标准模式");
-  await expect(page.getByText(/本次已完成/)).toContainText("1");
+  await expect(page.locator(".progress-copy")).toContainText("有效证据 1 次（新回答 1 · 导入 0）");
   await expect(page.getByText("动态剩余预测")).toBeVisible();
   await expect(page.getByText(/后验期望相邻容差覆盖 \d+%/)).toBeVisible();
   await expect(page.getByText("跨两档作品分布")).toBeVisible();
@@ -79,11 +79,11 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   const undoButton = page.getByRole("button", { name: /撤销上次.*⌘\/Ctrl Z/ });
   await expect(undoButton).toHaveAttribute("title", /Ctrl\+Z.*⌘Z/);
   await undoButton.click();
-  await expect(page.getByText(/本次已完成/)).toContainText("0");
+  await expect(page.locator(".progress-copy")).toContainText("有效证据 0 次（新回答 0 · 导入 0）");
   await expect(page.locator(".media-card h2").nth(0)).toHaveText(originalPair[0]);
   await expect(page.locator(".media-card h2").nth(1)).toHaveText(originalPair[1]);
   await page.getByRole("button", { name: /更喜欢这部/ }).first().click();
-  await expect(page.getByText(/本次已完成/)).toContainText("1");
+  await expect(page.locator(".progress-copy")).toContainText("有效证据 1 次（新回答 1 · 导入 0）");
   await page.getByRole("button", { name: "查看当前结果" }).click();
   await expect(page.getByRole("heading", { name: "你的偏好序列" })).toBeVisible();
   await expectThemedSelect(page, "result-budget-mode", "standard");
@@ -227,7 +227,7 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await selectThemedOption(page, "result-distribution-preset", "均匀 12 档");
   await expectThemedSelect(page, "result-distribution-preset", "uniform");
   await page.getByRole("button", { name: /两两比较/ }).click();
-  await expect(page.getByText(/本次已完成/)).toContainText("1");
+  await expect(page.locator(".progress-copy")).toContainText("有效证据 1 次");
   await page.getByRole("button", { name: /收藏概览/ }).click();
   await expect(page.getByText(/无答题上限/)).toHaveCount(0);
   await expect(page.getByText(/上限 \d+ 次/)).toHaveCount(0);
@@ -238,12 +238,12 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await expect(page.locator(".scope-preview")).toContainText("6 → 16");
   page.once("dialog", async (dialog) => {
     expect(dialog.message()).toContain("作品：6 → 16");
-    expect(dialog.message()).toContain("继承 1 条有效判断");
+    expect(dialog.message()).toContain("导入 1 条有效判断");
     await dialog.accept();
   });
   await page.getByRole("button", { name: "预览并创建" }).click();
   await expect(page.getByRole("heading", { name: "哪一部在你的偏好中更靠前？" })).toBeVisible();
-  await expect(page.getByText(/本次已完成/)).toContainText("1");
+  await expect(page.locator(".progress-copy")).toContainText("有效证据 1 次（新回答 0 · 导入 1）");
   await page.getByRole("button", { name: /收藏概览/ }).click();
   await expect(page.locator(".session-row")).toHaveCount(2);
   await expect(page.getByText("标签范围：全部标签")).toBeVisible();
@@ -305,12 +305,12 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await expect(page.getByRole("button", { name: "升级到当前收藏" }).first()).toBeVisible();
   page.once("dialog", async (dialog) => {
     expect(dialog.message()).toContain("作品：16 → 16");
-    expect(dialog.message()).toContain("继承 1 条有效判断");
+    expect(dialog.message()).toContain("导入 1 条有效判断");
     await dialog.accept();
   });
   await page.getByRole("button", { name: "升级到当前收藏" }).first().click();
   await expect(page.getByRole("heading", { name: "哪一部在你的偏好中更靠前？" })).toBeVisible();
-  await expect(page.getByText(/本次已完成/)).toContainText("1");
+  await expect(page.locator(".progress-copy")).toContainText("有效证据 1 次（新回答 0 · 导入 1）");
   await page.getByRole("button", { name: /备份与导出/ }).click();
   await expect(page.getByRole("button", { name: /下载 JSON 备份/ })).toBeVisible();
   await page.getByRole("button", { name: /收藏概览/ }).click();

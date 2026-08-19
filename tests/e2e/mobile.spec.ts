@@ -95,7 +95,7 @@ test.describe("移动端 UI/UX", () => {
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
     await expect(page.locator("select")).toHaveCount(0);
 
-    for (const id of ["comparison-budget", "score-level-count", "distribution-preset", "reuse-policy"]) {
+    for (const id of ["comparison-budget", "score-level-count", "distribution-preset", "history-source"]) {
       await page.locator(`#${id}`).click();
       await expect(page.locator(`[data-themed-select="${id}"]`).getByRole("listbox")).toBeVisible();
       expectReadableThemedMenu(await themedSelectAppearance(page, id));
@@ -120,7 +120,7 @@ test.describe("移动端 UI/UX", () => {
     await standardOption.press("Enter");
     await expect(trigger).toHaveAttribute("data-value", "standard");
     await expect(menu).toBeHidden();
-    await expect(page.getByRole("button", { name: /已完成 0 次/ })).toBeVisible();
+    await expect(page.getByRole("button", { name: /有效证据 0 次/ })).toBeVisible();
 
     await page.getByRole("button", { name: /更喜欢这部/ }).first().click();
     await page.getByRole("button", { name: "查看当前结果" }).click();
@@ -246,7 +246,7 @@ test.describe("移动端 UI/UX", () => {
     }
 
     await page.getByRole("button", { name: /更喜欢这部/ }).first().click();
-    await expect(page.getByText(/本次已完成/)).toContainText("1");
+    await expect(page.locator(".progress-copy")).toContainText("有效证据 1 次（新回答 1 · 导入 0）");
     await page.getByRole("button", { name: "查看当前结果" }).click();
     await expect(page.getByRole("heading", { name: "你的偏好序列" })).toBeVisible();
     await expect(page.locator(".ranking-cards")).toBeVisible();
@@ -267,6 +267,16 @@ test.describe("移动端 UI/UX", () => {
     await page.getByRole("button", { name: "继续比较" }).click();
     await page.getByRole("button", { name: "暂停并返回收藏" }).click();
     await expect(page.getByRole("heading", { name: /demo 的已评分收藏/ })).toBeVisible();
+    await page.locator("#history-source").click();
+    const historySourceOptions = page.locator('[data-themed-select="history-source"]').getByRole("option");
+    await expect(historySourceOptions).toHaveCount(2);
+    await historySourceOptions.nth(1).click();
+    await expect(page.locator(".start-panel .scope-preview")).toContainText("同快照导入");
+    await expect(page.locator(".start-panel .scope-preview")).toContainText("可导入 1 条");
+    await expectNoHorizontalOverflow(page);
+    await page.locator("#history-source").click();
+    await historySourceOptions.nth(0).click();
+    await expect(page.locator(".start-panel .scope-preview")).toHaveCount(0);
 
     await page.reload();
     await page.locator("html[data-resorter-ready='true']").waitFor();

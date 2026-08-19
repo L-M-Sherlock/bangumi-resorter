@@ -663,7 +663,9 @@ function nextCalibrationPair(
   const targeted = new Set(history.map((entry) => entry.calibrationOfComparisonId).filter(Boolean));
   const ordinary = [...history]
     .filter((entry) => entry.outcome !== "skip" && entry.queryKind !== "calibration" && !targeted.has(entry.recordId))
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    .sort((a, b) => a.acceptedCountAtAnswer - b.acceptedCountAtAnswer
+      || a.createdAt.localeCompare(b.createdAt)
+      || a.recordId.localeCompare(b.recordId));
   const eligible = ordinary.length > 10 ? ordinary.slice(0, -10) : [];
   if (eligible.length === 0) return undefined;
   const target = eligible[hash(`${randomSeed}:${version}:calibration`) % eligible.length];

@@ -21,6 +21,9 @@ export type SessionStatus = "active" | "complete";
 export type DistributionPreset = "uniform" | "preserve" | "high-tail" | "reverse-j" | "custom";
 export type ComparisonBudgetMode = "quick" | "standard" | "thorough";
 export type ComparisonReusePolicy = "session" | "snapshot" | "profile";
+/** How a session obtains comparison history. Dynamic is retained for legacy data only. */
+export type ComparisonHistoryMode = "dynamic" | "local";
+export type ComparisonImportBatchType = "new-session" | "existing-session" | "upgrade" | "derive" | "migration";
 export type QueryKind = "adaptive" | "exploration" | "calibration" | "manual";
 
 export interface SubjectImages {
@@ -93,6 +96,8 @@ export interface SortingSession {
   budgetMode?: ComparisonBudgetMode;
   /** Missing on pre-0.4 sessions, which retain the legacy profile-wide behavior. */
   comparisonReusePolicy?: ComparisonReusePolicy;
+  /** New sessions own a frozen local history. Dynamic is only used while migrating legacy data. */
+  comparisonHistoryMode?: ComparisonHistoryMode;
   /** @deprecated Pre-0.6 preference; retained only so old backups remain readable. */
   stoppingTarget?: "top-tail" | "all-buckets";
   /** Legacy pre-dynamic-budget hint. Kept only so older backups remain readable. */
@@ -142,14 +147,74 @@ export interface ComparisonRecord {
   queryKind?: QueryKind;
   calibrationOfComparisonId?: string;
   /**
-   * Canonical source judgment when this record was materialized into a derived
-   * or upgraded session. Inherited copies are local to their child session and
-   * must not be reused outward as additional evidence.
+   * Canonical root judgment ID. It survives any number of import generations
+   * and is used for idempotency; it is provenance, not a runtime foreign key.
    */
   inheritedFromComparisonId?: string;
+  /** Import batch that materialized this record into the current session. */
+  importBatchId?: string;
+  /** Session containing the direct source record, when this is an imported copy. */
+  importedFromSessionId?: string;
+  /** Direct source record ID, when this is an imported copy. */
+  importedFromComparisonId?: string;
+  /** Original source timestamp, preserved separately from local materialization time. */
+  sourceCreatedAt?: string;
   acceptedCountAtAnswer: number;
   active: boolean;
   createdAt: string;
+}
+
+export interface ComparisonImportBatch {
+  id: string;
+  profileId: string;
+  targetSessionId: string;
+  sourceSessionId?: string;
+  sourceSnapshotId?: string;
+  targetSnapshotId: string;
+  sourceModelVersion?: number;
+  type: ComparisonImportBatchType;
+  createdAt: string;
+  importedCount: number;
+  duplicateOriginalCount: number;
+  duplicatePairCount: number;
+  outOfScopeCount: number;
+  skippedCount: number;
+  invalidCalibrationCount: number;
+}
+
+/** Scope and version information used when previewing a one-time import. */
+export interface ComparisonImportTarget {
+  targetSessionId?: string;
+  profileId: string;
+  snapshotId: string;
+  subjectType: SubjectType;
+  allowedSubjectIds: number[];
+  targetVersion?: number;
+}
+
+export interface ComparisonImportPreview {
+  targetSessionId?: string;
+  sourceSessionId: string;
+  targetVersion: number;
+  sourceVersion: number;
+  sourceTitle: string;
+  sourceSnapshotId: string;
+  targetSnapshotId: string;
+  crossSnapshot: boolean;
+  dedupeByRoot: boolean;
+  importableCount: number;
+  duplicateOriginalCount: number;
+  duplicatePairCount: number;
+  outOfScopeCount: number;
+  skippedCount: number;
+  invalidCalibrationCount: number;
+}
+
+export interface ComparisonImportResult {
+  session: SortingSession;
+  batch: ComparisonImportBatch;
+  preview: ComparisonImportPreview;
+  records: ComparisonRecord[];
 }
 
 export interface CalibrationDiagnostics {
@@ -331,6 +396,8 @@ export interface ExportV1 {
   sessions: SortingSession[];
   sessionItems: SessionItem[];
   comparisons: ComparisonRecord[];
+  /** Optional in legacy backups; present in current backups. */
+  importBatches?: ComparisonImportBatch[];
   models: ModelState[];
 }
 
@@ -362,4 +429,4 @@ export const DISTRIBUTIONS: Record<Exclude<DistributionPreset, "custom">, number
   "reverse-j": [50, 25, 14, 4, 2, 1, 1, 1, 1, 1],
 };
 
-export const APP_VERSION = "0.14.0";
+export const APP_VERSION = "0.15.0";
