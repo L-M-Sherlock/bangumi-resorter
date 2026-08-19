@@ -18,7 +18,7 @@ import { createDemoItems } from "@/lib/demo";
 import {
   commitBackupImport,
   commitComparisonDeletion,
-  commitLegacyCloneDeletion,
+  commitSnapshotDeletion,
   commitSessionBudgetMode,
   commitSessionDistribution,
   commitResponse,
@@ -39,7 +39,7 @@ import {
   markExported,
   previewComparisonImport,
   previewBackupImport,
-  previewLegacyCloneDeletion,
+  previewSnapshotDeletion,
   previewSessionTagDerivation,
   previewSessionUpgrade,
   saveSnapshot,
@@ -94,8 +94,8 @@ import {
   DistributionConfig,
   DistributionPreset,
   LocalProject,
-  LegacyCloneDeletionPreview,
-  LegacyCloneDeletionResult,
+  SnapshotDeletionPreview,
+  SnapshotDeletionResult,
   ModelState,
   NextPair,
   Profile,
@@ -321,14 +321,14 @@ function Brand() {
 
 const GITHUB_REPOSITORY_URL = "https://github.com/L-M-Sherlock/bangumi-resorter";
 
-function Shell({ view, onNavigate, profile, snapshot, projects, onSwitchSnapshot, onDeleteLegacyClone, children }: {
+function Shell({ view, onNavigate, profile, snapshot, projects, onSwitchSnapshot, onDeleteSnapshot, children }: {
   view: View;
   onNavigate: (view: View) => void;
   profile?: Profile;
   snapshot?: Snapshot;
   projects: LocalProject[];
   onSwitchSnapshot: (snapshotId: string) => Promise<void>;
-  onDeleteLegacyClone: (snapshotId: string) => void;
+  onDeleteSnapshot: (snapshotId: string) => void;
   children: ReactNode;
 }) {
   const nav: Array<[View, string, string]> = [
@@ -368,9 +368,9 @@ function Shell({ view, onNavigate, profile, snapshot, projects, onSwitchSnapshot
           </div>
           <label htmlFor="local-project-switcher">本地项目与快照</label>
           <ThemedSelect id="local-project-switcher" value={snapshot.id} options={projectOptions} ariaLabel="本地项目与收藏快照" menuLabel="本地项目与收藏快照选项" onChange={onSwitchSnapshot} />
-          {currentIsLegacyClone && <button type="button" className="legacy-clone-delete-link" onClick={() => onDeleteLegacyClone(snapshot.id)}>删除这个旧导入副本</button>}
+          <button type="button" className={`snapshot-delete-link${currentIsLegacyClone ? " legacy-clone-delete-link" : ""}`} onClick={() => onDeleteSnapshot(snapshot.id)}>{currentIsLegacyClone ? "删除这个旧导入副本" : "删除当前快照"}</button>
         </div>}
-        {profile && snapshot && <div className="mobile-project-switcher"><ThemedSelect id="mobile-project-switcher" value={snapshot.id} options={projectOptions} ariaLabel="切换本地项目与收藏快照" menuLabel="本地项目与收藏快照选项" onChange={onSwitchSnapshot} />{currentIsLegacyClone && <button type="button" className="legacy-clone-delete-link" onClick={() => onDeleteLegacyClone(snapshot.id)}>删除这个旧导入副本</button>}</div>}
+        {profile && snapshot && <div className="mobile-project-switcher"><ThemedSelect id="mobile-project-switcher" value={snapshot.id} options={projectOptions} ariaLabel="切换本地项目与收藏快照" menuLabel="本地项目与收藏快照选项" onChange={onSwitchSnapshot} /><button type="button" className={`snapshot-delete-link${currentIsLegacyClone ? " legacy-clone-delete-link" : ""}`} onClick={() => onDeleteSnapshot(snapshot.id)}>{currentIsLegacyClone ? "删除这个旧导入副本" : "删除当前快照"}</button></div>}
         <div className="sidebar-note"><span className="status-dot" /><div><strong>排序数据仅存于本机</strong><small>默认只读；确认后才会写回</small></div></div>
         <ThemeToggle />
       </aside>
@@ -553,43 +553,46 @@ function BackupImporter({ onImported, label = "导入 JSON 备份", className = 
   </>;
 }
 
-function LegacyCloneDeletionDialog({ preview, onCancel, onDeleted }: {
-  preview: LegacyCloneDeletionPreview;
+function SnapshotDeletionDialog({ preview, onCancel, onDeleted }: {
+  preview: SnapshotDeletionPreview;
   onCancel: () => void;
-  onDeleted: (result: LegacyCloneDeletionResult) => Promise<void>;
+  onDeleted: (result: SnapshotDeletionResult) => Promise<void>;
 }) {
   const [confirmation, setConfirmation] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const canDelete = preview.legacy || preview.remainingSnapshotCount > 0;
+  const confirmed = confirmation.trim().toLocaleLowerCase() === preview.profile.username.trim().toLocaleLowerCase();
 
   async function remove() {
-    if (confirmation.trim().toLocaleLowerCase() !== preview.profile.username.trim().toLocaleLowerCase() || busy) return;
+    if (!canDelete || !confirmed || busy) return;
     setBusy(true); setError("");
     try {
-      const result = await commitLegacyCloneDeletion({
+      const result = await commitSnapshotDeletion({
         snapshotId: preview.snapshot.id,
         targetRevision: preview.targetRevision,
         confirmationUsername: confirmation,
       });
       await onDeleted(result);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "无法删除这个旧导入副本。");
+      setError(cause instanceof Error ? cause.message : "无法删除这个收藏快照。");
       setBusy(false);
     }
   }
 
+  const title = preview.legacy ? "删除旧导入副本" : "删除当前快照";
   return <div className="scope-modal-backdrop">
-    <section className="scope-modal legacy-clone-delete-modal" role="dialog" aria-modal="true" aria-labelledby="legacy-clone-delete-title">
-      <div className="scope-modal-header"><div><span className="eyebrow">本地项目清理</span><h2 id="legacy-clone-delete-title">删除旧导入副本</h2></div><button type="button" aria-label="关闭删除旧导入副本窗口" disabled={busy} onClick={onCancel}>×</button></div>
-      <p>将永久删除 @{preview.profile.username} 在 {formatDateTime(preview.snapshot.syncedAt)} 的这个旧副本。其他收藏快照和其他账号不会改变。</p>
-      <div className="legacy-clone-delete-summary">
+    <section className="scope-modal snapshot-delete-modal" role="dialog" aria-modal="true" aria-labelledby="snapshot-delete-title">
+      <div className="scope-modal-header"><div><span className="eyebrow">本地项目清理</span><h2 id="snapshot-delete-title">{title}</h2></div><button type="button" aria-label={`关闭${title}窗口`} disabled={busy} onClick={onCancel}>×</button></div>
+      <p>将永久删除 @{preview.profile.username} 在 {formatDateTime(preview.snapshot.syncedAt)} 的这个{preview.legacy ? "旧导入副本" : "收藏快照"}。其他收藏快照和其他账号不会改变。</p>
+      <div className="snapshot-delete-summary">
         <span>收藏条目 <b>{preview.itemCount}</b></span><span>会话 <b>{preview.sessionIds.length}</b></span><span>判断 <b>{preview.comparisonIds.length}</b></span><span>导入批次 <b>{preview.importBatchIds.length}</b></span><span>模型 <b>{preview.modelSessionIds.length}</b></span>
       </div>
-      {preview.active && <Notice tone="info">这是当前打开的副本。删除后将自动切换到{preview.remainingSnapshotCount > 0 ? "同账号最近的剩余快照" : "其他账号最近的快照"}。</Notice>}
+      {preview.active && (preview.legacy || preview.remainingSnapshotCount > 0) && <Notice tone="info">这是当前打开的{preview.legacy ? "副本" : "快照"}。删除后将自动切换到{preview.remainingSnapshotCount > 0 ? "同账号最近的剩余快照" : "其他账号最近的快照"}。</Notice>}
       {preview.warnings.map((warning) => <Notice key={warning} tone="warning">{warning}</Notice>)}
-      <label className="legacy-clone-delete-confirm"><span>输入账号名 <code>{preview.profile.username}</code> 以确认永久删除</span><input aria-label={`输入账号名 ${preview.profile.username} 以确认删除`} value={confirmation} disabled={busy} autoComplete="off" onChange={(event) => setConfirmation(event.target.value)} /></label>
+      {canDelete && <label className="snapshot-delete-confirm"><span>输入账号名 <code>{preview.profile.username}</code> 以确认永久删除</span><input aria-label={`输入账号名 ${preview.profile.username} 以确认删除`} value={confirmation} disabled={busy} autoComplete="off" onChange={(event) => setConfirmation(event.target.value)} /></label>}
       {error && <Notice tone="error">{error}</Notice>}
-      <div className="scope-modal-actions"><button type="button" className="outline-button" disabled={busy} onClick={onCancel}>取消</button><button type="button" className="danger-button" disabled={busy || confirmation.trim().toLocaleLowerCase() !== preview.profile.username.trim().toLocaleLowerCase()} onClick={() => void remove()}>{busy ? "正在删除…" : "永久删除副本"}</button></div>
+      <div className="scope-modal-actions"><button type="button" className="outline-button" disabled={busy} onClick={onCancel}>{canDelete ? "取消" : "关闭"}</button>{canDelete && <button type="button" className="danger-button" disabled={busy || !confirmed} onClick={() => void remove()}>{busy ? "正在删除…" : preview.legacy ? "永久删除副本" : "永久删除快照"}</button>}</div>
     </section>
   </div>;
 }
@@ -1148,7 +1151,7 @@ function LibraryView({ snapshot, items, sessions, legacySessionIds, onStart, onR
   const [previewErrorSignature, setPreviewErrorSignature] = useState("");
   const [previewRevision, setPreviewRevision] = useState(0);
   const [snapshotDates, setSnapshotDates] = useState<Record<string, string>>({});
-  const [importCounts, setImportCounts] = useState<Record<string, number>>({});
+  const [comparisonStats, setComparisonStats] = useState<Record<string, { accepted: number; imported: number }>>({});
   const [busy, setBusy] = useState(false);
   const [upgradingSessionId, setUpgradingSessionId] = useState<string>();
   const [derivingSessionId, setDerivingSessionId] = useState<string>();
@@ -1185,16 +1188,17 @@ function LibraryView({ snapshot, items, sessions, legacySessionIds, onStart, onR
     if (sessionIds.length === 0) {
       return () => { active = false; };
     }
-    void db.comparisons.toArray().then((records) => {
+    void db.comparisons.where("sessionId").anyOf(sessionIds).toArray().then((records) => {
       if (!active) return;
-      const counts: Record<string, number> = {};
-      const allowed = new Set(sessionIds);
+      const stats: Record<string, { accepted: number; imported: number }> = Object.fromEntries(
+        sessionIds.map((sessionId) => [sessionId, { accepted: 0, imported: 0 }]),
+      );
       for (const record of records) {
-        if (record.importBatchId && allowed.has(record.sessionId) && record.active && record.outcome !== "skip") {
-          counts[record.sessionId] = (counts[record.sessionId] ?? 0) + 1;
-        }
+        if (!record.active || record.outcome === "skip") continue;
+        stats[record.sessionId].accepted += 1;
+        if (record.importBatchId) stats[record.sessionId].imported += 1;
       }
-      setImportCounts(counts);
+      setComparisonStats(stats);
     });
     return () => { active = false; };
   }, [sessions]);
@@ -1392,12 +1396,13 @@ function LibraryView({ snapshot, items, sessions, legacySessionIds, onStart, onR
       const upgradedAlready = sessions.some((candidate) =>
         candidate.snapshotId === snapshot.id && candidate.upgradedFromSessionId === session.id);
       const actionBusy = Boolean(deletingSessionId || upgradingSessionId || derivingSessionId);
-      const importedCount = importCounts[session.id] ?? 0;
+      const stats = comparisonStats[session.id];
+      const importedCount = stats?.imported ?? 0;
       const historyLabel = importedCount > 0 ? `本地历史 · 导入 ${importedCount} 条` : "本地历史 · 未导入";
       return <article className="session-row" key={session.id}>
         <button className="session-open" disabled={actionBusy} onClick={() => onResume(session.id)}>
           <span className="session-type">{SUBJECT_TYPES[session.subjectType]}</span>
-          <div><strong>{session.title}{legacySessionIds.includes(session.id) ? " · 旧导入副本" : ""}</strong><small>{BUDGET_MODE_COPY[sessionBudgetMode(session)].label}模式 · {normalizeScoreLevelCount(session.distribution.levelCount)} 档 · {usesCurrentSnapshot ? "当前收藏" : "旧收藏"} · {historyLabel} · 更新于 {formatDate(session.updatedAt)}</small><small>标签范围：{tagFilterSummary(session.tagFilter)}</small></div>
+          <div><span className="session-heading"><strong>{session.title}{legacySessionIds.includes(session.id) ? " · 旧导入副本" : ""}</strong><span className="session-comparison-count">已有判断 <b>{stats?.accepted ?? "…"}</b> 条</span></span><small>{BUDGET_MODE_COPY[sessionBudgetMode(session)].label}模式 · {normalizeScoreLevelCount(session.distribution.levelCount)} 档 · {usesCurrentSnapshot ? "当前收藏" : "旧收藏"} · {historyLabel} · 更新于 {formatDate(session.updatedAt)}</small><small>标签范围：{tagFilterSummary(session.tagFilter)}</small></div>
           <span className={`session-status ${session.status}`}>{session.status === "complete" ? "已稳定" : "进行中"}</span><b>→</b>
         </button>
         <div className="session-actions">
@@ -1958,11 +1963,44 @@ function ResultsView({ state, sessions, username, busy, onBack, onMode, onDistri
   </>;
 }
 
+function backupAuditLabel(mode: BackupImportAudit["mode"]) {
+  if (mode === "replace") return "覆盖恢复";
+  if (mode === "merge") return "选择性合并";
+  if (mode === "create") return "创建项目";
+  if (mode === "snapshot-deletion") return "删除当前快照";
+  if (mode === "legacy-clone-deletion") return "删除旧导入副本";
+  return "旧克隆迁移";
+}
+
 function BackupView({ snapshot, items, profile, sessions, onImported, storage, importHistory }: { snapshot: Snapshot; items: CollectionItem[]; profile: Profile; sessions: SortingSession[]; onImported: (result: BackupImportResult) => Promise<void>; storage: { usage: number; quota: number; persisted: boolean }; importHistory: BackupImportAudit[] }) {
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   async function backup() { setError(""); try { const payload = await exportProject(profile.id); downloadJson(downloadName("bangumi-resorter-backup", profile.username, "json"), payload); await markExported(profile.id); setMessage("备份文件已下载。"); } catch (cause) { setError(cause instanceof Error ? cause.message : "导出失败。"); } }
-  return <><header className="page-header"><div><span className="eyebrow">备份与导出</span><h1>把判断留在自己手里</h1><p>本地数据不会上传到本站服务器，请定期下载 JSON 备份。</p></div></header>{snapshot.containsPrivate && <Notice tone="warning">当前项目包含私有收藏。备份不含令牌，但会包含私有条目的名称、评分和比较记录。</Notice>}{message && <Notice tone="success">{message}</Notice>}{error && <Notice tone="error">{error}</Notice>}<section className="backup-grid"><article className="panel backup-card"><span className="eyebrow">完整项目</span><h2>JSON 会话备份</h2><p>包含<Term term="snapshot">收藏快照</Term>、所有会话、比较记录、模型结果和分布设置，可在其他域名或设备导入。</p><dl><div><dt>条目</dt><dd>{items.length}</dd></div><div><dt>会话</dt><dd>{sessions.length}</dd></div><div><dt>格式</dt><dd>ExportV1</dd></div></dl><button className="primary-button" onClick={backup}>下载 JSON 备份<span>↓</span></button></article><article className="panel backup-card"><span className="eyebrow">恢复或迁移</span><h2>导入备份</h2><p>先预览账号、会话和冲突，再选择合并或覆盖恢复。支持最大 20 MB 的 ExportV1 JSON。</p><BackupImporter onImported={async (result) => { setMessage(`已完成${result.audit.mode === "replace" ? "覆盖恢复" : result.audit.mode === "merge" ? "选择性合并" : "项目创建"}：导入 ${result.audit.importedSessionIds.length} 个会话。`); await onImported(result); }} label="选择 JSON 文件" /></article><article className="panel backup-card storage-card"><span className="eyebrow">浏览器存储</span><h2>{storage.persisted ? "已申请持久保存" : "尽力保存模式"}</h2><p>{storage.persisted ? "浏览器不会在空间压力下自动清理本项目，但手动清站点数据仍会删除。" : "浏览器可能在空间不足时清理数据，请依赖 JSON 备份。"}</p><div className="storage-meter"><i style={{ width: storage.quota ? `${Math.min(100, storage.usage / storage.quota * 100)}%` : "0%" }} /></div><small>已使用 {formatBytes(storage.usage)} / 可用约 {formatBytes(storage.quota)}</small></article></section><section className="panel import-history-panel"><div className="panel-title"><div><span className="eyebrow">本地审计</span><h2>导入与清理历史</h2></div><small>{importHistory.length} 次操作</small></div>{importHistory.length === 0 ? <p>还没有导入或清理操作。</p> : <div className="import-history-list">{importHistory.map((entry) => <details key={entry.id}><summary><strong>{entry.mode === "replace" ? "覆盖恢复" : entry.mode === "merge" ? "选择性合并" : entry.mode === "create" ? "创建项目" : entry.mode === "legacy-clone-deletion" ? "删除旧导入副本" : "旧克隆迁移"}</strong><span>{formatDateTime(entry.createdAt)}{entry.mode === "legacy-clone-deletion" ? ` · 删除 ${entry.deletedSessionIds?.length ?? 0} 个会话、${entry.deletedComparisonIds?.length ?? 0} 条判断` : ` · 导入 ${entry.importedSessionIds.length} 个会话 · 冲突 ${entry.conflictSessionCount}`}</span></summary><small>账号 @{entry.sourceUsername}{entry.mode === "legacy-clone-deletion" ? ` · 快照 ${entry.deletedSnapshotIds?.join("、") ?? "—"}` : ` · 判断 ${entry.importedComparisonCount} 条 · 摘要 ${entry.backupDigest ?? "—"}`}</small>{entry.supersededAt && <small>已由后续覆盖恢复取代 · {formatDateTime(entry.supersededAt)}</small>}{entry.deletedAt && <small>其中的旧导入副本已于 {formatDateTime(entry.deletedAt)} 删除。</small>}{entry.idMappings.length > 0 && <div className="import-id-mappings"><strong>ID 映射</strong>{entry.idMappings.map((mapping, index) => <code key={`${mapping.entity}:${mapping.sourceId}:${index}`}>{mapping.entity} · {mapping.sourceId} → {mapping.targetId} · {mapping.reason}</code>)}</div>}{entry.warnings.map((warning) => <small key={warning}>{warning}</small>)}</details>)}</div>}</section></>;
+  return <>
+    <header className="page-header"><div><span className="eyebrow">备份与导出</span><h1>把判断留在自己手里</h1><p>本地数据不会上传到本站服务器，请定期下载 JSON 备份。</p></div></header>
+    {snapshot.containsPrivate && <Notice tone="warning">当前项目包含私有收藏。备份不含令牌，但会包含私有条目的名称、评分和比较记录。</Notice>}
+    {message && <Notice tone="success">{message}</Notice>}{error && <Notice tone="error">{error}</Notice>}
+    <section className="backup-grid">
+      <article className="panel backup-card"><span className="eyebrow">完整项目</span><h2>JSON 会话备份</h2><p>包含<Term term="snapshot">收藏快照</Term>、所有会话、比较记录、模型结果和分布设置，可在其他域名或设备导入。</p><dl><div><dt>条目</dt><dd>{items.length}</dd></div><div><dt>会话</dt><dd>{sessions.length}</dd></div><div><dt>格式</dt><dd>ExportV1</dd></div></dl><button className="primary-button" onClick={backup}>下载 JSON 备份<span>↓</span></button></article>
+      <article className="panel backup-card"><span className="eyebrow">恢复或迁移</span><h2>导入备份</h2><p>先预览账号、会话和冲突，再选择合并或覆盖恢复。支持最大 20 MB 的 ExportV1 JSON。</p><BackupImporter onImported={async (result) => { setMessage(`已完成${result.audit.mode === "replace" ? "覆盖恢复" : result.audit.mode === "merge" ? "选择性合并" : "项目创建"}：导入 ${result.audit.importedSessionIds.length} 个会话。`); await onImported(result); }} label="选择 JSON 文件" /></article>
+      <article className="panel backup-card storage-card"><span className="eyebrow">浏览器存储</span><h2>{storage.persisted ? "已申请持久保存" : "尽力保存模式"}</h2><p>{storage.persisted ? "浏览器不会在空间压力下自动清理本项目，但手动清站点数据仍会删除。" : "浏览器可能在空间不足时清理数据，请依赖 JSON 备份。"}</p><div className="storage-meter"><i style={{ width: storage.quota ? `${Math.min(100, storage.usage / storage.quota * 100)}%` : "0%" }} /></div><small>已使用 {formatBytes(storage.usage)} / 可用约 {formatBytes(storage.quota)}</small></article>
+    </section>
+    <section className="panel import-history-panel">
+      <div className="panel-title"><div><span className="eyebrow">本地审计</span><h2>导入与清理历史</h2></div><small>{importHistory.length} 次操作</small></div>
+      {importHistory.length === 0 ? <p>还没有导入或清理操作。</p> : <div className="import-history-list">{importHistory.map((entry) => {
+        const deletion = entry.mode === "snapshot-deletion" || entry.mode === "legacy-clone-deletion";
+        return <details key={entry.id}>
+          <summary><strong>{backupAuditLabel(entry.mode)}</strong><span>{formatDateTime(entry.createdAt)}{deletion ? ` · 删除 ${entry.deletedSessionIds?.length ?? 0} 个会话、${entry.deletedComparisonIds?.length ?? 0} 条判断` : ` · 导入 ${entry.importedSessionIds.length} 个会话 · 冲突 ${entry.conflictSessionCount}`}</span></summary>
+          <small>账号 @{entry.sourceUsername}{deletion ? ` · 快照 ${entry.deletedSnapshotIds?.join("、") ?? "—"}` : ` · 判断 ${entry.importedComparisonCount} 条 · 摘要 ${entry.backupDigest ?? "—"}`}</small>
+          {deletion && (entry.deletedImportBatchIds?.length || entry.deletedModelSessionIds?.length) ? <small>同时清理 {entry.deletedImportBatchIds?.length ?? 0} 个导入批次、{entry.deletedModelSessionIds?.length ?? 0} 个模型</small> : null}
+          {entry.supersededAt && <small>已由后续覆盖恢复取代 · {formatDateTime(entry.supersededAt)}</small>}
+          {entry.deletedAt && <small>其中的旧导入副本已于 {formatDateTime(entry.deletedAt)} 删除。</small>}
+          {entry.idMappings.length > 0 && <div className="import-id-mappings"><strong>ID 映射</strong>{entry.idMappings.map((mapping, index) => <code key={`${mapping.entity}:${mapping.sourceId}:${index}`}>{mapping.entity} · {mapping.sourceId} → {mapping.targetId} · {mapping.reason}</code>)}</div>}
+          {entry.warnings.map((warning) => <small key={warning}>{warning}</small>)}
+        </details>;
+      })}</div>}
+    </section>
+  </>;
 }
 
 export default function ResorterApp() {
@@ -1974,8 +2012,8 @@ export default function ResorterApp() {
   const [projects, setProjects] = useState<LocalProject[]>([]);
   const [importHistory, setImportHistory] = useState<BackupImportAudit[]>([]);
   const [lastBackupImport, setLastBackupImport] = useState<BackupImportResult>();
-  const [legacyDeletionPreview, setLegacyDeletionPreview] = useState<LegacyCloneDeletionPreview>();
-  const [lastLegacyDeletion, setLastLegacyDeletion] = useState<LegacyCloneDeletionResult>();
+  const [snapshotDeletionPreview, setSnapshotDeletionPreview] = useState<SnapshotDeletionPreview>();
+  const [lastSnapshotDeletion, setLastSnapshotDeletion] = useState<SnapshotDeletionResult>();
   const [compare, setCompare] = useState<CompareState>();
   const [busy, setBusy] = useState(false);
   const [scoresVisible, setScoresVisible] = useState(false);
@@ -2289,18 +2327,18 @@ export default function ResorterApp() {
     if (profile) setSessions(await listSessions(profile.id));
   }
 
-  async function openLegacyCloneDeletion(snapshotId: string) {
+  async function openSnapshotDeletion(snapshotId: string) {
     setGlobalError("");
     try {
-      setLegacyDeletionPreview(await previewLegacyCloneDeletion(snapshotId));
+      setSnapshotDeletionPreview(await previewSnapshotDeletion(snapshotId));
     } catch (cause) {
-      setGlobalError(cause instanceof Error ? cause.message : "无法预览这个旧导入副本。");
+      setGlobalError(cause instanceof Error ? cause.message : "无法预览这个收藏快照。");
     }
   }
 
-  async function finishLegacyCloneDeletion(result: LegacyCloneDeletionResult) {
-    setLegacyDeletionPreview(undefined);
-    setLastLegacyDeletion(result);
+  async function finishSnapshotDeletion(result: SnapshotDeletionResult) {
+    setSnapshotDeletionPreview(undefined);
+    setLastSnapshotDeletion(result);
     setLastBackupImport(undefined);
     setCompare(undefined);
     if (result.activeSnapshot) {
@@ -2332,5 +2370,5 @@ export default function ResorterApp() {
   })();
 
   if (view === "connect" || !snapshot || !profile) return <><RestoreSplash /><ConnectView onConnected={(saved) => loadSnapshot(saved, "library")} onImported={async (result) => { setLastBackupImport(result); await loadSnapshot(result.snapshot, "library"); }} onCancel={snapshot && profile ? () => navigate("library") : undefined} currentUsername={snapshot && profile ? snapshot.username : undefined} /></>;
-  return <Shell view={view} onNavigate={navigate} profile={profile} snapshot={snapshot} projects={projects} onSwitchSnapshot={async (snapshotId) => { const selected = await setActiveSnapshot(snapshotId); await loadSnapshot(selected, "library"); }} onDeleteLegacyClone={(snapshotId) => void openLegacyCloneDeletion(snapshotId)}>{globalError && <Notice tone="error">{globalError}</Notice>}{lastBackupImport && view === "library" && <Notice tone="success"><div className="import-result-notice"><span>{lastBackupImport.audit.mode === "replace" ? "覆盖恢复" : lastBackupImport.audit.mode === "merge" ? "选择性合并" : "项目创建"}完成：导入 {lastBackupImport.audit.importedSessionIds.length} 个会话、复用 {lastBackupImport.audit.reusedSessionCount} 个，冲突 {lastBackupImport.audit.conflictSessionCount} 个。</span><span><button type="button" onClick={() => navigate("backup")}>查看导入历史</button><button type="button" aria-label="关闭导入结果" onClick={() => setLastBackupImport(undefined)}>关闭</button></span></div></Notice>}{lastLegacyDeletion && view === "library" && <Notice tone="success"><div className="import-result-notice"><span>已删除旧导入副本，以及关联的 {lastLegacyDeletion.deletedSessionIds.length} 个会话和 {lastLegacyDeletion.deletedComparisonIds.length} 条判断。</span><span><button type="button" onClick={() => navigate("backup")}>查看清理历史</button><button type="button" aria-label="关闭删除结果" onClick={() => setLastLegacyDeletion(undefined)}>关闭</button></span></div></Notice>}{busy && view !== "compare" && <div className="loading-line">正在准备排序模型…</div>}{shellContent}{resyncOpen && <ResyncDialog snapshot={snapshot} onCancel={() => setResyncOpen(false)} onConnected={async (saved) => { setResyncOpen(false); await loadSnapshot(saved, "library"); }} />}{legacyDeletionPreview && <LegacyCloneDeletionDialog preview={legacyDeletionPreview} onCancel={() => setLegacyDeletionPreview(undefined)} onDeleted={finishLegacyCloneDeletion} />}</Shell>;
+  return <Shell view={view} onNavigate={navigate} profile={profile} snapshot={snapshot} projects={projects} onSwitchSnapshot={async (snapshotId) => { const selected = await setActiveSnapshot(snapshotId); await loadSnapshot(selected, "library"); }} onDeleteSnapshot={(snapshotId) => void openSnapshotDeletion(snapshotId)}>{globalError && <Notice tone="error">{globalError}</Notice>}{lastBackupImport && view === "library" && <Notice tone="success"><div className="import-result-notice"><span>{lastBackupImport.audit.mode === "replace" ? "覆盖恢复" : lastBackupImport.audit.mode === "merge" ? "选择性合并" : "项目创建"}完成：导入 {lastBackupImport.audit.importedSessionIds.length} 个会话、复用 {lastBackupImport.audit.reusedSessionCount} 个，冲突 {lastBackupImport.audit.conflictSessionCount} 个。</span><span><button type="button" onClick={() => navigate("backup")}>查看导入历史</button><button type="button" aria-label="关闭导入结果" onClick={() => setLastBackupImport(undefined)}>关闭</button></span></div></Notice>}{lastSnapshotDeletion && view === "library" && <Notice tone="success"><div className="import-result-notice"><span>{lastSnapshotDeletion.audit.mode === "legacy-clone-deletion" ? "已删除旧导入副本" : "已删除当前快照"}，以及关联的 {lastSnapshotDeletion.deletedSessionIds.length} 个会话和 {lastSnapshotDeletion.deletedComparisonIds.length} 条判断。</span><span><button type="button" onClick={() => navigate("backup")}>查看清理历史</button><button type="button" aria-label="关闭删除结果" onClick={() => setLastSnapshotDeletion(undefined)}>关闭</button></span></div></Notice>}{busy && view !== "compare" && <div className="loading-line">正在准备排序模型…</div>}{shellContent}{resyncOpen && <ResyncDialog snapshot={snapshot} onCancel={() => setResyncOpen(false)} onConnected={async (saved) => { setResyncOpen(false); await loadSnapshot(saved, "library"); }} />}{snapshotDeletionPreview && <SnapshotDeletionDialog preview={snapshotDeletionPreview} onCancel={() => setSnapshotDeletionPreview(undefined)} onDeleted={finishSnapshotDeletion} />}</Shell>;
 }

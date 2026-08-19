@@ -23,9 +23,9 @@ import {
   ComparisonReusePolicy,
   DistributionConfig,
   ExportV1,
-  LegacyCloneDeletionPreview,
-  LegacyCloneDeletionRequest,
-  LegacyCloneDeletionResult,
+  SnapshotDeletionPreview,
+  SnapshotDeletionRequest,
+  SnapshotDeletionResult,
   LocalProject,
   ModelState,
   Profile,
@@ -2236,15 +2236,12 @@ async function storedActiveSnapshot() {
   }
 }
 
-async function buildLegacyCloneDeletionPreview(
+async function buildSnapshotDeletionPreview(
   snapshot: Snapshot,
   audits: BackupImportAudit[],
-): Promise<LegacyCloneDeletionPreview> {
+): Promise<SnapshotDeletionPreview> {
   const profile = await db.profiles.get(snapshot.profileId);
-  if (!profile) throw new Error("这个旧导入副本所属的账号已不存在。");
-  if (!legacySnapshotAudit(audits, profile.id, snapshot.id)) {
-    throw new Error("只能删除由旧版导入迁移识别出的副本。");
-  }
+  if (!profile) throw new Error("这个收藏快照所属的账号已不存在。");
   const sessions = await db.sessions.where("profileId").equals(profile.id).toArray();
   const deletedSessions = sessions.filter((entry) => entry.snapshotId === snapshot.id);
   const sessionIds = new Set(deletedSessions.map((entry) => entry.id));
@@ -2272,7 +2269,12 @@ async function buildLegacyCloneDeletionPreview(
       && ((batch.sourceSessionId && sessionIds.has(batch.sourceSessionId))
         || batch.sourceSnapshotId === snapshot.id)) survivingReferenceSessionIds.add(batch.targetSessionId);
   }
+  const legacy = legacySnapshotAudit(audits, profile.id, snapshot.id);
   const warnings = ["删除只发生在本机浏览器中，且无法撤销。建议先下载当前账号的 JSON 备份。"];
+  if (legacy) warnings.push("这是由旧版导入迁移识别出的副本；删除后会在审计中保留清理记录。");
+  if (!legacy && snapshots.length <= 1) {
+    warnings.push("普通账号至少需要保留一个收藏快照；请先同步或导入另一个快照后再删除当前快照。");
+  }
   if (survivingReferenceSessionIds.size > 0) {
     warnings.push(`${survivingReferenceSessionIds.size} 个保留会话会继续显示“来源已删除”的历史引用。`);
   }
@@ -2283,6 +2285,7 @@ async function buildLegacyCloneDeletionPreview(
     profileId: profile.id,
     profile,
     snapshot,
+    legacy: Boolean(legacy),
     sessionIds: [...sessionIds],
     comparisonIds: comparisons.map((entry) => entry.id),
     importBatchIds: batches.map((entry) => entry.id),
@@ -2296,17 +2299,17 @@ async function buildLegacyCloneDeletionPreview(
   };
 }
 
-export async function previewLegacyCloneDeletion(snapshotId: string): Promise<LegacyCloneDeletionPreview> {
+export async function previewSnapshotDeletion(snapshotId: string): Promise<SnapshotDeletionPreview> {
   await ensureLocalHistory();
   const snapshot = await db.snapshots.get(snapshotId);
-  if (!snapshot) throw new Error("这个旧导入副本已不存在。");
+  if (!snapshot) throw new Error("这个收藏快照已不存在。");
   const audits = await db.backupImports.where("profileId").equals(snapshot.profileId).toArray();
-  return buildLegacyCloneDeletionPreview(snapshot, audits);
+  return buildSnapshotDeletionPreview(snapshot, audits);
 }
 
-export async function commitLegacyCloneDeletion(
-  request: LegacyCloneDeletionRequest,
-): Promise<LegacyCloneDeletionResult> {
+export async function commitSnapshotDeletion(
+  request: SnapshotDeletionRequest,
+): Promise<SnapshotDeletionResult> {
   await ensureLocalHistory();
   const tables = [
     db.profiles, db.snapshots, db.items, db.sessions, db.sessionItems, db.comparisons,
@@ -2314,20 +2317,23 @@ export async function commitLegacyCloneDeletion(
   ];
   return db.transaction("rw", tables, async () => {
     const snapshot = await db.snapshots.get(request.snapshotId);
-    if (!snapshot) throw new Error("这个旧导入副本已不存在，请刷新后重试。");
+    if (!snapshot) throw new Error("这个收藏快照已不存在，请刷新后重试。");
     const audits = await db.backupImports.where("profileId").equals(snapshot.profileId).toArray();
-    const preview = await buildLegacyCloneDeletionPreview(snapshot, audits);
+    const preview = await buildSnapshotDeletionPreview(snapshot, audits);
     if (canonicalUsername(request.confirmationUsername ?? "") !== canonicalUsername(preview.profile.username)) {
       throw new Error("请输入目标 Bangumi 用户名以确认删除。");
     }
     if (preview.targetRevision !== request.targetRevision) throw new Error("本地项目已经变化，请重新预览删除。");
+    if (!preview.legacy && preview.remainingSnapshotCount === 0) {
+      throw new Error("普通账号至少需要保留一个收藏快照，无法删除最后一个快照。");
+    }
 
     const timestamp = now();
     const auditId = id();
     const audit: BackupImportAudit = {
       id: auditId,
       profileId: preview.profileId,
-      mode: "legacy-clone-deletion",
+      mode: preview.legacy ? "legacy-clone-deletion" : "snapshot-deletion",
       sourceUsername: preview.profile.username,
       createdAt: timestamp,
       selectedSessionIds: [],
@@ -2404,6 +2410,27 @@ export async function commitLegacyCloneDeletion(
       audit,
     };
   });
+}
+
+/**
+ * Compatibility wrapper for callers of the pre-v6 legacy-clone-only API.
+ *
+ * The public snapshot deletion API now handles every local snapshot, but the
+ * old names intentionally retain their original safety boundary.  This keeps
+ * older callers (and, more importantly, older UI bundles) from accidentally
+ * turning a regular snapshot deletion into a legacy cleanup operation.
+ */
+export async function previewLegacyCloneDeletion(snapshotId: string) {
+  const preview = await previewSnapshotDeletion(snapshotId);
+  if (!preview.legacy) throw new Error("只能删除由旧版导入迁移识别出的副本。");
+  return preview;
+}
+
+/** @deprecated Use commitSnapshotDeletion. */
+export async function commitLegacyCloneDeletion(request: SnapshotDeletionRequest) {
+  const preview = await previewSnapshotDeletion(request.snapshotId);
+  if (!preview.legacy) throw new Error("只能删除由旧版导入迁移识别出的副本。");
+  return commitSnapshotDeletion(request);
 }
 
 export async function listLocalProjects(): Promise<LocalProject[]> {

@@ -402,7 +402,7 @@ export interface ExportV1 {
 }
 
 export type BackupImportMode = "create" | "merge" | "replace";
-export type BackupImportAuditMode = BackupImportMode | "legacy-clone-migration" | "legacy-clone-deletion";
+export type BackupImportAuditMode = BackupImportMode | "legacy-clone-migration" | "legacy-clone-deletion" | "snapshot-deletion";
 export type BackupEntityKind = "profile" | "snapshot" | "session" | "comparison" | "importBatch";
 
 export interface ValidatedBackup {
@@ -519,11 +519,12 @@ export interface BackupImportResult {
   audit: BackupImportAudit;
 }
 
-/** A destructive operation preview for one v5/v6 legacy imported snapshot. */
-export interface LegacyCloneDeletionPreview {
+/** A destructive operation preview for one local collection snapshot. */
+export interface SnapshotDeletionPreview {
   profileId: string;
   profile: Profile;
   snapshot: Snapshot;
+  legacy: boolean;
   sessionIds: string[];
   comparisonIds: string[];
   importBatchIds: string[];
@@ -536,13 +537,13 @@ export interface LegacyCloneDeletionPreview {
   warnings: string[];
 }
 
-export interface LegacyCloneDeletionRequest {
+export interface SnapshotDeletionRequest {
   snapshotId: string;
   targetRevision: string;
   confirmationUsername?: string;
 }
 
-export interface LegacyCloneDeletionResult {
+export interface SnapshotDeletionResult {
   profile?: Profile;
   deletedSnapshotId: string;
   deletedSessionIds: string[];
@@ -552,6 +553,11 @@ export interface LegacyCloneDeletionResult {
   activeSnapshot?: Snapshot;
   audit: BackupImportAudit;
 }
+
+/** Backwards-compatible names for the legacy-clone-only API. */
+export type LegacyCloneDeletionPreview = SnapshotDeletionPreview;
+export type LegacyCloneDeletionRequest = SnapshotDeletionRequest;
+export type LegacyCloneDeletionResult = SnapshotDeletionResult;
 
 export interface LocalProject {
   profile: Profile;

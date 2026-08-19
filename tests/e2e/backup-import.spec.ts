@@ -334,6 +334,54 @@ test("deletes a migrated legacy clone and switches to the remaining snapshot", a
   await expect(page.locator(".profile-mini").getByRole("button", { name: "删除这个旧导入副本" })).toHaveCount(0);
 });
 
+test("deletes the current ordinary snapshot and restores the remaining selection after refresh", async ({ page }) => {
+  await ready(page);
+  const oldSnapshot = backupPayload({
+    snapshotId: "alice-delete-old", sessionId: "alice-delete-old-session",
+    sessionTitle: "保留的旧快照会话", syncedAt: "2026-08-17T02:00:00.000Z",
+  });
+  await uploadBackup(page, oldSnapshot, "delete-old.json");
+  let importDialog = page.getByRole("dialog", { name: "恢复 @Alice" });
+  await importDialog.getByRole("button", { name: "继续最终确认" }).click();
+  await importDialog.getByRole("button", { name: "创建完整项目" }).click();
+
+  await page.getByRole("button", { name: "备份与导出" }).click();
+  const currentSnapshot = backupPayload({
+    snapshotId: "alice-delete-current", sessionId: "alice-delete-current-session",
+    sessionTitle: "准备删除的当前快照会话", syncedAt: "2026-08-19T02:00:00.000Z",
+  });
+  await uploadBackup(page, currentSnapshot, "delete-current.json");
+  importDialog = page.getByRole("dialog", { name: "恢复 @Alice" });
+  await importDialog.getByRole("button", { name: "继续最终确认" }).click();
+  await importDialog.getByRole("button", { name: "确认合并 1 个会话" }).click();
+  await expect(page.locator("#local-project-switcher")).toHaveAttribute("data-value", "alice-delete-current");
+
+  await page.locator(".profile-mini").getByRole("button", { name: "删除当前快照" }).click();
+  const deletionDialog = page.getByRole("dialog", { name: "删除当前快照" });
+  await expect(deletionDialog).toContainText("收藏条目 2");
+  await expect(deletionDialog).toContainText("会话 1");
+  await expect(deletionDialog).toContainText("判断 0");
+  await expect(deletionDialog).toContainText("这是当前打开的快照");
+  await expect(deletionDialog).toContainText("同账号最近的剩余快照");
+  const removeButton = deletionDialog.getByRole("button", { name: "永久删除快照" });
+  await expect(removeButton).toBeDisabled();
+  await deletionDialog.getByLabel(/输入账号名 Alice/).fill("Alice");
+  await removeButton.click();
+
+  await expect(page.locator("#local-project-switcher")).toHaveAttribute("data-value", "alice-delete-old");
+  await expect(page.getByText(/已删除当前快照，以及关联的 1 个会话和 0 条判断/)).toBeVisible();
+  await page.locator("#local-project-switcher").click();
+  await expect(page.getByRole("listbox", { name: "本地项目与收藏快照选项" })).not.toContainText("2026年8月19日");
+  await page.keyboard.press("Escape");
+
+  await page.getByRole("button", { name: "备份与导出" }).click();
+  await expect(page.locator(".import-history-list")).toContainText("删除当前快照");
+  await expect(page.locator(".import-history-list")).toContainText("删除 1 个会话、0 条判断");
+  await page.reload();
+  await page.locator("html[data-resorter-ready='true']").waitFor();
+  await expect(page.locator("#local-project-switcher")).toHaveAttribute("data-value", "alice-delete-old");
+});
+
 test("mobile backup wizard and project switcher remain usable", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await ready(page);

@@ -100,6 +100,7 @@ test("new sessions preview and materialize one cross-snapshot history source", a
   await page.getByRole("button", { name: /收藏概览/ }).click();
   await expect(page.locator(".session-row")).toHaveCount(2);
   await expect(page.locator(".session-row").first()).toContainText("本地历史 · 导入 1 条");
+  await expect(page.locator(".session-row").first()).toContainText("已有判断 1 条");
   page.once("dialog", (dialog) => dialog.accept());
   await page.locator(".session-row").nth(1).locator(".session-delete").click();
   await expect(page.locator(".session-row")).toHaveCount(1);

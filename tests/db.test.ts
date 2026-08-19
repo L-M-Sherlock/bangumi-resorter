@@ -4,8 +4,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { createDemoItems } from "../lib/demo";
 import { fitModel, toModelState } from "../lib/ranking/engine";
 import {
-  commitBackupImport, commitComparisonDeletion, commitComparisonImport, commitLegacyCloneDeletion, commitResponse, commitSessionBudgetMode, commitSessionDistribution, createSession, db, deleteSession, deriveSessionWithTagFilter, exportProject, getActiveSnapshot, getSessionBundle,
-  initializeModel, lastActiveResponse, listBackupImportHistory, listLocalProjects, previewBackupImport, previewComparisonImport, previewLegacyCloneDeletion, previewSessionTagDerivation, previewSessionUpgrade, saveSnapshot, setActiveSnapshot, upgradeSessionToSnapshot,
+  commitBackupImport, commitComparisonDeletion, commitComparisonImport, commitLegacyCloneDeletion, commitResponse, commitSessionBudgetMode, commitSessionDistribution, commitSnapshotDeletion, createSession, db, deleteSession, deriveSessionWithTagFilter, exportProject, getActiveSnapshot, getSessionBundle,
+  initializeModel, lastActiveResponse, listBackupImportHistory, listLocalProjects, previewBackupImport, previewComparisonImport, previewLegacyCloneDeletion, previewSessionTagDerivation, previewSessionUpgrade, previewSnapshotDeletion, saveSnapshot, setActiveSnapshot, upgradeSessionToSnapshot,
   ResorterDatabase,
 } from "../lib/db";
 import { readBackup, validateBackupPayload } from "../lib/export";
@@ -771,6 +771,108 @@ describe("IndexedDB project persistence", () => {
     })).rejects.toThrow(/重新预览/);
     expect(await db.snapshots.get(legacy.id)).toBeDefined();
     expect((await listBackupImportHistory(legacy.profileId)).filter((entry) => entry.mode === "legacy-clone-deletion")).toHaveLength(0);
+  });
+
+  it("deletes one ordinary snapshot without touching sibling snapshots or accounts", async () => {
+    const firstId = crypto.randomUUID();
+    const secondId = crypto.randomUUID();
+    const otherId = crypto.randomUUID();
+    const first = await saveSnapshot({ username: "Alice", nickname: "Local Alice" }, firstId, createDemoItems(firstId).slice(0, 3));
+    const second = await saveSnapshot({ username: " alice ", nickname: "Local Alice" }, secondId, createDemoItems(secondId).slice(0, 2));
+    const other = await saveSnapshot({ username: "Bob" }, otherId, createDemoItems(otherId).slice(0, 2));
+    const firstSession = await createSession(first, 2, [2], { preset: "uniform", levelCount: 10, weights: Array(10).fill(10) });
+    const secondSession = await createSession(second, 2, [2], { preset: "uniform", levelCount: 10, weights: Array(10).fill(10) });
+    const otherSession = await createSession(other, 2, [2], { preset: "uniform", levelCount: 10, weights: Array(10).fill(10) });
+    const firstLinks = await db.sessionItems.where("sessionId").equals(firstSession.id).toArray();
+    const firstComparison: ComparisonRecord = {
+      id: crypto.randomUUID(), profileId: first.profileId, sessionId: firstSession.id, subjectType: 2,
+      leftSubjectId: firstLinks[0].subjectId, rightSubjectId: firstLinks[1].subjectId, outcome: "left",
+      acceptedCountAtAnswer: 1, active: true, createdAt: new Date().toISOString(),
+    };
+    await db.comparisons.add(firstComparison);
+    await db.models.put(toModelState(firstSession.id, firstSession.modelVersion,
+      fitModel(firstLinks.map((entry) => ({ subjectId: entry.subjectId, rate: 0 })), [])));
+    await db.importBatches.add({
+      id: crypto.randomUUID(), profileId: first.profileId, targetSessionId: firstSession.id,
+      sourceSnapshotId: second.id, targetSnapshotId: first.id, type: "migration", createdAt: new Date().toISOString(),
+      importedCount: 1, duplicateOriginalCount: 0, duplicatePairCount: 0, outOfScopeCount: 0,
+      skippedCount: 0, invalidCalibrationCount: 0,
+    });
+    await setActiveSnapshot(first.id);
+
+    const preview = await previewSnapshotDeletion(first.id);
+    expect(preview).toMatchObject({ legacy: false, active: true, remainingSnapshotCount: 1, itemCount: 3 });
+    expect(preview.sessionIds).toEqual([firstSession.id]);
+    expect(preview.comparisonIds).toEqual([firstComparison.id]);
+    expect(preview.importBatchIds).toHaveLength(1);
+    expect(preview.modelSessionIds).toEqual([firstSession.id]);
+    await expect(commitSnapshotDeletion({
+      snapshotId: first.id, targetRevision: preview.targetRevision, confirmationUsername: "wrong",
+    })).rejects.toThrow(/用户名/);
+
+    const result = await commitSnapshotDeletion({
+      snapshotId: first.id, targetRevision: preview.targetRevision, confirmationUsername: " ALICE ",
+    });
+    expect(result.audit.mode).toBe("snapshot-deletion");
+    expect(result.activeSnapshot?.id).toBe(second.id);
+    expect(await db.snapshots.get(first.id)).toBeUndefined();
+    expect(await db.items.where("snapshotId").equals(first.id).count()).toBe(0);
+    expect(await db.sessions.get(firstSession.id)).toBeUndefined();
+    expect(await db.sessionItems.where("sessionId").equals(firstSession.id).count()).toBe(0);
+    expect(await db.comparisons.get(firstComparison.id)).toBeUndefined();
+    expect(await db.models.get(firstSession.id)).toBeUndefined();
+    expect(await db.sessions.get(secondSession.id)).toBeDefined();
+    expect(await db.sessions.get(otherSession.id)).toBeDefined();
+    expect(await db.snapshots.get(second.id)).toBeDefined();
+    expect(await db.snapshots.get(other.id)).toBeDefined();
+    expect((await db.profiles.get(first.profileId))?.nickname).toBe("Local Alice");
+    expect((await getActiveSnapshot())?.id).toBe(second.id);
+    expect((await listBackupImportHistory(first.profileId))[0]).toMatchObject({
+      mode: "snapshot-deletion", deletedSnapshotIds: [first.id], deletedSessionIds: [firstSession.id],
+    });
+  });
+
+  it("protects the last ordinary snapshot from deletion", async () => {
+    const snapshotId = crypto.randomUUID();
+    const snapshot = await saveSnapshot({ username: "only-snapshot" }, snapshotId, createDemoItems(snapshotId).slice(0, 2));
+    const preview = await previewSnapshotDeletion(snapshot.id);
+    expect(preview.remainingSnapshotCount).toBe(0);
+    expect(preview.warnings.join(" ")).toMatch(/至少需要保留一个/);
+    await expect(commitSnapshotDeletion({
+      snapshotId: snapshot.id, targetRevision: preview.targetRevision, confirmationUsername: snapshot.username,
+    })).rejects.toThrow(/至少需要保留一个/);
+    expect(await db.snapshots.get(snapshot.id)).toBeDefined();
+    expect(await db.profiles.get(snapshot.profileId)).toBeDefined();
+  });
+
+  it("rejects a stale ordinary snapshot preview and rolls back an audit failure", async () => {
+    const firstId = crypto.randomUUID();
+    const secondId = crypto.randomUUID();
+    const first = await saveSnapshot({ username: "snapshot-rollback" }, firstId, createDemoItems(firstId).slice(0, 2));
+    await saveSnapshot({ username: "snapshot-rollback" }, secondId, createDemoItems(secondId).slice(0, 2));
+    const stale = await previewSnapshotDeletion(first.id);
+    const session = await createSession(first, 2, [2], { preset: "uniform", levelCount: 10, weights: Array(10).fill(10) });
+    await expect(commitSnapshotDeletion({
+      snapshotId: first.id, targetRevision: stale.targetRevision, confirmationUsername: first.username,
+    })).rejects.toThrow(/重新预览/);
+    expect(await db.snapshots.get(first.id)).toBeDefined();
+
+    const preview = await previewSnapshotDeletion(first.id);
+    const failAudit = (_key: string, entry: BackupImportAudit) => {
+      if (entry.mode === "snapshot-deletion") throw new Error("injected snapshot deletion audit failure");
+    };
+    db.backupImports.hook("creating", failAudit);
+    try {
+      await expect(commitSnapshotDeletion({
+        snapshotId: first.id, targetRevision: preview.targetRevision, confirmationUsername: first.username,
+      })).rejects.toThrow(/injected snapshot deletion audit failure/);
+    } finally {
+      db.backupImports.hook.creating.unsubscribe(failAudit);
+    }
+    expect(await db.snapshots.get(first.id)).toBeDefined();
+    expect(await db.items.where("snapshotId").equals(first.id).count()).toBe(2);
+    expect(await db.sessions.get(session.id)).toBeDefined();
+    expect((await listBackupImportHistory(first.profileId)).filter((entry) => entry.mode === "snapshot-deletion")).toHaveLength(0);
   });
 
   it("rolls back a legacy clone deletion when its audit write fails", async () => {
