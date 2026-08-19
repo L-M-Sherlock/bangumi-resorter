@@ -115,3 +115,40 @@ test("new sessions preview and materialize one cross-snapshot history source", a
   await expect(page.getByText("本会话判断记录（0）")).toBeVisible();
   await expect(page.getByText("总有效证据 0 条 · 本会话新回答 0 条 · 导入证据 0 条")).toBeVisible();
 });
+
+test("an existing session imports another session's judgments and recomputes immediately", async ({ page }) => {
+  await page.goto("/");
+  await page.locator("html[data-resorter-ready='true']").waitFor();
+  await page.getByRole("button", { name: "先用演示数据体验" }).click();
+
+  await page.getByRole("button", { name: /开始快速比较/ }).click();
+  await page.getByRole("button", { name: /更喜欢这部/ }).first().click();
+  await expect(page.locator(".progress-copy")).toContainText("有效证据 1 次（新回答 1 · 导入 0）");
+  await page.getByRole("button", { name: "暂停并返回收藏" }).click();
+
+  await page.getByRole("button", { name: /开始快速比较/ }).click();
+  await page.getByRole("button", { name: "查看当前结果" }).click();
+  await expect(page.getByText("总有效证据 0 条 · 本会话新回答 0 条 · 导入证据 0 条")).toBeVisible();
+
+  const importer = page.locator(".existing-session-import");
+  await importer.locator(":scope > summary").click();
+  await page.locator("#existing-session-import-source").click();
+  await page.locator('[data-themed-select="existing-session-import-source"]').getByRole("option").nth(1).click();
+  await expect(importer).toContainText("可导入");
+  await expect(importer).toContainText("1");
+  const sourceBox = await page.locator("#existing-session-import-source").boundingBox();
+  const importButtonBox = await importer.getByRole("button", { name: "导入 1 条判断" }).boundingBox();
+  expect(sourceBox).not.toBeNull();
+  expect(importButtonBox).not.toBeNull();
+  expect(Math.abs((sourceBox!.y + sourceBox!.height) - (importButtonBox!.y + importButtonBox!.height))).toBeLessThan(1);
+  await importer.getByRole("button", { name: "导入 1 条判断" }).click();
+
+  await expect(page.getByText("总有效证据 1 条 · 本会话新回答 0 条 · 导入证据 1 条")).toBeVisible();
+  await expect(page.getByText("本会话判断记录（1）")).toBeVisible();
+  await expect(page.locator(".comparison-record")).toContainText("导入自 demo 的排序");
+
+  await page.locator("#existing-session-import-source").click();
+  await page.locator('[data-themed-select="existing-session-import-source"]').getByRole("option").nth(1).click();
+  await expect(importer).toContainText("该来源没有可新增的判断");
+  await expect(importer.getByRole("button", { name: "导入 0 条判断" })).toBeDisabled();
+});

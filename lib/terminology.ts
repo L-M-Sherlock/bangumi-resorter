@@ -167,7 +167,7 @@ export const TERM_DEFINITIONS = {
   },
   "history-reuse": {
     label: "历史判断导入",
-    summary: "在创建会话时把仍然适用于当前作品范围的旧比较复制为本地证据；导入完成后与来源会话解耦。",
+    summary: "把仍然适用于当前作品范围的其他会话比较复制为本地证据；可在创建时或已有会话中导入，完成后与来源解耦。",
     sectionId: "collection-drift",
   },
 } as const satisfies Record<string, TermDefinition>;

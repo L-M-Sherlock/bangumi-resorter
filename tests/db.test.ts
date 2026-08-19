@@ -1205,14 +1205,22 @@ describe("IndexedDB project persistence", () => {
       allowedSubjectIds: items.map((entry) => entry.subjectId), targetVersion: 0,
     });
     expect(preview).toMatchObject({ importableCount: 2, skippedCount: 1, invalidCalibrationCount: 0 });
+    expect(preview.plannedBatch).toMatchObject({ targetSessionId: target.id, sourceSessionId: source.id, importedCount: 2 });
+    expect(preview.plannedRecords).toHaveLength(2);
     const fit = fitModel(items.map(({ subjectId, rate }) => ({ subjectId, rate })), [
       { leftSubjectId: original.leftSubjectId, rightSubjectId: original.rightSubjectId, outcome: "left" },
       { leftSubjectId: calibration.leftSubjectId, rightSubjectId: calibration.rightSubjectId, outcome: "right" },
     ]);
-    const first = await commitComparisonImport(
+    await expect(commitComparisonImport(
       target.id, source.id, 0, 0, toModelState(target.id, 1, fit),
+      { ...preview, importableCount: 99 },
+    )).rejects.toThrow(/预览已经变化/);
+    expect(await db.comparisons.where("sessionId").equals(target.id).count()).toBe(0);
+    const first = await commitComparisonImport(
+      target.id, source.id, 0, 0, toModelState(target.id, 1, fit), preview,
     );
     expect(first.records).toHaveLength(2);
+    expect(first.records).toEqual(preview.plannedRecords);
     expect(first.records.map((entry) => entry.acceptedCountAtAnswer)).toEqual([1, 2]);
     const importedOriginal = first.records.find((entry) => entry.queryKind !== "calibration")!;
     expect(first.records.find((entry) => entry.queryKind === "calibration")?.calibrationOfComparisonId)

@@ -333,6 +333,17 @@ interface ImportPreparationOptions {
   recordId?: (entry: ComparisonRecord) => string;
 }
 
+/** Reserve the exact materialization identity used to calculate a preview. */
+function existingSessionImportIdentity(preview?: ComparisonImportPreview) {
+  const plannedIds = new Map((preview?.plannedRecords ?? [])
+    .map((entry) => [entry.importedFromComparisonId, entry.id]));
+  return {
+    batchId: preview?.plannedBatch?.id ?? id(),
+    batchCreatedAt: preview?.plannedBatch?.createdAt ?? now(),
+    recordId: (entry: ComparisonRecord) => plannedIds.get(entry.id) ?? id(),
+  };
+}
+
 /**
  * Purely prepares a one-time import. It never reads or writes IndexedDB, which
  * lets creation, future existing-session imports, and legacy migration share
@@ -821,7 +832,8 @@ export async function previewComparisonImport(
     throw new Error("目标会话已经更新，请重新预览。");
   }
   const sourceRecords = await db.comparisons.where("sessionId").equals(source.id).toArray();
-  return prepareComparisonImport({
+  const identity = target.targetSessionId ? existingSessionImportIdentity() : undefined;
+  const prepared = prepareComparisonImport({
     target: targetSession,
     source,
     targetSnapshotId,
@@ -830,9 +842,13 @@ export async function previewComparisonImport(
     sourceRecords,
     targetRecords,
     type: target.targetSessionId ? "existing-session" : "new-session",
-    batchId: "preview",
-    batchCreatedAt: new Date(0).toISOString(),
-  }).preview;
+    batchId: identity?.batchId ?? "preview",
+    batchCreatedAt: identity?.batchCreatedAt ?? new Date(0).toISOString(),
+    recordId: identity?.recordId,
+  });
+  return target.targetSessionId
+    ? { ...prepared.preview, plannedBatch: prepared.batch, plannedRecords: prepared.records }
+    : prepared.preview;
 }
 
 export async function commitComparisonImport(
@@ -841,6 +857,7 @@ export async function commitComparisonImport(
   expectedTargetVersion: number,
   expectedSourceVersion: number,
   nextModel: ModelState,
+  expectedPreview?: ComparisonImportPreview,
 ): Promise<ComparisonImportResult> {
   await ensureLocalHistory();
   return db.transaction("rw", [db.sessions, db.sessionItems, db.comparisons, db.importBatches, db.models], async () => {
@@ -860,6 +877,7 @@ export async function commitComparisonImport(
       db.comparisons.where("sessionId").equals(target.id).toArray(),
     ]);
     const allowedSubjectIds = new Set(links.map((entry) => entry.subjectId));
+    const identity = existingSessionImportIdentity(expectedPreview);
     const prepared = prepareComparisonImport({
       target,
       source,
@@ -869,7 +887,28 @@ export async function commitComparisonImport(
       sourceRecords,
       targetRecords,
       type: "existing-session",
+      batchId: identity.batchId,
+      batchCreatedAt: identity.batchCreatedAt,
+      recordId: identity.recordId,
     });
+    if (expectedPreview && (
+      !expectedPreview.plannedBatch
+      || !expectedPreview.plannedRecords
+      || expectedPreview.targetSessionId !== target.id
+      || expectedPreview.sourceSessionId !== source.id
+      || expectedPreview.targetVersion !== expectedTargetVersion
+      || expectedPreview.sourceVersion !== expectedSourceVersion
+      || expectedPreview.importableCount !== prepared.preview.importableCount
+      || expectedPreview.duplicateOriginalCount !== prepared.preview.duplicateOriginalCount
+      || expectedPreview.duplicatePairCount !== prepared.preview.duplicatePairCount
+      || expectedPreview.outOfScopeCount !== prepared.preview.outOfScopeCount
+      || expectedPreview.skippedCount !== prepared.preview.skippedCount
+      || expectedPreview.invalidCalibrationCount !== prepared.preview.invalidCalibrationCount
+      || stableJson(expectedPreview.plannedBatch) !== stableJson(prepared.batch)
+      || stableJson(expectedPreview.plannedRecords) !== stableJson(prepared.records)
+    )) {
+      throw new Error("导入预览已经变化，请重新预览。");
+    }
     if (nextModel.sessionId !== target.id || nextModel.version !== expectedTargetVersion + 1
       || nextModel.acceptedComparisons !== targetRecords.filter((entry) => entry.active
         && entry.outcome !== "skip"

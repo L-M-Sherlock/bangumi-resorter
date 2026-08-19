@@ -17,6 +17,7 @@ import {
 import { createDemoItems } from "@/lib/demo";
 import {
   commitBackupImport,
+  commitComparisonImport,
   commitComparisonDeletion,
   commitSnapshotDeletion,
   commitSessionBudgetMode,
@@ -1662,18 +1663,24 @@ function SearchableItemPicker({ id, label, items, value, excludeSubjectId, disab
   </div>;
 }
 
-function ComparisonManager({ items, history, sessionId, sessions, busy, onAdd, onDelete }: {
+function ComparisonManager({ items, history, session, sessions, busy, onAdd, onDelete, onImport }: {
   items: RankedItem[];
   history: ComparisonRecord[];
-  sessionId: string;
+  session: SortingSession;
   sessions: SortingSession[];
   busy: boolean;
   onAdd: (leftSubjectId: number, rightSubjectId: number, outcome: Exclude<ComparisonOutcome, "skip">) => Promise<void>;
   onDelete: (recordId: string) => Promise<void>;
+  onImport: (sourceSessionId: string, preview: ComparisonImportPreview) => Promise<void>;
 }) {
+  const sessionId = session.id;
   const [leftSubjectId, setLeftSubjectId] = useState(items[0]?.subjectId ?? 0);
   const [rightSubjectId, setRightSubjectId] = useState(items[1]?.subjectId ?? 0);
   const [outcome, setOutcome] = useState<Exclude<ComparisonOutcome, "skip">>("left");
+  const [sourceSessionId, setSourceSessionId] = useState("");
+  const [importPreview, setImportPreview] = useState<ComparisonImportPreview>();
+  const [importBusy, setImportBusy] = useState(false);
+  const [importError, setImportError] = useState("");
   const itemById = new Map(items.map((item) => [item.subjectId, item]));
   const currentRecords = history
     .filter((record) => record.active && record.sessionId === sessionId)
@@ -1683,6 +1690,16 @@ function ComparisonManager({ items, history, sessionId, sessions, busy, onAdd, o
   const importedCount = currentRecords.filter((record) => record.importBatchId).length;
   const localCount = currentRecords.length - importedCount;
   const sessionById = new Map(sessions.map((session) => [session.id, session]));
+  const sourceCandidates = sessions.filter((candidate) => candidate.id !== sessionId
+    && candidate.profileId === session.profileId
+    && candidate.subjectType === session.subjectType);
+  const sourceOptions = [
+    { value: "", label: "选择一个来源会话" },
+    ...sourceCandidates.map((candidate) => ({
+      value: candidate.id,
+      label: `${candidate.title} · ${candidate.snapshotId === session.snapshotId ? "同快照" : "跨快照"} · 更新 ${formatDate(candidate.updatedAt)}`,
+    })),
+  ];
   const kindCopy: Record<NonNullable<ComparisonRecord["queryKind"]>, string> = {
     adaptive: "自适应", exploration: "覆盖探索", calibration: "校准复问", manual: "手动添加",
   };
@@ -1706,6 +1723,44 @@ function ComparisonManager({ items, history, sessionId, sessions, busy, onAdd, o
     if (confirmed) void onDelete(record.id);
   }
 
+  async function previewImport(nextSourceSessionId: string) {
+    setSourceSessionId(nextSourceSessionId);
+    setImportPreview(undefined);
+    setImportError("");
+    if (!nextSourceSessionId) return;
+    setImportBusy(true);
+    try {
+      const preview = await previewComparisonImport(nextSourceSessionId, {
+        targetSessionId: session.id,
+        profileId: session.profileId,
+        snapshotId: session.snapshotId,
+        subjectType: session.subjectType,
+        allowedSubjectIds: [],
+        targetVersion: session.modelVersion,
+      });
+      setImportPreview(preview);
+    } catch (cause) {
+      setImportError(cause instanceof Error ? cause.message : "无法预览会话判断导入。");
+    } finally {
+      setImportBusy(false);
+    }
+  }
+
+  async function importComparisons() {
+    if (!sourceSessionId || !importPreview || importPreview.importableCount === 0 || importBusy || busy) return;
+    setImportBusy(true); setImportError("");
+    try {
+      await onImport(sourceSessionId, importPreview);
+      setSourceSessionId("");
+      setImportPreview(undefined);
+    } catch (cause) {
+      setImportPreview(undefined);
+      setImportError(cause instanceof Error ? cause.message : "无法把判断导入当前会话，请重新选择来源预览。");
+    } finally {
+      setImportBusy(false);
+    }
+  }
+
   return <section className="panel comparison-manager" aria-labelledby="comparison-manager-title">
     <div className="panel-title"><div><span className="eyebrow">判断管理</span><h2 id="comparison-manager-title">手动添加或删除比较</h2></div><span className="record-count">总计 {currentRecords.length} 条 · 本地新增 {localCount} · 导入 {importedCount}</span></div>
     <p>搜索并选择当前会话中的两个条目；可按中文标题、原名、当前排名或 Bangumi ID 查找。保存后，排名、可信度与<Term term="dynamic-forecast">动态剩余预测</Term>都会立即重算。</p>
@@ -1716,6 +1771,24 @@ function ComparisonManager({ items, history, sessionId, sessions, busy, onAdd, o
       <button className="primary-button compact" type="submit" disabled={busy || !leftSubjectId || !rightSubjectId || leftSubjectId === rightSubjectId}>{busy ? "正在重算…" : "添加比较"}</button>
     </form>
     {leftSubjectId === rightSubjectId && <small className="comparison-form-error">左右两侧不能选择同一个条目。</small>}
+    <details className="existing-session-import">
+      <summary><span><strong>导入其他会话的判断</strong><small>只复制当前作品范围中尚未导入的有效判断</small></span></summary>
+      <div className="existing-session-import-body">
+        {sourceCandidates.length === 0 ? <p>同账号下没有其他可用的{SUBJECT_TYPES[session.subjectType]}会话。</p> : <>
+          <div className="existing-session-import-controls">
+            <div className="field-group"><label htmlFor="existing-session-import-source">来源会话</label><ThemedSelect id="existing-session-import-source" value={sourceSessionId} options={sourceOptions} ariaLabel="要导入判断的来源会话" menuLabel="来源会话选项" disabled={busy || importBusy} onChange={(value) => void previewImport(value)} /></div>
+            <button className="primary-button compact" type="button" disabled={busy || importBusy || !importPreview || importPreview.importableCount === 0} onClick={() => void importComparisons()}>{importBusy ? "正在处理…" : importPreview ? `导入 ${importPreview.importableCount} 条判断` : "先选择来源"}</button>
+          </div>
+          {importPreview && <div className="existing-session-import-preview">
+            <div><span>{importPreview.crossSnapshot ? "跨快照来源" : "同快照来源"}</span><strong>{importPreview.sourceTitle}</strong><small>导入后来源和当前会话互不影响</small></div>
+            <dl><div><dt>可导入</dt><dd>{importPreview.importableCount}</dd></div><div><dt>已存在</dt><dd>{importPreview.duplicateOriginalCount}</dd></div><div><dt>重复配对</dt><dd>{importPreview.duplicatePairCount}</dd></div><div><dt>范围外</dt><dd>{importPreview.outOfScopeCount}</dd></div><div><dt>跳过/无效校准</dt><dd>{importPreview.skippedCount + importPreview.invalidCalibrationCount}</dd></div></dl>
+            {importPreview.importableCount === 0 && <Notice>该来源没有可新增的判断；已导入的根判断会自动去重。</Notice>}
+            {importPreview.crossSnapshot && <Notice tone="warning">来源属于其他收藏快照，只会复制当前会话作品范围内仍适用的判断。</Notice>}
+          </div>}
+        </>}
+        {importError && <Notice tone="error">{importError}</Notice>}
+      </div>
+    </details>
     <details className="comparison-history" open>
       <summary>本会话判断记录（{currentRecords.length}）</summary>
       {importedCount > 0 && <p className="reuse-note">导入判断已经复制到本会话，可以独立删除；来源之后变化或删除都不会影响这里。</p>}
@@ -1918,7 +1991,7 @@ function MobileRankingCards({ items, scoreLevelCount }: { items: RankedItem[]; s
     </li>)}</ol>;
 }
 
-function ResultsView({ state, sessions, username, busy, onBack, onMode, onDistribution, onExportCsv, onAddComparison, onDeleteComparison, onResync }: {
+function ResultsView({ state, sessions, username, busy, onBack, onMode, onDistribution, onExportCsv, onAddComparison, onDeleteComparison, onImportComparison, onResync }: {
   state: CompareState;
   sessions: SortingSession[];
   username: string;
@@ -1929,6 +2002,7 @@ function ResultsView({ state, sessions, username, busy, onBack, onMode, onDistri
   onExportCsv: (result: RankedItem[]) => void;
   onAddComparison: (leftSubjectId: number, rightSubjectId: number, outcome: Exclude<ComparisonOutcome, "skip">) => Promise<void>;
   onDeleteComparison: (recordId: string) => Promise<void>;
+  onImportComparison: (sourceSessionId: string, preview: ComparisonImportPreview) => Promise<void>;
   onResync: () => void;
 }) {
   const comparisons = toRankingComparisons(state.history);
@@ -1947,7 +2021,7 @@ function ResultsView({ state, sessions, username, busy, onBack, onMode, onDistri
   return <>
     <header className="page-header results-header"><div><span className="eyebrow">排序结果 · {BUDGET_MODE_COPY[budgetMode].label}模式 · <Term term="score-bucket">{scoreLevelCount} 档</Term></span><h1>你的偏好序列</h1><p>{result.length} 个{SUBJECT_TYPES[state.session.subjectType]}条目 · 当前输出 <Term term="score-bucket">{scoreLevelCount} 档评分</Term> · <Term term="prior">{priorCopy}</Term></p><p>总有效证据 {effectiveEvidence.length} 条 · 本会话新回答 {newEvidence} 条 · 导入证据 {importedEvidence} 条</p></div><div className="header-actions"><InferenceModeSelect id="result-budget-mode" value={budgetMode} busy={busy} onChange={onMode} /><button className="outline-button" onClick={onBack}>继续比较</button><button className="primary-button compact" onClick={() => onExportCsv(result)}>导出 CSV</button></div></header>
     <section className="result-summary"><article className="panel"><div className="panel-title"><div><span className="eyebrow"><Term term="score-distribution">{scoreLevelCount === DEFAULT_SCORE_LEVELS ? "评分分布对比" : "评分分布"}</Term></span><h2>{scoreLevelCount === DEFAULT_SCORE_LEVELS ? "原评分 → 新评分" : `原评分与 ${scoreLevelCount} 档新评分`}</h2></div><div className="distribution-controls"><ScoreLevelSelect id="result-score-level-count" className="header-select" compact value={scoreLevelCount} disabled={busy} onChange={(levelCount) => void onDistribution(distributionWithLevelCount(state.session.distribution, levelCount))} /><ThemedSelect id="result-distribution-preset" value={state.session.distribution.preset} options={distributionPresetOptions(scoreLevelCount)} ariaLabel="评分分布预设" menuLabel="评分分布预设选项" compact alignMenu="end" triggerClassName="header-select" disabled={busy} onChange={(preset) => void onDistribution(distributionConfig(preset, scoreLevelCount, state.session.distribution.weights))} /></div></div>{state.session.distribution.preset === "custom" && <CustomDistributionEditor key={`${state.session.id}:${scoreLevelCount}`} weights={state.session.distribution.weights} busy={busy} onApply={(weights) => onDistribution(distributionConfig("custom", scoreLevelCount, weights))} />}{scoreLevelCount === DEFAULT_SCORE_LEVELS ? <><TenLevelComparisonHistogram items={state.items} result={result} /><div className="chart-legend"><span><i className="old" />原评分</span><span><i className="new" />新评分</span></div></> : <div className="distribution-charts"><div className="distribution-chart"><strong>原评分 · 1–10</strong><OriginalScoreHistogram items={state.items} /></div><div className="distribution-chart"><strong>新评分 · 1–{scoreLevelCount}</strong><NewScoreHistogram result={result} levelCount={scoreLevelCount} /></div></div>}</article><article className="summary-stat"><span><Term term="cross-two-buckets">预计跨两档作品</Term></span><strong>{crossTwoBucketValue(diagnostics)}</strong><small><Term term="posterior-interval">{crossTwoBucketInterval(diagnostics)}</Term></small><div className="summary-forecast"><span><Term term="dynamic-forecast">动态剩余预测</Term></span><b>{forecastRange(diagnostics)}</b><small><StoppingCriterionDetail diagnostics={diagnostics} /></small></div><hr /><span><Term term="maximum-displacement">最坏偏移</Term></span><strong>{maxBucketDisplacementValue(diagnostics)}</strong><small>{maxBucketDisplacementInterval(diagnostics)}；仅作尾部诊断，停止条件允许最多 10% 的作品<Term term="cross-two-buckets">跨两档</Term>。{diagnostics?.calibration.completed ? <><Term term="calibration-repeat">复问</Term> {diagnostics.calibration.consistent}/{diagnostics.calibration.completed} 次一致，<Term term="posterior">后验</Term> {percent(diagnostics.calibration.posteriorMean)}（仅作诊断）</> : "尚无校准复问；区间仅代表模型内近似"}</small></article></section>
-    <ComparisonManager key={state.session.id} items={result} history={state.history} sessionId={state.session.id} sessions={sessions} busy={busy} onAdd={onAddComparison} onDelete={onDeleteComparison} />
+    <ComparisonManager key={state.session.id} items={result} history={state.history} session={state.session} sessions={sessions} busy={busy} onAdd={onAddComparison} onDelete={onDeleteComparison} onImport={onImportComparison} />
     <RatingWriteDangerZone
       key={`${state.session.id}:${state.model.version}:${scoreLevelCount}:${state.session.distribution.preset}:${state.session.distribution.weights.join(",")}`}
       username={username}
@@ -2303,6 +2377,45 @@ export default function ResorterApp() {
     finally { setBusy(false); }
   }
 
+  async function importComparisonsIntoCurrent(
+    sourceSessionId: string,
+    preview: ComparisonImportPreview,
+  ) {
+    if (!compare || busy) return;
+    if (!preview.plannedRecords || preview.plannedRecords.length !== preview.importableCount) {
+      throw new Error("导入预览已失效，请重新选择来源会话。");
+    }
+    setBusy(true); setGlobalError("");
+    try {
+      const current = compare;
+      const nextHistory = [...current.history, ...preview.plannedRecords];
+      const calculated = await calculate(
+        current.session,
+        current.items,
+        nextHistory,
+        current.model,
+        "RECOMPUTE",
+        current.session.modelVersion + 1,
+      );
+      await commitComparisonImport(
+        current.session.id,
+        sourceSessionId,
+        current.session.modelVersion,
+        preview.sourceVersion,
+        calculated.model,
+        preview,
+      );
+      const bundle = await getSessionBundle(current.session.id);
+      if (!bundle) throw new Error("会话保存失败。");
+      setCompare({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
+      setSessions(await listSessions(current.session.profileId));
+    } catch (cause) {
+      throw cause instanceof Error ? cause : new Error("无法导入其他会话的判断。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function removeComparison(recordId: string) {
     if (!compare || busy) return;
     setBusy(true); setGlobalError("");
@@ -2362,7 +2475,7 @@ export default function ResorterApp() {
     if (!snapshot || !profile) return null;
     if (view === "library") return <LibraryView snapshot={snapshot} items={items} sessions={sessions} legacySessionIds={projects.find((entry) => entry.profile.id === profile.id)?.legacySessionIds ?? []} onStart={startSession} onResume={openSession} onUpgradeSession={upgradeSession} onDeriveSession={deriveSession} onDeleteSession={removeSession} onSyncAgain={() => setResyncOpen(true)} onSwitchAccount={() => navigate("connect")} />;
     if (view === "compare" && compare) return <CompareView state={compare} busy={busy} scoresVisible={scoresVisible} onToggleScores={() => setScoresVisible((value) => !value)} onMode={changeBudgetMode} onAnswer={answer} onUndo={undo} onPause={() => navigate("library")} onResults={() => navigate("results")} />;
-    if (view === "results" && compare) return <ResultsView state={compare} sessions={sessions} username={snapshot.username} busy={busy} onBack={() => navigate("compare")} onMode={changeBudgetMode} onDistribution={changeDistribution} onExportCsv={exportCsv} onAddComparison={addManualComparison} onDeleteComparison={removeComparison} onResync={() => setResyncOpen(true)} />;
+    if (view === "results" && compare) return <ResultsView state={compare} sessions={sessions} username={snapshot.username} busy={busy} onBack={() => navigate("compare")} onMode={changeBudgetMode} onDistribution={changeDistribution} onExportCsv={exportCsv} onAddComparison={addManualComparison} onDeleteComparison={removeComparison} onImportComparison={importComparisonsIntoCurrent} onResync={() => setResyncOpen(true)} />;
     if (view === "backup") return <BackupView snapshot={snapshot} items={items} profile={profile} sessions={sessions} storage={storeStatus} importHistory={importHistory} onImported={async (result) => { setLastBackupImport(result); await loadSnapshot(result.snapshot, "library"); }} />;
     if (view === "compare") return <SessionPicker purpose="compare" sessions={sessions} currentSnapshotId={snapshot.id} busy={busy} onResume={openSession} onBack={() => navigate("library")} />;
     if (view === "results") return <SessionPicker purpose="results" sessions={sessions} currentSnapshotId={snapshot.id} busy={busy} onResume={(sessionId) => openSession(sessionId, "results")} onBack={() => navigate("library")} />;

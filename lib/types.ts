@@ -208,6 +208,13 @@ export interface ComparisonImportPreview {
   outOfScopeCount: number;
   skippedCount: number;
   invalidCalibrationCount: number;
+  /**
+   * Materialized records reserved by an existing-session preview. These are
+   * in-memory only: they let the ranking worker calculate the exact post-
+   * import model before the atomic commit, and are never written by preview.
+   */
+  plannedBatch?: ComparisonImportBatch;
+  plannedRecords?: ComparisonRecord[];
 }
 
 export interface ComparisonImportResult {

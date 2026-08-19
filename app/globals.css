@@ -499,6 +499,31 @@ kbd { padding: 2px 5px; border: 1px solid rgba(255,255,255,.35); border-radius: 
 .item-picker-option small { margin: 4px 0 0 40px; display: block; overflow: hidden; color: var(--muted); font-size: 9px; font-weight: 400; text-overflow: ellipsis; white-space: nowrap; }
 .item-picker-empty { padding: 22px 10px; color: var(--muted); text-align: center; font-size: 10px; font-weight: 400; }
 .comparison-form-error { display: block; margin-top: 7px; color: var(--danger-accent); font-size: 9px; }
+.existing-session-import { margin-top: 18px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-faint); }
+.existing-session-import > summary { min-height: 48px; padding: 9px 12px; display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--text-label); cursor: pointer; list-style: none; }
+.existing-session-import > summary::-webkit-details-marker { display: none; }
+.existing-session-import > summary::after { content: "+"; color: var(--teal); font-size: 18px; }
+.existing-session-import[open] > summary::after { content: "−"; }
+.existing-session-import > summary span { min-width: 0; display: grid; gap: 3px; }
+.existing-session-import > summary strong { font-size: 11px; }
+.existing-session-import > summary small { color: var(--muted); font-size: 9px; font-weight: 400; }
+.existing-session-import-body { padding: 0 12px 13px; border-top: 1px solid var(--line); }
+.existing-session-import-body > p { margin: 12px 0 2px; color: var(--muted); font-size: 10px; }
+.existing-session-import-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: end; padding-top: 12px; }
+.existing-session-import-controls .field-group { min-width: 0; margin: 0; display: grid; gap: 6px; }
+.existing-session-import-controls label { color: var(--text-label); font-size: 10px; font-weight: 700; }
+.existing-session-import-controls .primary-button { min-width: 138px; }
+.existing-session-import-preview { margin-top: 11px; padding: 10px; display: grid; gap: 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel); }
+.existing-session-import-preview > div:first-child { display: grid; gap: 3px; }
+.existing-session-import-preview > div:first-child span { color: var(--teal); font-size: 8px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.existing-session-import-preview > div:first-child strong { color: var(--ink); font-size: 11px; }
+.existing-session-import-preview > div:first-child small { color: var(--muted); font-size: 9px; }
+.existing-session-import-preview dl { margin: 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: 6px; background: var(--surface-soft); }
+.existing-session-import-preview dl > div { min-width: 0; padding: 7px 5px; border-right: 1px solid var(--line); text-align: center; }
+.existing-session-import-preview dl > div:last-child { border-right: 0; }
+.existing-session-import-preview dt { color: var(--muted); font-size: 8px; }
+.existing-session-import-preview dd { margin: 3px 0 0; color: var(--ink); font-size: 12px; font-weight: 800; }
+.existing-session-import-preview .notice { margin: 0; }
 .comparison-history { margin-top: 18px; border-top: 1px solid var(--line); }
 .comparison-history summary { padding: 14px 0 10px; color: var(--text-label); cursor: pointer; font-size: 11px; font-weight: 700; }
 .reuse-note { margin: 0 0 10px; color: var(--muted); font-size: 9px; }
@@ -837,6 +862,12 @@ kbd { padding: 2px 5px; border: 1px solid rgba(255,255,255,.35); border-radius: 
   .session-picker-copy strong { font-size: 12px; }
   .session-picker-copy small { font-size: 10px; }
   .session-picker-back { width: 100%; min-height: 44px; margin-top: 18px; }
+  .existing-session-import-controls { grid-template-columns: 1fr; }
+  .existing-session-import-controls .primary-button { width: 100%; min-height: 44px; }
+  .existing-session-import-preview dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .existing-session-import-preview dl > div { border-bottom: 1px solid var(--line); }
+  .existing-session-import-preview dl > div:nth-child(2n) { border-right: 0; }
+  .existing-session-import-preview dl > div:last-child { grid-column: 1 / -1; border-bottom: 0; }
   .tag-filter-options { grid-template-columns: 1fr; }
   .scope-modal-backdrop { padding: 12px; place-items: start center; }
   .scope-modal { max-height: calc(100vh - 24px); padding: 18px; }
