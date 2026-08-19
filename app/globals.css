@@ -230,7 +230,8 @@ input:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgba(45,102,98,.0
 .metric-card strong { margin: 5px 0; font: 700 30px Georgia, serif; }
 .metric-card small { color: var(--text-faint); font-size: 10px; }
 .metric-card.selected { border-color: var(--teal); background: var(--panel); box-shadow: inset 0 3px 0 var(--teal); }
-.dashboard-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(310px, .65fr); gap: 18px; }
+.dashboard-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(310px, .65fr); align-items: start; gap: 18px; }
+.distribution-panel { grid-column: 1; grid-row: 1; }
 .panel { padding: 22px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); box-shadow: 0 8px 24px rgba(0,0,0,.08); }
 .panel-title { display: flex; justify-content: space-between; align-items: flex-start; gap: 15px; }
 .panel-title h2 { margin-bottom: 0; }
@@ -252,7 +253,22 @@ input:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgba(45,102,98,.0
 .bar-old { left: 8%; background: rgba(45,102,98,.45); }
 .bar-new { right: 8%; background: var(--accent); }
 .single-series .bar-old, .single-series .bar-new { left: 15%; right: auto; width: 70%; }
-.start-panel { display: flex; flex-direction: column; }
+.start-panel { grid-column: 2; grid-row: 1; display: flex; flex-direction: column; }
+.start-action { position: sticky; top: 18px; z-index: 3; margin: 0 0 16px; padding: 14px; display: grid; gap: 12px; border: 1px solid var(--teal); border-radius: 10px; background: var(--panel); box-shadow: 0 10px 24px rgba(0,0,0,.11); }
+.start-action-copy span, .start-action-copy strong, .start-action-copy small { display: block; }
+.start-action-copy span { color: var(--accent-dark); font-size: 9px; font-weight: 800; letter-spacing: .1em; }
+.start-action-copy strong { margin: 4px 0 5px; font: 700 22px/1.15 Georgia, "Songti SC", serif; }
+.start-action-copy small { color: var(--muted); font-size: 9px; line-height: 1.5; }
+.start-action .primary-button { width: 100%; margin-top: 0; }
+.start-settings { border: 1px solid var(--line); border-radius: 9px; background: var(--surface-soft); }
+.start-settings > summary { min-height: 58px; padding: 10px 13px; display: flex; align-items: center; justify-content: space-between; gap: 12px; cursor: pointer; list-style: none; }
+.start-settings > summary::-webkit-details-marker { display: none; }
+.start-settings > summary span { min-width: 0; display: grid; gap: 3px; }
+.start-settings > summary strong { color: var(--ink); font-size: 11px; }
+.start-settings > summary small { color: var(--muted); font-size: 9px; line-height: 1.4; }
+.start-settings > summary b { flex: 0 0 auto; color: var(--teal); font-size: 16px; font-weight: 400; transition: transform .18s ease; }
+.start-settings[open] > summary b { transform: rotate(180deg); }
+.start-settings-body { padding: 16px 13px 0; border-top: 1px solid var(--line); }
 .field-group { margin: 4px 0 16px; display: grid; gap: 8px; }
 .field-help { color: var(--muted); font-size: 9px; line-height: 1.5; }
 .weight-editor { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; }
@@ -275,7 +291,6 @@ input:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgba(45,102,98,.0
 .tag-filter-options button small { flex: 0 0 auto; color: var(--muted); font-size: 9px; }
 .tag-filter-empty { grid-column: 1 / -1; padding: 16px 8px; color: var(--muted); text-align: center; font-size: 10px; }
 .tag-filter-summary { color: var(--teal); font-size: 10px; font-weight: 700; }
-.start-panel .primary-button { margin-top: auto; }
 .sessions-section { margin-top: 26px; }
 .section-title h2 { margin: 5px 0 12px; font-size: 24px; }
 .session-list { display: grid; border-top: 1px solid var(--line); }
@@ -616,7 +631,9 @@ kbd { padding: 2px 5px; border: 1px solid rgba(255,255,255,.35); border-radius: 
   .connect-intro { min-height: 530px; }
   .connect-panel { padding: 55px 24px; }
   .dashboard-grid { grid-template-columns: 1fr; }
-  .start-panel { min-height: 370px; }
+  .start-panel { grid-column: 1; grid-row: 1; min-height: 0; }
+  .distribution-panel { grid-column: 1; grid-row: 2; }
+  .start-action { position: static; }
   .principles-layout { grid-template-columns: minmax(0, 760px); padding-top: 42px; }
   .principles-toc { display: none; }
   .principles-toc-mobile { margin: 28px 0 0; display: block; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-soft); font-family: Arial, "PingFang SC", sans-serif; }

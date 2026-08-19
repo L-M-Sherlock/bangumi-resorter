@@ -1,6 +1,12 @@
 import { expect, test, type Page } from "@playwright/test";
 
+async function openNewSessionSettings(page: Page) {
+  const settings = page.locator(".start-settings");
+  if (await settings.getAttribute("open") === null) await settings.locator(":scope > summary").click();
+}
+
 async function chooseHistorySource(page: Page, optionIndex: number) {
+  await openNewSessionSettings(page);
   const root = page.locator('[data-themed-select="history-source"]');
   await page.locator("#history-source").click();
   await root.getByRole("option").nth(optionIndex).click();
@@ -51,6 +57,7 @@ test("new sessions preview and materialize one cross-snapshot history source", a
   await page.locator("html[data-resorter-ready='true']").waitFor();
   await page.getByRole("button", { name: "先用演示数据体验" }).click();
 
+  await openNewSessionSettings(page);
   await expect(page.locator("#history-source")).toHaveAttribute("data-value", "");
   await page.locator("#history-source").click();
   await expect(page.locator('[data-themed-select="history-source"]').getByRole("option"))

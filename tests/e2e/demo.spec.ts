@@ -19,6 +19,11 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await expect(landingStar).toHaveAttribute("target", "_blank");
   await page.getByRole("button", { name: "先用演示数据体验" }).click();
   await expect(page.getByRole("heading", { name: /demo 的已评分收藏/ })).toBeVisible();
+  const startButton = page.getByRole("button", { name: /开始快速比较 · 动态停止/ });
+  await expect(startButton).toBeVisible();
+  expect(await startButton.evaluate((button) => button.getBoundingClientRect().bottom <= innerHeight)).toBe(true);
+  await expect(page.locator(".start-settings")).not.toHaveAttribute("open", "");
+  await page.locator(".start-settings > summary").click();
   await expect(page.getByRole("link", { name: "GitHub Star" })).toHaveAttribute("href", "https://github.com/L-M-Sherlock/bangumi-resorter");
   await expect(page.getByRole("link", { name: /原理/ })).toHaveAttribute("href", "/principles");
   await expect(page.getByText(/强依赖原评分.*低频探索全局/)).toBeVisible();
@@ -27,6 +32,11 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await expect(page.getByText(/疲劳安全上限/)).toHaveCount(0);
   await expect(page.locator(".distribution-panel .distribution-stats")).toHaveCount(1);
   await expect(page.locator(".distribution-panel .distribution-stats")).toContainText(/平均值 .*标准差/);
+  expect(await page.locator(".dashboard-grid").evaluate((grid) => getComputedStyle(grid).alignItems)).toBe("start");
+  expect(await page.locator(".distribution-panel").evaluate((panel) => {
+    const chart = panel.querySelector(".histogram");
+    return chart ? panel.getBoundingClientRect().bottom - chart.getBoundingClientRect().bottom : Infinity;
+  })).toBeLessThan(30);
   await expectThemedSelect(page, "score-level-count", "10");
   await page.locator("#distribution-preset").click();
   await expect(page.locator('[data-themed-select="distribution-preset"]').getByRole("option")).toHaveText(["均匀 10 档", "保持原分布", "高分辨率尾部✓", "反 J 分布", "自定义权重"]);

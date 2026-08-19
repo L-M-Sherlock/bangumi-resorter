@@ -14,6 +14,11 @@ async function expectNoHorizontalOverflow(page: Page) {
   expect(metrics.scrollWidth).toBeLessThanOrEqual(metrics.clientWidth);
 }
 
+async function openNewSessionSettings(page: Page) {
+  const settings = page.locator(".start-settings");
+  if (await settings.getAttribute("open") === null) await settings.locator(":scope > summary").click();
+}
+
 async function themedSelectAppearance(page: Page, id: string) {
   return page.locator(`[data-themed-select="${id}"]`).evaluate((root) => {
     const triggerElement = root.querySelector<HTMLElement>(".themed-select-trigger")!;
@@ -94,6 +99,7 @@ test.describe("移动端 UI/UX", () => {
     await page.getByRole("button", { name: "先用演示数据体验" }).click();
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
     await expect(page.locator("select")).toHaveCount(0);
+    await openNewSessionSettings(page);
 
     for (const id of ["comparison-budget", "score-level-count", "distribution-preset", "history-source"]) {
       await page.locator(`#${id}`).click();
@@ -159,6 +165,16 @@ test.describe("移动端 UI/UX", () => {
     await page.locator("html[data-resorter-ready='true']").waitFor();
     await page.getByRole("button", { name: "先用演示数据体验" }).click();
     await expect(page.getByRole("heading", { name: /demo 的已评分收藏/ })).toBeVisible();
+    const overviewEntry = await page.evaluate(() => ({
+      startTop: document.querySelector<HTMLElement>(".start-panel")?.getBoundingClientRect().top ?? Infinity,
+      distributionTop: document.querySelector<HTMLElement>(".distribution-panel")?.getBoundingClientRect().top ?? -Infinity,
+      ctaBottom: document.querySelector<HTMLElement>(".start-action .primary-button")?.getBoundingClientRect().bottom ?? Infinity,
+      settingsOpen: document.querySelector<HTMLDetailsElement>(".start-settings")?.open ?? true,
+      viewportHeight: innerHeight,
+    }));
+    expect(overviewEntry.startTop).toBeLessThan(overviewEntry.distributionTop);
+    expect(overviewEntry.ctaBottom).toBeLessThanOrEqual(overviewEntry.viewportHeight);
+    expect(overviewEntry.settingsOpen).toBe(false);
 
     await page.getByRole("button", { name: "两两比较", exact: true }).click();
     await expect(page.getByRole("heading", { name: "还没有排序会话" })).toBeVisible();
@@ -267,6 +283,7 @@ test.describe("移动端 UI/UX", () => {
     await page.getByRole("button", { name: "继续比较" }).click();
     await page.getByRole("button", { name: "暂停并返回收藏" }).click();
     await expect(page.getByRole("heading", { name: /demo 的已评分收藏/ })).toBeVisible();
+    await openNewSessionSettings(page);
     await page.locator("#history-source").click();
     const historySourceOptions = page.locator('[data-themed-select="history-source"]').getByRole("option");
     await expect(historySourceOptions).toHaveCount(2);
