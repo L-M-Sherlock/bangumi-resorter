@@ -883,7 +883,6 @@ function contractionRiskCurve(
   distribution: DistributionConfig,
   truth: Float64Array,
   forecastSamples: Float64Array[],
-  decisionSampleCount: number,
 ) {
   const points: Array<{ scale: number; risk: number }> = [];
   let monotoneRisk = Number.POSITIVE_INFINITY;
@@ -904,12 +903,12 @@ function contractionRiskCurve(
       }
       return output;
     });
-    const coverageTargetStability = assignmentMetrics(
+    const forecastMetrics = assignmentMetrics(
       items, referenceRates, contracted, distribution,
-    ).coverageTargetStability;
+    );
     const conservativeStability = wilsonInterval(
-      coverageTargetStability * decisionSampleCount,
-      decisionSampleCount,
+      forecastMetrics.coverageTargetStableSamples,
+      contracted.length,
     ).low;
     const risk = decisionRiskRatio(conservativeStability);
     monotoneRisk = Math.min(monotoneRisk, risk);
@@ -964,7 +963,7 @@ function summarizeStoppingTimes(
 ): StoppingForecast {
   const rolloutCount = stoppingTimes.length;
   const base = {
-    method: "posterior-contraction-mc-v5" as const,
+    method: "posterior-contraction-mc-v6" as const,
     rolloutCount,
     nextCheckpoint,
     projectionHorizon,
@@ -1062,7 +1061,12 @@ export function forecastStoppingTimeSimulation(
   const random = seededRandom(hash(`${options.randomSeed}:${diagnostics.evidenceCount}:coverage-90-adjacent:forecast`));
   const normal = normalGenerator(random);
   const stoppingTimes: number[] = [];
-  const forecastSampleCount = Math.min(12, fit.posteriorSamples.length);
+  // The stopping decision uses a Wilson lower bound. Twelve all-successful
+  // samples still have an 81.6% lower bound and therefore cannot support the
+  // 90% target. Keep 64 representative samples for a useful approximation of
+  // the active posterior while avoiding the full cost of refined 2,048-sample
+  // fits near the stopping boundary.
+  const forecastSampleCount = Math.min(64, fit.posteriorSamples.length);
   const forecastSamples = Array.from({ length: forecastSampleCount }, (_, index) =>
     fit.posteriorSamples[Math.floor(index * fit.posteriorSamples.length / forecastSampleCount)]);
   const minimumAdditional = Math.max(1, diagnostics.evidenceRequired - diagnostics.evidenceCount);
@@ -1070,7 +1074,7 @@ export function forecastStoppingTimeSimulation(
   for (let rollout = 0; rollout < rolloutCount; rollout += 1) {
     const truth = fit.posteriorSamples[Math.floor(random() * fit.posteriorSamples.length)];
     const curve = contractionRiskCurve(
-      items, fit, distribution, truth, forecastSamples, diagnostics.sampleCount,
+      items, fit, distribution, truth, forecastSamples,
     );
     const efficiency = baseEfficiency
       * Math.exp(0.55 * normal() - 0.5 * 0.55 ** 2);

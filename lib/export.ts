@@ -174,7 +174,7 @@ function validateModelDiagnostics(value: unknown, path: string) {
     const forecast = requiredObject(diagnostics.forecast, `${path}.forecast`);
     if (forecast.method !== undefined) {
       enumString(forecast.method, `${path}.forecast.method`, [
-        "posterior-contraction-mc-v1", "posterior-contraction-mc-v2", "posterior-contraction-mc-v3", "posterior-contraction-mc-v4", "posterior-contraction-mc-v5",
+        "posterior-contraction-mc-v1", "posterior-contraction-mc-v2", "posterior-contraction-mc-v3", "posterior-contraction-mc-v4", "posterior-contraction-mc-v5", "posterior-contraction-mc-v6",
       ]);
     }
     if (forecast.status !== undefined) enumString(forecast.status, `${path}.forecast.status`, ["ready", "forecast", "uncertain", "limit"]);

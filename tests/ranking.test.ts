@@ -338,7 +338,7 @@ describe("Bradley–Terry ranking engine", () => {
     const evidenceLimitedForecast = forecastStoppingTime(rated, adjacentFit, uniform, evidence.slice(0, 9), "session", evidenceLimited, {
       projectionHorizon: 100, randomSeed: 12, forecastEfficiency: 16,
     });
-    expect(evidenceLimitedForecast.method).toBe("posterior-contraction-mc-v5");
+    expect(evidenceLimitedForecast.method).toBe("posterior-contraction-mc-v6");
     expect(evidenceLimitedForecast.medianAdditional).toBe(1);
 
     const globallyStable = analyzeRanking(rated, {
@@ -433,6 +433,35 @@ describe("Bradley–Terry ranking engine", () => {
     expect(forecastStoppingTime(rated, fit, uniform, entries, "session", diagnostics, {
       projectionHorizon: 5, randomSeed: 9,
     })).toMatchObject({ status: "ready", medianAdditional: 0, probabilityWithin20: 1, projectionHorizon: 5 });
+  });
+
+  it("does not inflate a favorable forecast subsample to the full posterior sample count", () => {
+    const rated = Array.from({ length: 20 }, (_, index) => ({ subjectId: index + 1, rate: 7 }));
+    const stable = new Float64Array(rated.map((_, index) => rated.length - index));
+    const unstable = new Float64Array(stable).reverse();
+    const formerlySelected = new Set(Array.from({ length: 12 }, (_, index) =>
+      Math.floor(index * 128 / 12)));
+    const posteriorSamples = Array.from({ length: 128 }, (_, index) =>
+      (formerlySelected.has(index) ? stable : unstable).slice());
+    const fit = {
+      abilities: Object.fromEntries(rated.map((entry, index) => [entry.subjectId, stable[index]])),
+      uncertainty: Object.fromEntries(rated.map((entry) => [entry.subjectId, 1])),
+      meanUncertainty: 1,
+      converged: true,
+      iterations: 1,
+      acceptedComparisons: 20,
+      posteriorSamples,
+    };
+    const entries = Array.from({ length: 20 }, (_, index) =>
+      history(`forecast-${index}`, 1 + index % 19, 2 + index % 19, "left", index));
+    const diagnostics = analyzeRanking(rated, fit, uniform, entries, "session");
+    expect(diagnostics.ready).toBe(false);
+    const forecast = forecastStoppingTime(rated, fit, uniform, entries, "session", diagnostics, {
+      projectionHorizon: 100, randomSeed: 17, forecastEfficiency: 16,
+    });
+    expect(forecast.method).toBe("posterior-contraction-mc-v6");
+    expect(forecast.lowerAdditional).not.toBe(1);
+    expect(forecast.medianAdditional).not.toBe(1);
   });
 
   it("keeps an early stopping forecast explicitly uncertain", () => {
