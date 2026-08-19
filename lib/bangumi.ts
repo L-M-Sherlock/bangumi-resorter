@@ -11,18 +11,18 @@ const API_BASE = "https://api.bgm.tv/v0";
 
 interface BangumiUser {
   username: string;
-  nickname?: string;
-  avatar?: { large?: string; medium?: string; small?: string };
+  nickname?: string | null;
+  avatar?: { large?: string; medium?: string; small?: string } | null;
 }
 
 interface BangumiSubject {
   id: number;
   type: number;
   name: string;
-  name_cn?: string;
-  date?: string;
-  platform?: string;
-  images?: SubjectImages;
+  name_cn?: string | null;
+  date?: string | null;
+  platform?: string | null;
+  images?: SubjectImages | null;
 }
 
 interface BangumiCollection {
@@ -31,9 +31,9 @@ interface BangumiCollection {
   rate: number;
   type: number;
   private: boolean;
-  tags?: string[];
-  updated_at?: string;
-  subject?: BangumiSubject;
+  tags?: string[] | null;
+  updated_at?: string | null;
+  subject?: BangumiSubject | null;
 }
 
 interface CollectionPage {
@@ -336,7 +336,7 @@ export async function writeBangumiRatings(
   };
 }
 
-function imageOf(images?: SubjectImages) {
+function imageOf(images?: SubjectImages | null) {
   const image = images?.large ?? images?.common ?? images?.medium ?? images?.grid ?? images?.small;
   return image?.replace(/^http:\/\//, "https://");
 }
@@ -363,12 +363,12 @@ function normalize(snapshotId: string, raw: BangumiCollection, subject: BangumiS
     rate: raw.rate,
     name: subject.name || `条目 #${raw.subject_id}`,
     nameCn: subject.name_cn ?? "",
-    date: subject.date,
-    platform: subject.platform,
+    date: subject.date ?? undefined,
+    platform: subject.platform ?? undefined,
     image: imageOf(subject.images),
     private: raw.private,
     tags: raw.tags ?? [],
-    updatedAt: raw.updated_at,
+    updatedAt: raw.updated_at ?? undefined,
   };
 }
 
@@ -416,7 +416,7 @@ export async function syncBangumi(
   return {
     profile: {
       username: user.username,
-      nickname: user.nickname,
+      nickname: user.nickname ?? undefined,
       avatar: (user.avatar?.large ?? user.avatar?.medium ?? user.avatar?.small)?.replace(/^http:\/\//, "https://"),
     },
     items,

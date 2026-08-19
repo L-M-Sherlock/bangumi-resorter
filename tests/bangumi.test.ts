@@ -36,6 +36,28 @@ describe("Bangumi read-only sync", () => {
     expect(progress).toContain("details");
   });
 
+  it("normalizes nullable Bangumi profile and subject metadata", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith("/users/alice")) return Response.json({ username: "alice", nickname: null, avatar: null });
+      if (url.includes("/collections")) return Response.json({
+        total: 1, limit: 50, offset: 0,
+        data: [{
+          subject_id: 12, subject_type: 1, rate: 8, type: 3, private: false, tags: null, updated_at: null,
+          subject: { id: 12, type: 1, name: "No metadata", name_cn: null, date: null, platform: null, images: null },
+        }],
+      });
+      throw new Error(`Unexpected URL ${url}`);
+    }));
+
+    const result = await syncBangumi("alice", "", "snapshot");
+    expect(result.profile).toEqual({ username: "alice", nickname: undefined, avatar: undefined });
+    expect(result.items[0]).toMatchObject({
+      nameCn: "", date: undefined, platform: undefined, image: undefined,
+      tags: [], updatedAt: undefined,
+    });
+  });
+
   it("rejects a token that belongs to another user before reading collections", async () => {
     const fetchMock = vi.fn<(input: string | URL | Request, init?: RequestInit) => Promise<Response>>()
       .mockResolvedValue(Response.json({ username: "bob" }));

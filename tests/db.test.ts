@@ -4,11 +4,17 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { createDemoItems } from "../lib/demo";
 import { fitModel, toModelState } from "../lib/ranking/engine";
 import {
-  commitComparisonDeletion, commitComparisonImport, commitResponse, commitSessionBudgetMode, commitSessionDistribution, createSession, db, deleteSession, deriveSessionWithTagFilter, exportProject, getSessionBundle, importProject,
-  initializeModel, lastActiveResponse, previewComparisonImport, previewSessionTagDerivation, previewSessionUpgrade, saveSnapshot, upgradeSessionToSnapshot,
+  commitBackupImport, commitComparisonDeletion, commitComparisonImport, commitLegacyCloneDeletion, commitResponse, commitSessionBudgetMode, commitSessionDistribution, createSession, db, deleteSession, deriveSessionWithTagFilter, exportProject, getActiveSnapshot, getSessionBundle,
+  initializeModel, lastActiveResponse, listBackupImportHistory, listLocalProjects, previewBackupImport, previewComparisonImport, previewLegacyCloneDeletion, previewSessionTagDerivation, previewSessionUpgrade, saveSnapshot, setActiveSnapshot, upgradeSessionToSnapshot,
   ResorterDatabase,
 } from "../lib/db";
-import type { ComparisonRecord, DistributionConfig, ExportV1, ModelState, SessionItem, SortingSession } from "../lib/types";
+import { readBackup, validateBackupPayload } from "../lib/export";
+import type { BackupImportAudit, ComparisonRecord, DistributionConfig, ExportV1, ModelState, SessionItem, SortingSession, ValidatedBackup } from "../lib/types";
+
+function validatedBackup(payload: ExportV1, digest = crypto.randomUUID()): ValidatedBackup {
+  const validated = validateBackupPayload(structuredClone(payload));
+  return { ...validated, digest, fileName: "backup.json", byteSize: JSON.stringify(payload).length };
+}
 
 function legacyProjectFixture(prefix: string) {
   const profileId = `${prefix}-profile`;
@@ -83,6 +89,129 @@ function legacyProjectFixture(prefix: string) {
   }));
   return { profile, snapshot, items, sessions, sessionItems, comparisons, models };
 }
+
+function exportFixturePayload(prefix: string): ExportV1 {
+  const fixture = legacyProjectFixture(prefix);
+  return {
+    schemaVersion: 1,
+    appVersion: "0.16.0",
+    exportedAt: new Date(10).toISOString(),
+    profile: fixture.profile,
+    snapshots: [fixture.snapshot],
+    items: fixture.items,
+    sessions: fixture.sessions,
+    sessionItems: fixture.sessionItems,
+    comparisons: fixture.comparisons,
+    models: fixture.models,
+  };
+}
+
+function retargetBackupAccount(payload: ExportV1, username: string): ExportV1 {
+  const copy = structuredClone(payload);
+  const profileId = username.toLowerCase();
+  copy.profile = { ...copy.profile, id: profileId, username };
+  copy.snapshots = copy.snapshots.map((entry) => ({ ...entry, profileId, username }));
+  copy.sessions = copy.sessions.map((entry) => ({ ...entry, profileId }));
+  copy.comparisons = copy.comparisons.map((entry) => ({ ...entry, profileId }));
+  copy.importBatches = copy.importBatches?.map((entry) => ({ ...entry, profileId }));
+  return copy;
+}
+
+function legacyMigrationAudit(profileId: string, username: string, snapshotIds: string[], sessionIds: string[]): BackupImportAudit {
+  return {
+    id: crypto.randomUUID(), profileId, mode: "legacy-clone-migration", sourceUsername: username,
+    createdAt: new Date().toISOString(), selectedSessionIds: [], dependencySessionIds: [],
+    importedSnapshotIds: snapshotIds, importedSessionIds: sessionIds, importedComparisonIds: [],
+    importedBatchIds: [], importedModelSessionIds: [], reusedSessionIds: [], conflictSessionIds: [],
+    importedComparisonCount: 0, reusedSessionCount: 0, conflictSessionCount: 0,
+    warnings: [], idMappings: [], sessionFingerprints: [], legacyCloneProfileIds: [],
+    legacySnapshotIds: snapshotIds, legacySessionIds: sessionIds,
+  };
+}
+
+describe("ExportV1 validation", () => {
+  it("rejects malformed structure, duplicate IDs, and broken required references", () => {
+    const payload = exportFixturePayload("validation");
+    expect(() => validateBackupPayload({ ...payload, schemaVersion: 2 })).toThrow(/版本/);
+    const missing = structuredClone(payload) as Partial<ExportV1>;
+    delete (missing.profile as { username?: string }).username;
+    expect(() => validateBackupPayload(missing)).toThrow(/profile\.username/);
+
+    const duplicate = structuredClone(payload);
+    duplicate.sessions.push({ ...duplicate.sessions[0] });
+    expect(() => validateBackupPayload(duplicate)).toThrow(/重复/);
+
+    const broken = structuredClone(payload);
+    broken.comparisons[0].leftSubjectId = 999999999;
+    expect(() => validateBackupPayload(broken)).toThrow(/作品范围/);
+  });
+
+  it("keeps explicitly permitted historical dangling references as warnings", () => {
+    const payload = exportFixturePayload("dangling");
+    payload.sessions[0].upgradedFromSessionId = "deleted-session";
+    payload.comparisons[0].inheritedFromComparisonId = "deleted-comparison";
+    const validated = validateBackupPayload(payload);
+    expect(validated.warnings.join(" ")).toMatch(/已删除来源会话/);
+    expect(validated.warnings.join(" ")).toMatch(/已删除或孤立判断/);
+    expect(validated.payload.comparisons[0].inheritedFromComparisonId).toBe("deleted-comparison");
+  });
+
+  it("normalizes null legacy metadata fields without weakening relation validation", () => {
+    const payload = exportFixturePayload("nullable-metadata");
+    const legacy = payload as unknown as {
+      profile: { nickname: null; avatar: null };
+      items: Array<{ date: null; platform: null; image: null; updatedAt: null }>;
+    };
+    legacy.profile.nickname = null;
+    legacy.profile.avatar = null;
+    legacy.items[0].date = null;
+    legacy.items[0].platform = null;
+    legacy.items[0].image = null;
+    legacy.items[0].updatedAt = null;
+
+    const validated = validateBackupPayload(payload);
+    expect(validated.payload.profile.nickname).toBeUndefined();
+    expect(validated.payload.profile.avatar).toBeUndefined();
+    expect(validated.payload.items[0]).toMatchObject({
+      date: undefined, platform: undefined, image: undefined, updatedAt: undefined,
+    });
+    expect(validated.warnings.join(" ")).toMatch(/6 个旧版可选资料字段为 null/);
+
+    const brokenRelation = structuredClone(payload) as unknown as { sessions: Array<{ upgradedFromSessionId: null }> };
+    brokenRelation.sessions[0].upgradedFromSessionId = null;
+    expect(() => validateBackupPayload(brokenRelation)).toThrow(/upgradedFromSessionId/);
+  });
+
+  it("exports legacy null metadata as absent fields", async () => {
+    const payload = exportFixturePayload("nullable-export");
+    const created = await commitBackupImport(validatedBackup(payload, "nullable-export-create"), { mode: "create" });
+    await db.profiles.update(created.profile.id, { nickname: null as unknown as string, avatar: null as unknown as string });
+    const firstItem = payload.items[0];
+    await db.items.update([firstItem.snapshotId, firstItem.subjectId], {
+      date: null as unknown as string,
+      platform: null as unknown as string,
+      image: null as unknown as string,
+      updatedAt: null as unknown as string,
+    });
+    const exported = await exportProject(created.profile.id);
+    expect(exported.profile.nickname).toBeUndefined();
+    expect(exported.profile.avatar).toBeUndefined();
+    expect(exported.items.find((entry) => entry.subjectId === firstItem.subjectId)).toMatchObject({
+      date: undefined, platform: undefined, image: undefined, updatedAt: undefined,
+    });
+  });
+
+  it("enforces the size limit before parsing and returns a digest for valid files", async () => {
+    const payload = exportFixturePayload("file");
+    const file = new File([JSON.stringify(payload)], "backup.json", { type: "application/json" });
+    const validated = await readBackup(file);
+    expect(validated.fileName).toBe("backup.json");
+    expect(validated.digest).toMatch(/^[0-9a-f]{64}$/u);
+    await expect(readBackup(new File(["not-json"], "broken.json"))).rejects.toThrow(/JSON/);
+    const oversized = { size: 20 * 1024 * 1024 + 1, arrayBuffer: async () => new ArrayBuffer(0) } as unknown as File;
+    await expect(readBackup(oversized)).rejects.toThrow(/20 MB/);
+  });
+});
 
 beforeEach(async () => {
   db.close();
@@ -162,7 +291,7 @@ describe("IndexedDB project persistence", () => {
     expect(await db.items.where("snapshotId").equals(snapshot.id).count()).toBe(items.length);
   });
 
-  it("round-trips a backup as a non-destructive new project", async () => {
+  it("compatibly creates a separate account without the legacy clone naming scheme", async () => {
     const snapshotId = crypto.randomUUID();
     const items = createDemoItems(snapshotId).slice(0, 4);
     const snapshot = await saveSnapshot({ username: "demo", nickname: "Demo" }, snapshotId, items);
@@ -177,9 +306,9 @@ describe("IndexedDB project persistence", () => {
       session.status = "complete";
       delete (session.distribution as Partial<DistributionConfig>).levelCount;
     });
-    const imported = await importProject(payload);
-    expect(imported.id).not.toBe("demo");
-    expect(imported.username).toContain("导入");
+    const result = await commitBackupImport(validatedBackup(retargetBackupAccount(payload, "LegacyBackup")), { mode: "create" });
+    const imported = result.profile;
+    expect(imported).toMatchObject({ id: "legacybackup", username: "LegacyBackup" });
     expect(await db.profiles.count()).toBe(2);
     expect(await db.snapshots.count()).toBe(2);
     expect(await db.sessions.count()).toBe(6);
@@ -199,6 +328,587 @@ describe("IndexedDB project persistence", () => {
     expect(importedSessions.some((session) => session.id === importedDerived?.derivedFromSessionId)).toBe(true);
     expect(importedDerived?.tagFilter).toEqual({ source: "collection", match: "all", tags: ["经典"] });
     expect(derived.session.tagFilter?.tags).toEqual(["经典"]);
+  });
+
+  it("creates a validated backup project, remembers its active snapshot, and records an audit", async () => {
+    const fixture = legacyProjectFixture("alice");
+    const backup = validatedBackup({
+      schemaVersion: 1, appVersion: "0.16.0", exportedAt: new Date(10).toISOString(),
+      profile: { ...fixture.profile, id: "Alice", username: " Alice " },
+      snapshots: [{ ...fixture.snapshot, profileId: "Alice", username: " Alice " }],
+      items: fixture.items,
+      sessions: fixture.sessions.map((entry) => ({ ...entry, profileId: "Alice" })),
+      sessionItems: fixture.sessionItems,
+      comparisons: fixture.comparisons.map((entry) => ({ ...entry, profileId: "Alice" })),
+      models: fixture.models,
+    } as ExportV1, "create-alice");
+    const preview = await previewBackupImport(backup);
+    expect(preview).toMatchObject({ targetExists: false, suggestedMode: "create", targetProfileId: "alice" });
+    const result = await commitBackupImport(backup, { mode: "create" });
+    expect(result.profile).toMatchObject({ id: "alice", username: "Alice" });
+    expect((await getActiveSnapshot())?.id).toBe(result.snapshot.id);
+    expect((await listLocalProjects()).map((entry) => entry.profile.id)).toEqual(["alice"]);
+    expect(await listBackupImportHistory("alice")).toHaveLength(1);
+    expect((await exportProject("alice") as ExportV1 & { backupImports?: unknown }).backupImports).toBeUndefined();
+    const repeated = await previewBackupImport(backup);
+    expect(repeated.importableSessionCount).toBe(0);
+    expect(repeated.sessions.every((entry) => entry.status === "duplicate")).toBe(true);
+  });
+
+  it("merges selected sessions with dependency closure and remains idempotent", async () => {
+    const snapshotId = crypto.randomUUID();
+    const items = createDemoItems(snapshotId).slice(0, 3);
+    const snapshot = await saveSnapshot({ username: "demo", nickname: "Local" }, snapshotId, items);
+    const source = await createSession(snapshot, 2, [2], { preset: "uniform", levelCount: 10, weights: Array(10).fill(10) });
+    const child = await createSession(snapshot, 2, [2], { preset: "uniform", levelCount: 10, weights: Array(10).fill(10) });
+    await db.sessions.update(child.id, { upgradedFromSessionId: source.id });
+    const payload = await exportProject("demo");
+    await db.sessions.delete(source.id);
+    await db.sessions.delete(child.id);
+    await db.sessionItems.where("sessionId").anyOf([source.id, child.id]).delete();
+    const backup = validatedBackup(payload, "merge-demo");
+    const preview = await previewBackupImport(backup, [child.id]);
+    expect(preview.selectedSessionIds).toEqual(expect.arrayContaining([source.id, child.id]));
+    expect(preview.dependencySessionIds).toContain(source.id);
+    const result = await commitBackupImport(backup, {
+      mode: "merge", selectedSessionIds: [child.id], targetRevision: preview.targetRevision,
+    });
+    expect(result.audit.importedSessionIds).toHaveLength(2);
+    const repeated = await previewBackupImport(backup, [child.id]);
+    expect(repeated.importableSessionCount).toBe(0);
+    expect(repeated.reusedSessionCount).toBe(2);
+  });
+
+  it("stores a conflicting backup session under a new id and preserves the local session", async () => {
+    const snapshotId = crypto.randomUUID();
+    const items = createDemoItems(snapshotId).slice(0, 2);
+    const snapshot = await saveSnapshot({ username: "demo", nickname: "Local" }, snapshotId, items);
+    const session = await createSession(snapshot, 2, [2], { preset: "uniform", levelCount: 10, weights: Array(10).fill(10) });
+    const payload = await exportProject("demo");
+    payload.sessions[0].title = "Backup title";
+    const backup = validatedBackup(payload, "conflict-demo");
+    const preview = await previewBackupImport(backup, [session.id]);
+    expect(preview.sessions[0].status).toBe("conflict");
+    const result = await commitBackupImport(backup, {
+      mode: "merge", selectedSessionIds: [session.id], targetRevision: preview.targetRevision,
+    });
+    expect(result.audit.conflictSessionCount).toBe(1);
+    expect(result.audit.importedSessionIds[0]).not.toBe(session.id);
+    expect(result.audit.importedSnapshotIds).toHaveLength(0);
+    expect((await db.sessions.get(session.id))?.title).not.toBe("Backup title");
+    expect((await db.sessions.get(result.audit.importedSessionIds[0]))?.title).toBe("Backup title");
+    expect((await db.profiles.get("demo"))?.nickname).toBe("Local");
+    const repeated = await previewBackupImport(backup, [session.id]);
+    expect(repeated.importableSessionCount).toBe(0);
+  });
+
+  it("copies and remaps a same-id snapshot whose contents differ during merge", async () => {
+    const payload = exportFixturePayload("snapshot-conflict");
+    payload.sessions.forEach((session) => {
+      session.comparisonHistoryMode = "local";
+      session.comparisonReusePolicy = "session";
+    });
+    const snapshotId = payload.snapshots[0].id;
+    await saveSnapshot(
+      { username: payload.profile.username, nickname: "Local snapshot owner" },
+      snapshotId,
+      createDemoItems(snapshotId).slice(0, 2),
+    );
+    const backup = validatedBackup(payload, "snapshot-content-conflict");
+    const preview = await previewBackupImport(backup, [payload.sessions[0].id]);
+    const result = await commitBackupImport(backup, {
+      mode: "merge", selectedSessionIds: [payload.sessions[0].id], targetRevision: preview.targetRevision,
+    });
+
+    expect(result.audit.importedSnapshotIds).toHaveLength(1);
+    expect(result.audit.importedSnapshotIds[0]).not.toBe(snapshotId);
+    expect(result.audit.idMappings).toContainEqual(expect.objectContaining({
+      entity: "snapshot", sourceId: snapshotId, reason: "conflict",
+    }));
+    expect((await db.sessions.get(payload.sessions[0].id))?.snapshotId).toBe(result.audit.importedSnapshotIds[0]);
+    expect((await db.snapshots.get(result.audit.importedSnapshotIds[0]))?.username).toBe(payload.profile.username);
+    expect((await previewBackupImport(backup, [payload.sessions[0].id])).importableSessionCount).toBe(0);
+  });
+
+  it("imports only snapshots required by the selected merge sessions", async () => {
+    const first = exportFixturePayload("selected-snapshot-a");
+    const second = retargetBackupAccount(exportFixturePayload("selected-snapshot-b"), first.profile.username);
+    const selectedSession = first.sessions[0];
+    first.snapshots.push(...second.snapshots);
+    first.items.push(...second.items);
+    first.sessions.push(...second.sessions);
+    first.sessionItems.push(...second.sessionItems);
+    first.comparisons.push(...second.comparisons);
+    first.models.push(...second.models);
+    first.sessions.forEach((session) => {
+      session.comparisonHistoryMode = "local";
+      session.comparisonReusePolicy = "session";
+    });
+
+    const localSnapshotId = "selected-merge-local";
+    await saveSnapshot({ username: first.profile.username }, localSnapshotId, createDemoItems(localSnapshotId).slice(0, 2));
+    const backup = validatedBackup(first, "selected-snapshot-merge");
+    const preview = await previewBackupImport(backup, [selectedSession.id]);
+    const result = await commitBackupImport(backup, {
+      mode: "merge", selectedSessionIds: [selectedSession.id], targetRevision: preview.targetRevision,
+    });
+
+    expect(result.audit.importedSnapshotIds).toHaveLength(1);
+    expect(result.audit.importedSnapshotIds).toContain(first.snapshots[0].id);
+    expect(await db.snapshots.get(second.snapshots[0].id)).toBeUndefined();
+  });
+
+  it("reuses dependencies from an earlier remapped import when merging a new child session", async () => {
+    const payload = exportFixturePayload("remapped-dependency");
+    const sourceSession = payload.sessions[0];
+    payload.sessions = [sourceSession];
+    payload.sessionItems = payload.sessionItems.filter((entry) => entry.sessionId === sourceSession.id);
+    payload.comparisons = payload.comparisons.filter((entry) => entry.sessionId === sourceSession.id);
+    payload.models = [];
+
+    const localSnapshotId = "local-dependency-snapshot";
+    const localSnapshot = await saveSnapshot(
+      { username: payload.profile.username, nickname: "Local" },
+      localSnapshotId,
+      createDemoItems(localSnapshotId).slice(0, 2),
+    );
+    await db.sessions.add({ ...sourceSession, profileId: localSnapshot.profileId, snapshotId: localSnapshotId, title: "Local conflict" });
+
+    const sourceBackup = validatedBackup(payload, "remapped-dependency-source");
+    const sourcePreview = await previewBackupImport(sourceBackup, [sourceSession.id]);
+    const sourceImport = await commitBackupImport(sourceBackup, {
+      mode: "merge", selectedSessionIds: [sourceSession.id], targetRevision: sourcePreview.targetRevision,
+    });
+    const remappedSourceId = sourceImport.audit.importedSessionIds[0];
+    expect(remappedSourceId).not.toBe(sourceSession.id);
+
+    const childId = "remapped-dependency-child";
+    const childPayload = structuredClone(payload);
+    childPayload.sessions.push({
+      ...sourceSession,
+      id: childId,
+      title: "Dependent child",
+      upgradedFromSessionId: sourceSession.id,
+    });
+    childPayload.sessionItems.push(...payload.sessionItems.map((entry) => ({
+      ...entry,
+      id: `${childId}:${entry.subjectId}`,
+      sessionId: childId,
+    })));
+    const childBackup = validatedBackup(childPayload, "remapped-dependency-child");
+    const childPreview = await previewBackupImport(childBackup, [childId]);
+    expect(childPreview.dependencySessionIds).toContain(sourceSession.id);
+    expect(childPreview.sessions.find((entry) => entry.id === sourceSession.id)?.status).toBe("duplicate");
+
+    const childImport = await commitBackupImport(childBackup, {
+      mode: "merge", selectedSessionIds: [childId], targetRevision: childPreview.targetRevision,
+    });
+    expect(childImport.audit.importedSessionIds).toHaveLength(1);
+    expect(childImport.audit.reusedSessionIds).toEqual([remappedSourceId]);
+    expect((await db.sessions.get(childImport.audit.importedSessionIds[0]))?.upgradedFromSessionId).toBe(remappedSourceId);
+    expect(await db.snapshots.count()).toBe(2);
+    const repeated = await previewBackupImport(childBackup, [childId]);
+    expect(repeated.importableSessionCount).toBe(0);
+  });
+
+  it("preserves valid models only when no IDs or relationships are rewritten", async () => {
+    const payload = exportFixturePayload("models");
+    payload.sessions.forEach((entry) => {
+      entry.comparisonHistoryMode = "local";
+      entry.comparisonReusePolicy = "session";
+    });
+    const sourceSession = payload.sessions[0];
+    const allowedIds = payload.sessionItems.filter((entry) => entry.sessionId === sourceSession.id).map((entry) => entry.subjectId);
+    payload.models = [{
+      sessionId: sourceSession.id,
+      version: sourceSession.modelVersion,
+      abilities: Object.fromEntries(allowedIds.map((subjectId, index) => [subjectId, index])),
+      uncertainty: Object.fromEntries(allowedIds.map((subjectId) => [subjectId, 1])),
+      acceptedComparisons: 1,
+      initialMeanUncertainty: 1,
+      currentMeanUncertainty: 1,
+      converged: true,
+      iterations: 1,
+      updatedAt: sourceSession.updatedAt,
+    }];
+    const backup = validatedBackup(payload, "models-valid");
+    const created = await commitBackupImport(backup, { mode: "create" });
+    expect(await db.models.get(created.audit.importedSessionIds[0])).toBeDefined();
+
+    await db.sessions.delete(sourceSession.id);
+    await db.sessionItems.where("sessionId").equals(sourceSession.id).delete();
+    await db.models.delete(sourceSession.id);
+    await db.sessions.add({ ...sourceSession, profileId: "models-profile", id: sourceSession.id, title: "local conflict" });
+    const preview = await previewBackupImport(backup, [sourceSession.id]);
+    const merged = await commitBackupImport(backup, {
+      mode: "merge", selectedSessionIds: [sourceSession.id], targetRevision: preview.targetRevision,
+    });
+    const remappedId = merged.audit.importedSessionIds[0];
+    expect(remappedId).not.toBe(sourceSession.id);
+    expect(await db.models.get(remappedId)).toBeUndefined();
+    expect((await db.sessions.get(remappedId))?.status).toBe("active");
+  });
+
+  it("resets a complete session without a model to active on import", async () => {
+    const payload = exportFixturePayload("missing-model");
+    payload.sessions = [payload.sessions[0]];
+    payload.sessionItems = payload.sessionItems.filter((entry) => entry.sessionId === payload.sessions[0].id);
+    payload.comparisons = payload.comparisons.filter((entry) => entry.sessionId === payload.sessions[0].id);
+    payload.models = [];
+    payload.sessions[0].status = "complete";
+    payload.sessions[0].comparisonHistoryMode = "local";
+    payload.sessions[0].comparisonReusePolicy = "session";
+
+    const result = await commitBackupImport(validatedBackup(payload, "missing-model"), { mode: "create" });
+    expect((await db.sessions.get(result.audit.importedSessionIds[0]))?.status).toBe("active");
+    expect(result.audit.importedModelSessionIds).toHaveLength(0);
+  });
+
+  it("rolls back every target write when a backup import transaction fails", async () => {
+    const payload = exportFixturePayload("rollback");
+    const backup = validatedBackup(payload, "rollback-backup");
+    const before = {
+      profiles: await db.profiles.count(), snapshots: await db.snapshots.count(), sessions: await db.sessions.count(), audits: await db.backupImports.count(),
+    };
+    const failAudit = () => { throw new Error("injected audit failure"); };
+    db.backupImports.hook("creating", failAudit);
+    try {
+      await expect(commitBackupImport(backup, { mode: "create" })).rejects.toThrow(/injected audit failure/);
+    } finally {
+      db.backupImports.hook.creating.unsubscribe(failAudit);
+    }
+    expect(await db.profiles.count()).toBe(before.profiles);
+    expect(await db.snapshots.count()).toBe(before.snapshots);
+    expect(await db.sessions.count()).toBe(before.sessions);
+    expect(await db.backupImports.count()).toBe(before.audits);
+  });
+
+  it("replaces only the matching account after confirmation and rejects a stale preview", async () => {
+    const demoId = crypto.randomUUID();
+    const demoItems = createDemoItems(demoId).slice(0, 2);
+    const demoSnapshot = await saveSnapshot({ username: "demo", nickname: "Local" }, demoId, demoItems);
+    const localSession = await createSession(demoSnapshot, 2, [2], { preset: "uniform", levelCount: 10, weights: Array(10).fill(10) });
+    const restoredModel = toModelState(
+      localSession.id,
+      localSession.modelVersion,
+      fitModel(demoItems.map(({ subjectId, rate }) => ({ subjectId, rate })), []),
+    );
+    await initializeModel(localSession.id, restoredModel);
+    const preservedUpdatedAt = new Date(1234).toISOString();
+    await db.sessions.update(localSession.id, { status: "complete", updatedAt: preservedUpdatedAt });
+    const payload = await exportProject("demo");
+    payload.profile.nickname = "Restored";
+    payload.sessions[0].title = "Restored session";
+    const otherId = crypto.randomUUID();
+    const otherItems = createDemoItems(otherId).slice(0, 2);
+    await saveSnapshot({ username: "other", nickname: "Other" }, otherId, otherItems);
+    const backup = validatedBackup(payload, "replace-demo");
+    const stale = await previewBackupImport(backup);
+    await db.sessions.update(localSession.id, { title: "Changed after preview" });
+    await expect(commitBackupImport(backup, {
+      mode: "replace", targetRevision: stale.targetRevision, confirmationUsername: "demo",
+    })).rejects.toThrow(/重新预览/);
+    const preview = await previewBackupImport(backup);
+    await expect(commitBackupImport(backup, {
+      mode: "replace", targetRevision: preview.targetRevision, confirmationUsername: "wrong",
+    })).rejects.toThrow(/用户名/);
+    const result = await commitBackupImport(backup, {
+      mode: "replace", targetRevision: preview.targetRevision, confirmationUsername: "DEMO",
+    });
+    expect(result.profile.nickname).toBe("Restored");
+    expect(result.audit.conflictSessionCount).toBe(0);
+    expect(await db.sessions.get(localSession.id)).toMatchObject({
+      id: localSession.id,
+      title: "Restored session",
+      status: "complete",
+      createdAt: localSession.createdAt,
+      updatedAt: preservedUpdatedAt,
+    });
+    expect(await db.models.get(localSession.id)).toMatchObject({
+      sessionId: localSession.id,
+      version: restoredModel.version,
+      abilities: restoredModel.abilities,
+      uncertainty: restoredModel.uncertainty,
+    });
+    expect(await db.profiles.get("other")).toBeDefined();
+    expect((await listBackupImportHistory("demo"))[0].mode).toBe("replace");
+  });
+
+  it("remaps global primary-key collisions during replacement without touching another account", async () => {
+    const payload = exportFixturePayload("global-collision");
+    const sourceProfileId = payload.profile.id;
+    payload.profile.username = "Alice";
+    payload.snapshots.forEach((entry) => { entry.username = "Alice"; });
+    const sharedSnapshotId = payload.snapshots[0].id;
+    const sharedSessionId = payload.sessions[0].id;
+    const sharedComparisonId = payload.comparisons[0].id;
+
+    const localSnapshotId = "alice-local-snapshot";
+    await saveSnapshot({ username: "Alice", nickname: "Local Alice" }, localSnapshotId, createDemoItems(localSnapshotId).slice(0, 2));
+    const otherItems = createDemoItems(sharedSnapshotId).slice(0, 3);
+    await saveSnapshot({ username: "other", nickname: "Other" }, sharedSnapshotId, otherItems);
+    await db.sessions.add({ ...payload.sessions[0], id: sharedSessionId, profileId: "other", snapshotId: sharedSnapshotId, title: "Other session", comparisonHistoryMode: "local" });
+    await db.sessionItems.bulkAdd(otherItems.map((entry) => ({ id: `${sharedSessionId}:${entry.subjectId}`, sessionId: sharedSessionId, subjectId: entry.subjectId })));
+    await db.comparisons.add({ ...payload.comparisons[0], id: sharedComparisonId, profileId: "other", sessionId: sharedSessionId });
+    const backup = validatedBackup(payload, "global-collision-backup");
+    const preview = await previewBackupImport(backup);
+    const result = await commitBackupImport(backup, {
+      mode: "replace", targetRevision: preview.targetRevision, confirmationUsername: "Alice",
+    });
+
+    expect(result.profile).toMatchObject({ id: "alice", username: "Alice" });
+    expect(await db.snapshots.get(sharedSnapshotId)).toMatchObject({ profileId: "other" });
+    expect(await db.sessions.get(sharedSessionId)).toMatchObject({ profileId: "other", title: "Other session" });
+    expect(await db.comparisons.get(sharedComparisonId)).toMatchObject({ profileId: "other" });
+    expect(result.audit.conflictSessionCount).toBe(1);
+    expect(result.audit.idMappings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ entity: "profile", sourceId: sourceProfileId, targetId: "alice" }),
+      expect.objectContaining({ entity: "snapshot", sourceId: sharedSnapshotId }),
+      expect.objectContaining({ entity: "session", sourceId: sharedSessionId }),
+      expect.objectContaining({ entity: "comparison", sourceId: sharedComparisonId }),
+    ]));
+  });
+
+  it("retains earlier audits and marks them superseded after replacement", async () => {
+    const initial = validatedBackup(exportFixturePayload("audit-history"), "audit-history-create");
+    const created = await commitBackupImport(initial, { mode: "create" });
+    const replacementPayload = structuredClone(initial.payload);
+    replacementPayload.profile.nickname = "Restored audit profile";
+    const replacement = validatedBackup(replacementPayload, "audit-history-replace");
+    const preview = await previewBackupImport(replacement);
+    const restored = await commitBackupImport(replacement, {
+      mode: "replace", targetRevision: preview.targetRevision, confirmationUsername: replacementPayload.profile.username,
+    });
+    const history = await listBackupImportHistory(restored.profile.id);
+    expect(history).toHaveLength(2);
+    const earlier = history.find((entry) => entry.id === created.audit.id)!;
+    expect(earlier.supersededAt).toBeDefined();
+    expect(earlier.supersededByImportId).toBe(restored.audit.id);
+    expect(history.find((entry) => entry.id === restored.audit.id)?.supersededAt).toBeUndefined();
+  });
+
+  it("switches and restores an explicit active snapshot", async () => {
+    const firstId = crypto.randomUUID();
+    const secondId = crypto.randomUUID();
+    await saveSnapshot({ username: "first" }, firstId, createDemoItems(firstId).slice(0, 2));
+    await saveSnapshot({ username: "second" }, secondId, createDemoItems(secondId).slice(0, 2));
+    await setActiveSnapshot(firstId);
+    expect((await getActiveSnapshot())?.id).toBe(firstId);
+    await db.snapshots.delete(firstId);
+    expect((await getActiveSnapshot())?.id).toBe(secondId);
+  });
+
+  it("previews and atomically deletes one legacy imported snapshot with its owned data", async () => {
+    const currentId = crypto.randomUUID();
+    const legacyId = crypto.randomUUID();
+    const current = await saveSnapshot({ username: "Alice", nickname: "Real" }, currentId, createDemoItems(currentId).slice(0, 3));
+    const legacy = await saveSnapshot({ username: "alice", nickname: "Ignored" }, legacyId, createDemoItems(legacyId).slice(0, 3));
+    const currentSession = await createSession(current, 2, [2], { preset: "uniform", levelCount: 10, weights: Array(10).fill(10) });
+    const legacySession = await createSession(legacy, 2, [2], { preset: "uniform", levelCount: 10, weights: Array(10).fill(10) });
+    const legacyItems = await db.sessionItems.where("sessionId").equals(legacySession.id).toArray();
+    const comparison: ComparisonRecord = {
+      id: crypto.randomUUID(), profileId: legacy.profileId, sessionId: legacySession.id, subjectType: 2,
+      leftSubjectId: legacyItems[0].subjectId, rightSubjectId: legacyItems[1].subjectId, outcome: "left",
+      acceptedCountAtAnswer: 1, active: true, createdAt: new Date().toISOString(),
+    };
+    const model = toModelState(legacySession.id, legacySession.modelVersion,
+      fitModel(legacyItems.map((entry) => ({ subjectId: entry.subjectId, rate: 0 })), []));
+    await db.comparisons.add(comparison);
+    await db.models.put(model);
+    await db.importBatches.add({
+      id: crypto.randomUUID(), profileId: legacy.profileId, targetSessionId: legacySession.id,
+      sourceSessionId: currentSession.id, sourceSnapshotId: current.id, targetSnapshotId: legacy.id,
+      type: "existing-session", createdAt: new Date().toISOString(), importedCount: 1,
+      duplicateOriginalCount: 0, duplicatePairCount: 0, outOfScopeCount: 0, skippedCount: 0,
+      invalidCalibrationCount: 0,
+    });
+    const migration = legacyMigrationAudit(legacy.profileId, "Alice", [legacy.id], [legacySession.id]);
+    await db.backupImports.add(migration);
+    await setActiveSnapshot(legacy.id);
+
+    const preview = await previewLegacyCloneDeletion(legacy.id);
+    expect(preview).toMatchObject({ active: true, itemCount: 3, remainingSnapshotCount: 1 });
+    expect(preview.sessionIds).toEqual([legacySession.id]);
+    expect(preview.comparisonIds).toEqual([comparison.id]);
+    expect(preview.importBatchIds).toHaveLength(1);
+    expect(preview.modelSessionIds).toEqual([legacySession.id]);
+    await expect(commitLegacyCloneDeletion({
+      snapshotId: legacy.id, targetRevision: preview.targetRevision, confirmationUsername: "wrong",
+    })).rejects.toThrow(/用户名/);
+
+    const result = await commitLegacyCloneDeletion({
+      snapshotId: legacy.id, targetRevision: preview.targetRevision, confirmationUsername: " ALICE ",
+    });
+    expect(result.activeSnapshot?.id).toBe(current.id);
+    expect(await db.snapshots.get(legacy.id)).toBeUndefined();
+    expect(await db.items.where("snapshotId").equals(legacy.id).count()).toBe(0);
+    expect(await db.sessions.get(legacySession.id)).toBeUndefined();
+    expect(await db.sessionItems.where("sessionId").equals(legacySession.id).count()).toBe(0);
+    expect(await db.comparisons.get(comparison.id)).toBeUndefined();
+    expect(await db.models.get(legacySession.id)).toBeUndefined();
+    expect(await db.sessions.get(currentSession.id)).toBeDefined();
+    expect(await db.snapshots.get(current.id)).toBeDefined();
+    expect((await getActiveSnapshot())?.id).toBe(current.id);
+    expect((await listLocalProjects())[0].legacySnapshotIds).not.toContain(legacy.id);
+    const history = await listBackupImportHistory(current.profileId);
+    expect(history[0]).toMatchObject({ mode: "legacy-clone-deletion", deletedSnapshotIds: [legacy.id] });
+    expect(history.find((entry) => entry.id === migration.id)?.deletedAt).toBeDefined();
+  });
+
+  it("rejects ordinary snapshots and stale previews without deleting anything", async () => {
+    const ordinaryId = crypto.randomUUID();
+    const ordinary = await saveSnapshot({ username: "ordinary" }, ordinaryId, createDemoItems(ordinaryId).slice(0, 2));
+    await expect(previewLegacyCloneDeletion(ordinary.id)).rejects.toThrow(/只能删除/);
+
+    const legacyId = crypto.randomUUID();
+    const legacy = await saveSnapshot({ username: "ordinary" }, legacyId, createDemoItems(legacyId).slice(0, 2));
+    await db.backupImports.add(legacyMigrationAudit(legacy.profileId, legacy.username, [legacy.id], []));
+    const preview = await previewLegacyCloneDeletion(legacy.id);
+    const changedId = crypto.randomUUID();
+    await saveSnapshot({ username: "ordinary" }, changedId, createDemoItems(changedId).slice(0, 2));
+    await expect(commitLegacyCloneDeletion({
+      snapshotId: legacy.id, targetRevision: preview.targetRevision, confirmationUsername: legacy.username,
+    })).rejects.toThrow(/重新预览/);
+    expect(await db.snapshots.get(legacy.id)).toBeDefined();
+    expect((await listBackupImportHistory(legacy.profileId)).filter((entry) => entry.mode === "legacy-clone-deletion")).toHaveLength(0);
+  });
+
+  it("rolls back a legacy clone deletion when its audit write fails", async () => {
+    const keepId = crypto.randomUUID();
+    const legacyId = crypto.randomUUID();
+    await saveSnapshot({ username: "rollback-delete" }, keepId, createDemoItems(keepId).slice(0, 2));
+    const legacy = await saveSnapshot({ username: "rollback-delete" }, legacyId, createDemoItems(legacyId).slice(0, 2));
+    await db.backupImports.add(legacyMigrationAudit(legacy.profileId, legacy.username, [legacy.id], []));
+    const preview = await previewLegacyCloneDeletion(legacy.id);
+    const failAudit = (_key: string, entry: BackupImportAudit) => {
+      if (entry.mode === "legacy-clone-deletion") throw new Error("injected deletion audit failure");
+    };
+    db.backupImports.hook("creating", failAudit);
+    try {
+      await expect(commitLegacyCloneDeletion({
+        snapshotId: legacy.id, targetRevision: preview.targetRevision, confirmationUsername: legacy.username,
+      })).rejects.toThrow(/injected deletion audit failure/);
+    } finally {
+      db.backupImports.hook.creating.unsubscribe(failAudit);
+    }
+    expect(await db.snapshots.get(legacy.id)).toBeDefined();
+    expect(await db.items.where("snapshotId").equals(legacy.id).count()).toBe(2);
+  });
+
+  it("migrates single and nested legacy clone profiles into an existing real account", async () => {
+    const databaseName = `bangumi-resorter-v5-clones-${crypto.randomUUID()}`;
+    const legacy = new Dexie(databaseName);
+    legacy.version(5).stores({
+      profiles: "id, username, updatedAt",
+      snapshots: "id, profileId, syncedAt",
+      items: "[snapshotId+subjectId], snapshotId, subjectId, subjectType, collectionType, rate",
+      sessions: "id, profileId, snapshotId, subjectType, status, updatedAt",
+      sessionItems: "id, sessionId, subjectId, [sessionId+subjectId]",
+      comparisons: "id, profileId, sessionId, subjectType, active, createdAt, importBatchId, importedFromSessionId",
+      models: "sessionId, version, updatedAt",
+      importBatches: "id, profileId, targetSessionId, sourceSessionId, createdAt, type",
+      meta: "key",
+    });
+    await legacy.open();
+    const fixture = legacyProjectFixture("clone-existing");
+    const realId = "alice-real";
+    const cloneOne = "source:import:1234abcd";
+    const cloneTwo = "source:import:1234abcd:import:deadbeef";
+    await legacy.table("profiles").bulkAdd([
+      { id: realId, username: "Alice", nickname: "Real profile", createdAt: new Date(2).toISOString(), updatedAt: new Date(3).toISOString() },
+      { ...fixture.profile, id: cloneOne, username: "Alice（导入）", nickname: "Clone one", createdAt: new Date(1).toISOString(), updatedAt: new Date(4).toISOString() },
+      { ...fixture.profile, id: cloneTwo, username: "Alice（导入）（导入）", nickname: "Clone two", createdAt: new Date(5).toISOString(), updatedAt: new Date(6).toISOString() },
+    ]);
+    const snapshots = [cloneOne, cloneTwo].map((profileId, index) => ({
+      ...fixture.snapshot, id: `clone-snapshot-${index}`, profileId, username: index ? "Alice（导入）（导入）" : "Alice（导入）", syncedAt: new Date(10 + index).toISOString(),
+    }));
+    const sessions = [cloneOne, cloneTwo].map((profileId, index) => ({
+      ...fixture.sessions[index], id: `clone-session-${index}`, profileId, snapshotId: snapshots[index].id, comparisonHistoryMode: "local" as const,
+    }));
+    await legacy.table("snapshots").bulkAdd(snapshots);
+    await legacy.table("sessions").bulkAdd(sessions);
+    await legacy.table("meta").put({ key: "active-snapshot", value: JSON.stringify({ profileId: cloneTwo, snapshotId: snapshots[1].id }) });
+    legacy.close();
+
+    const migrated = new ResorterDatabase(databaseName);
+    try {
+      await migrated.open();
+      expect(await migrated.profiles.count()).toBe(1);
+      expect(await migrated.profiles.get(realId)).toMatchObject({ username: "Alice", nickname: "Real profile", createdAt: new Date(1).toISOString(), updatedAt: new Date(6).toISOString() });
+      expect((await migrated.snapshots.toArray()).every((entry) => entry.profileId === realId && entry.username === "Alice")).toBe(true);
+      expect((await migrated.sessions.toArray()).every((entry) => entry.profileId === realId)).toBe(true);
+      expect((await migrated.meta.get("active-snapshot"))?.value).toContain(`"profileId":"${realId}"`);
+      const audit = (await migrated.backupImports.toArray())[0];
+      expect(audit).toMatchObject({ mode: "legacy-clone-migration", profileId: realId });
+      expect(audit.legacyCloneProfileIds).toEqual(expect.arrayContaining([cloneOne, cloneTwo]));
+    } finally {
+      migrated.close();
+      await migrated.delete();
+    }
+  });
+
+  it("creates a canonical profile from a legacy clone when the real account is absent", async () => {
+    const databaseName = `bangumi-resorter-v5-clone-only-${crypto.randomUUID()}`;
+    const legacy = new Dexie(databaseName);
+    legacy.version(5).stores({
+      profiles: "id, username, updatedAt",
+      snapshots: "id, profileId, syncedAt",
+      items: "[snapshotId+subjectId], snapshotId, subjectId, subjectType, collectionType, rate",
+      sessions: "id, profileId, snapshotId, subjectType, status, updatedAt",
+      sessionItems: "id, sessionId, subjectId, [sessionId+subjectId]",
+      comparisons: "id, profileId, sessionId, subjectType, active, createdAt, importBatchId, importedFromSessionId",
+      models: "sessionId, version, updatedAt",
+      importBatches: "id, profileId, targetSessionId, sourceSessionId, createdAt, type",
+      meta: "key",
+    });
+    await legacy.open();
+    const fixture = legacyProjectFixture("clone-only");
+    const cloneId = "random-source:import:abcdef12";
+    await legacy.table("profiles").add({ ...fixture.profile, id: cloneId, username: "MixedCase（导入）", nickname: "Latest clone" });
+    await legacy.table("snapshots").add({ ...fixture.snapshot, profileId: cloneId, username: "MixedCase（导入）" });
+    legacy.close();
+
+    const migrated = new ResorterDatabase(databaseName);
+    try {
+      await migrated.open();
+      expect(await migrated.profiles.get("mixedcase")).toMatchObject({ username: "MixedCase", nickname: "Latest clone" });
+      expect(await migrated.profiles.get(cloneId)).toBeUndefined();
+      expect(await migrated.snapshots.get(fixture.snapshot.id)).toMatchObject({ profileId: "mixedcase", username: "MixedCase" });
+      expect((await migrated.backupImports.toArray())[0].legacySnapshotIds).toEqual([fixture.snapshot.id]);
+    } finally {
+      migrated.close();
+      await migrated.delete();
+    }
+  });
+
+  it("drops an empty legacy clone instead of creating an empty canonical project", async () => {
+    const databaseName = `bangumi-resorter-v5-empty-clone-${crypto.randomUUID()}`;
+    const legacy = new Dexie(databaseName);
+    legacy.version(5).stores({
+      profiles: "id, username, updatedAt",
+      snapshots: "id, profileId, syncedAt",
+      items: "[snapshotId+subjectId], snapshotId, subjectId, subjectType, collectionType, rate",
+      sessions: "id, profileId, snapshotId, subjectType, status, updatedAt",
+      sessionItems: "id, sessionId, subjectId, [sessionId+subjectId]",
+      comparisons: "id, profileId, sessionId, subjectType, active, createdAt, importBatchId, importedFromSessionId",
+      models: "sessionId, version, updatedAt",
+      importBatches: "id, profileId, targetSessionId, sourceSessionId, createdAt, type",
+      meta: "key",
+    });
+    await legacy.open();
+    await legacy.table("profiles").add({
+      id: "empty:import:1234abcd", username: "Empty（导入）", createdAt: new Date(0).toISOString(), updatedAt: new Date(0).toISOString(),
+    });
+    legacy.close();
+    const migrated = new ResorterDatabase(databaseName);
+    try {
+      await migrated.open();
+      expect(await migrated.profiles.count()).toBe(0);
+      expect(await migrated.backupImports.count()).toBe(0);
+    } finally {
+      migrated.close();
+      await migrated.delete();
+    }
   });
 
   it("upgrades a frozen v4 database into local histories without copy amplification", async () => {
@@ -268,7 +978,7 @@ describe("IndexedDB project persistence", () => {
       comparisons: fixture.comparisons,
       models: fixture.models,
     };
-    const importedProfile = await importProject(payload);
+    const importedProfile = (await commitBackupImport(validatedBackup(payload), { mode: "create" })).profile;
     const importedSessions = await db.sessions.where("profileId").equals(importedProfile.id).toArray();
     const importedComparisons = await db.comparisons.where("profileId").equals(importedProfile.id).toArray();
     const importedBatches = (await db.importBatches.toArray())
@@ -299,7 +1009,7 @@ describe("IndexedDB project persistence", () => {
     fixture.sessions[2].snapshotId = secondSnapshotId;
     const secondSnapshot = { ...fixture.snapshot, id: secondSnapshotId };
     const secondItems = fixture.items.map((entry) => ({ ...entry, snapshotId: secondSnapshotId }));
-    const importedProfile = await importProject({
+    const importedProfile = (await commitBackupImport(validatedBackup({
       schemaVersion: 1,
       appVersion: "0.14.0",
       exportedAt: new Date(10).toISOString(),
@@ -310,7 +1020,7 @@ describe("IndexedDB project persistence", () => {
       sessionItems: fixture.sessionItems,
       comparisons: fixture.comparisons,
       models: fixture.models,
-    });
+    }), { mode: "create" })).profile;
     const importedSessions = await db.sessions.where("profileId").equals(importedProfile.id).toArray();
     const importedComparisons = await db.comparisons.where("profileId").equals(importedProfile.id).toArray();
     const evidenceByTitle = Object.fromEntries(importedSessions.map((session) => [
@@ -581,7 +1291,8 @@ describe("IndexedDB project persistence", () => {
       sourceSessionId: source.id,
     });
 
-    const firstImportedProfile = await importProject(await exportProject("demo"));
+    const firstPayload = retargetBackupAccount(await exportProject("demo"), "CopyOne");
+    const firstImportedProfile = (await commitBackupImport(validatedBackup(firstPayload), { mode: "create" })).profile;
     const firstSessions = await db.sessions.where("profileId").equals(firstImportedProfile.id).toArray();
     const firstComparisons = await db.comparisons.where("profileId").equals(firstImportedProfile.id).toArray();
     const firstBatches = (await db.importBatches.toArray())
@@ -596,7 +1307,8 @@ describe("IndexedDB project persistence", () => {
     expect(firstComparisons.some((entry) => entry.id === importedOriginal.importedFromComparisonId)).toBe(true);
     expect(firstComparisons.some((entry) => entry.id === importedOriginal.inheritedFromComparisonId)).toBe(true);
 
-    const secondImportedProfile = await importProject(await exportProject(firstImportedProfile.id));
+    const secondPayload = retargetBackupAccount(await exportProject(firstImportedProfile.id), "CopyTwo");
+    const secondImportedProfile = (await commitBackupImport(validatedBackup(secondPayload), { mode: "create" })).profile;
     expect(await db.sessions.where("profileId").equals(secondImportedProfile.id).count()).toBe(2);
     expect(await db.comparisons.where("profileId").equals(secondImportedProfile.id).count()).toBe(4);
     expect((await db.importBatches.toArray())
@@ -843,8 +1555,9 @@ describe("IndexedDB project persistence", () => {
       acceptedCountAtAnswer: 4, createdAt: new Date(3000).toISOString(),
     };
     await db.comparisons.bulkAdd([original, calibration, inherited, orphanedInheritance]);
-    await importProject(await exportProject("demo"));
-    const imported = (await db.comparisons.toArray()).filter((entry) => entry.profileId !== "demo");
+    const payload = retargetBackupAccount(await exportProject("demo"), "ImportedDemo");
+    const importedProfile = (await commitBackupImport(validatedBackup(payload), { mode: "create" })).profile;
+    const imported = await db.comparisons.where("profileId").equals(importedProfile.id).toArray();
     const importedCalibration = imported.find((entry) => entry.queryKind === "calibration")!;
     const importedOriginal = imported.find((entry) =>
       entry.queryKind === "adaptive" && !entry.inheritedFromComparisonId)!;

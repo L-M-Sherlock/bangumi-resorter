@@ -401,6 +401,165 @@ export interface ExportV1 {
   models: ModelState[];
 }
 
+export type BackupImportMode = "create" | "merge" | "replace";
+export type BackupImportAuditMode = BackupImportMode | "legacy-clone-migration" | "legacy-clone-deletion";
+export type BackupEntityKind = "profile" | "snapshot" | "session" | "comparison" | "importBatch";
+
+export interface ValidatedBackup {
+  payload: ExportV1;
+  digest: string;
+  fileName: string;
+  byteSize: number;
+  warnings: string[];
+  /** Sessions whose legacy fields were converted while validating the file. */
+  compatibilitySessionIds?: string[];
+}
+
+export interface BackupImportIdMapping {
+  entity: BackupEntityKind;
+  sourceId: string;
+  targetId: string;
+  reason: "canonical-profile" | "collision" | "conflict" | "legacy-clone";
+}
+
+export interface BackupImportedSessionFingerprint {
+  sourceSessionId: string;
+  targetSessionId: string;
+  sourceFingerprint: string;
+  targetFingerprint: string;
+}
+
+export interface BackupImportAudit {
+  id: string;
+  profileId: string;
+  mode: BackupImportAuditMode;
+  sourceUsername: string;
+  sourceExportedAt?: string;
+  sourceAppVersion?: string;
+  backupDigest?: string;
+  createdAt: string;
+  selectedSessionIds: string[];
+  dependencySessionIds: string[];
+  importedSnapshotIds: string[];
+  importedSessionIds: string[];
+  importedComparisonIds: string[];
+  importedBatchIds: string[];
+  importedModelSessionIds: string[];
+  reusedSessionIds: string[];
+  conflictSessionIds: string[];
+  importedComparisonCount: number;
+  reusedSessionCount: number;
+  conflictSessionCount: number;
+  warnings: string[];
+  idMappings: BackupImportIdMapping[];
+  sessionFingerprints: BackupImportedSessionFingerprint[];
+  legacyCloneProfileIds?: string[];
+  legacySnapshotIds?: string[];
+  legacySessionIds?: string[];
+  deletedSnapshotIds?: string[];
+  deletedSessionIds?: string[];
+  deletedComparisonIds?: string[];
+  deletedImportBatchIds?: string[];
+  deletedModelSessionIds?: string[];
+  deletedAt?: string;
+  deletedByAuditId?: string;
+  supersededAt?: string;
+  supersededByImportId?: string;
+}
+
+export type BackupSessionImportStatus = "new" | "duplicate" | "conflict";
+
+export interface BackupImportSessionPreview {
+  id: string;
+  title: string;
+  snapshotId: string;
+  subjectType: SubjectType;
+  itemCount: number;
+  comparisonCount: number;
+  status: BackupSessionImportStatus;
+  selected: boolean;
+  required: boolean;
+  targetSessionId?: string;
+}
+
+export interface BackupImportCounts {
+  snapshots: number;
+  items: number;
+  sessions: number;
+  comparisons: number;
+  models: number;
+}
+
+export interface BackupImportPreview {
+  targetProfileId: string;
+  targetExists: boolean;
+  suggestedMode: BackupImportMode;
+  targetRevision?: string;
+  source: BackupImportCounts;
+  target: BackupImportCounts;
+  sessions: BackupImportSessionPreview[];
+  selectedSessionIds: string[];
+  dependencySessionIds: string[];
+  importableSessionCount: number;
+  reusedSessionCount: number;
+  conflictSessionCount: number;
+  warnings: string[];
+}
+
+export interface BackupImportRequest {
+  mode: BackupImportMode;
+  selectedSessionIds?: string[];
+  targetRevision?: string;
+  confirmationUsername?: string;
+}
+
+export interface BackupImportResult {
+  profile: Profile;
+  snapshot: Snapshot;
+  audit: BackupImportAudit;
+}
+
+/** A destructive operation preview for one v5/v6 legacy imported snapshot. */
+export interface LegacyCloneDeletionPreview {
+  profileId: string;
+  profile: Profile;
+  snapshot: Snapshot;
+  sessionIds: string[];
+  comparisonIds: string[];
+  importBatchIds: string[];
+  modelSessionIds: string[];
+  itemCount: number;
+  active: boolean;
+  remainingSnapshotCount: number;
+  survivingReferenceSessionIds: string[];
+  targetRevision: string;
+  warnings: string[];
+}
+
+export interface LegacyCloneDeletionRequest {
+  snapshotId: string;
+  targetRevision: string;
+  confirmationUsername?: string;
+}
+
+export interface LegacyCloneDeletionResult {
+  profile?: Profile;
+  deletedSnapshotId: string;
+  deletedSessionIds: string[];
+  deletedComparisonIds: string[];
+  deletedImportBatchIds: string[];
+  deletedModelSessionIds: string[];
+  activeSnapshot?: Snapshot;
+  audit: BackupImportAudit;
+}
+
+export interface LocalProject {
+  profile: Profile;
+  snapshots: Snapshot[];
+  legacySnapshotIds: string[];
+  legacySessionIds: string[];
+}
+
 export interface AppErrorShape {
   code: string;
   message: string;
@@ -429,4 +588,4 @@ export const DISTRIBUTIONS: Record<Exclude<DistributionPreset, "custom">, number
   "reverse-j": [50, 25, 14, 4, 2, 1, 1, 1, 1, 1],
 };
 
-export const APP_VERSION = "0.15.0";
+export const APP_VERSION = "0.16.0";
