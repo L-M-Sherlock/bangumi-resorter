@@ -4,6 +4,7 @@ import {
   chooseNextPair,
   fitModel,
   forecastStoppingTimeSimulation,
+  summarizeRankingEvidence,
   toModelState,
   type FitResult,
   type StoppingForecastOptions,
@@ -64,7 +65,7 @@ export function retargetStoppingMode(
   const diagnostics = model.diagnostics;
   if (!diagnostics
     || !STOPPING_MODE_ORDER.every((entry) =>
-      diagnostics.forecasts?.[entry]?.method === "posterior-contraction-mc-v10")
+      diagnostics.forecasts?.[entry]?.method === "posterior-contraction-mc-v11")
     || !STOPPING_MODE_ORDER.every((entry) =>
       diagnostics.stoppingChecks?.some((check) => check.mode === entry))) {
     return undefined;
@@ -102,13 +103,8 @@ export interface PreparedRanking {
 }
 
 export function prepareRanking(request: RankingRequest): PreparedRanking {
-  const comparisons = request.history
-    .filter((entry) => entry.outcome !== "skip")
-    .map((entry) => ({
-      leftSubjectId: entry.leftSubjectId,
-      rightSubjectId: entry.rightSubjectId,
-      outcome: entry.outcome as "left" | "tie" | "right",
-    }));
+  const evidence = summarizeRankingEvidence(request.history, request.sessionId);
+  const comparisons = evidence.comparisons;
   const activeMode = request.budgetMode ?? "standard";
   const priorMode = request.priorMode ?? legacyPriorMode(activeMode);
   const activeDefaults = rankingTuning(priorMode);
@@ -167,7 +163,7 @@ export function prepareRanking(request: RankingRequest): PreparedRanking {
       boundaryWindow: activeTuning.boundaryWindow,
       explorationInterval: activeTuning.explorationInterval,
       explorationRadius: activeTuning.explorationRadius,
-      allowCalibration: false,
+      allowCalibration: true,
     },
   };
   const active = { fit: result, diagnostics, options: forecastOptions };

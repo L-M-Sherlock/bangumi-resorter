@@ -21,6 +21,7 @@ export type SessionStatus = "active" | "complete";
 export type DistributionPreset = "uniform" | "preserve" | "high-tail" | "reverse-j" | "custom";
 export type ComparisonBudgetMode = "quick" | "standard" | "thorough";
 export type PriorMode = "strong" | "weak";
+export type OptimizationStatus = "converged" | "iteration-limit" | "line-search-failed" | "non-finite";
 export type ComparisonReusePolicy = "session" | "snapshot" | "profile";
 /** How a session obtains comparison history. Dynamic is retained for legacy data only. */
 export type ComparisonHistoryMode = "dynamic" | "local";
@@ -317,10 +318,16 @@ export interface RankingDiagnostics {
   /** Raw accepted judgments before repeated-pair correlation correction. */
   rawEvidenceCount?: number;
   uniquePairCount?: number;
+  uniquePairRequired?: number;
   coveredItemCount?: number;
+  /** An item is covered after its incident effective pair weight reaches the working threshold. */
+  itemCoverageWeightRequired?: number;
   repeatedPairCorrelation?: number;
+  sourceAgeHalfLifeDays?: number;
   /** Fitted Davidson tie-strength parameter shared by fit, selection, and forecast. */
   tieStrength?: number;
+  optimizerConverged?: boolean;
+  optimizationStatus?: OptimizationStatus;
   evidenceRequired: number;
   /** @deprecated Pre-0.13 diagnostics; no longer used to block comparisons. */
   fatigueLimit?: number;
@@ -336,6 +343,12 @@ export interface RankingDiagnostics {
     probabilityTarget?: number;
     requiredAdjacentStableItemCount?: number;
     allowedCrossTwoBucketCount?: number;
+    uniquePairRequired?: number;
+    coveredItemRequired?: number;
+    evidenceSatisfied?: boolean;
+    uniquePairsSatisfied?: boolean;
+    itemCoverageSatisfied?: boolean;
+    optimizerSatisfied?: boolean;
     sampleCount: number;
     stableSamples: number;
     probability: number;
@@ -359,6 +372,7 @@ export interface ModelState {
   acceptedComparisons: number;
   effectiveComparisons?: number;
   tieStrength?: number;
+  optimizationStatus?: OptimizationStatus;
   initialMeanUncertainty: number;
   currentMeanUncertainty: number;
   converged: boolean;

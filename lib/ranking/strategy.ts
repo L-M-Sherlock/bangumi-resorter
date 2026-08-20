@@ -39,6 +39,10 @@ export const STOPPING_PROBABILITY_TARGET = 0.9;
  * effective observations instead of m conditionally independent ones.
  */
 export const REPEATED_PAIR_CORRELATION = 0.5;
+/** Imported evidence loses half of its base weight for each year already elapsed at import time. */
+export const SOURCE_AGE_HALF_LIFE_DAYS = 365;
+/** Minimum incident effective weight for an item or pair to count toward stopping coverage. */
+export const MINIMUM_COVERAGE_WEIGHT = 0.5;
 export const STOPPING_MODE_ORDER: ComparisonBudgetMode[] = ["quick", "standard", "thorough"];
 export const STOPPING_COVERAGE_TARGETS: Record<ComparisonBudgetMode, number> = {
   quick: 0.8,
@@ -112,7 +116,16 @@ export function recommendedDistribution(): DistributionPreset {
 
 export function minimumEvidence(itemCount: number) {
   if (itemCount < 2) return 0;
-  return Math.min(20, Math.max(3, Math.ceil(Math.sqrt(itemCount))));
+  const unorderedPairCount = itemCount * (itemCount - 1) / 2;
+  return Math.min(unorderedPairCount, 20, Math.max(3, Math.ceil(Math.sqrt(itemCount))));
+}
+
+export function minimumUniquePairs(itemCount: number) {
+  return minimumEvidence(itemCount);
+}
+
+export function minimumCoveredItems(itemCount: number, mode: ComparisonBudgetMode) {
+  return requiredAdjacentStableItemCount(itemCount, stoppingCoverageTarget(mode));
 }
 
 export function repeatedPairEffectiveSampleSize(
@@ -122,7 +135,10 @@ export function repeatedPairEffectiveSampleSize(
   const safeCount = Math.max(0, count);
   if (safeCount === 0) return 0;
   const rho = Math.min(0.99, Math.max(0, correlation));
-  return safeCount / (1 + (safeCount - 1) * rho);
+  // Fractional counts arise after source-age decay.  Counts below one should
+  // stay fractional rather than be amplified by a design-effect formula that
+  // was derived for repeated observations.
+  return safeCount / (1 + Math.max(0, safeCount - 1) * rho);
 }
 
 /** Equal fractional-likelihood weight assigned to every answer in a pair cluster. */

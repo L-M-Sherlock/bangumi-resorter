@@ -140,7 +140,7 @@ function validateStoppingForecast(value: unknown, path: string) {
   const forecast = requiredObject(value, path);
   if (forecast.method !== undefined) {
     enumString(forecast.method, `${path}.method`, [
-      "posterior-contraction-mc-v1", "posterior-contraction-mc-v2", "posterior-contraction-mc-v3", "posterior-contraction-mc-v4", "posterior-contraction-mc-v5", "posterior-contraction-mc-v6", "posterior-contraction-mc-v7", "posterior-contraction-mc-v8", "posterior-contraction-mc-v9", "posterior-contraction-mc-v10",
+      "posterior-contraction-mc-v1", "posterior-contraction-mc-v2", "posterior-contraction-mc-v3", "posterior-contraction-mc-v4", "posterior-contraction-mc-v5", "posterior-contraction-mc-v6", "posterior-contraction-mc-v7", "posterior-contraction-mc-v8", "posterior-contraction-mc-v9", "posterior-contraction-mc-v10", "posterior-contraction-mc-v11",
     ]);
   }
   if (forecast.status !== undefined) enumString(forecast.status, `${path}.status`, ["ready", "forecast", "uncertain", "limit"]);
@@ -157,7 +157,7 @@ function validateModelDiagnostics(value: unknown, path: string) {
   if (value === undefined) return undefined;
   const diagnostics = requiredObject(value, path);
   if (diagnostics.method !== undefined) {
-    enumString(diagnostics.method, `${path}.method`, ["laplace-mc-v1", "laplace-mc-v2", "laplace-mc-v3", "laplace-mc-v4", "laplace-mc-v5"]);
+    enumString(diagnostics.method, `${path}.method`, ["laplace-mc-v1", "laplace-mc-v2", "laplace-mc-v3", "laplace-mc-v4", "laplace-mc-v5", "laplace-mc-v6"]);
   }
   validateNumericFields(diagnostics, path, [
     "sampleCount", "jointBucketStability", "jointBucketStableSamples", "jointBucketStabilityLow", "jointBucketStabilityHigh",
@@ -165,9 +165,14 @@ function validateModelDiagnostics(value: unknown, path: string) {
     "coverageTargetStability", "coverageTargetStableSamples", "coverageTargetStabilityLow", "coverageTargetStabilityHigh",
     "requiredAdjacentStableItemCount", "allowedCrossTwoBucketCount", "expectedCrossTwoBucketCount", "crossTwoBucketCountMedian",
     "crossTwoBucketCountLow", "crossTwoBucketCountHigh", "maxBucketDisplacementMedian", "maxBucketDisplacementHigh",
-    "expectedBucketChangeRate", "minBucketStability", "decisionRiskRatio", "evidenceCount", "evidenceRequired", "fatigueLimit",
+    "expectedBucketChangeRate", "minBucketStability", "decisionRiskRatio", "evidenceCount", "rawEvidenceCount", "evidenceRequired",
+    "uniquePairCount", "uniquePairRequired", "coveredItemCount", "itemCoverageWeightRequired", "repeatedPairCorrelation",
+    "sourceAgeHalfLifeDays", "tieStrength", "fatigueLimit",
   ]);
-  validateBooleanFields(diagnostics, path, ["fatigueReached", "ready"]);
+  validateBooleanFields(diagnostics, path, ["optimizerConverged", "fatigueReached", "ready"]);
+  if (diagnostics.optimizationStatus !== undefined) {
+    enumString(diagnostics.optimizationStatus, `${path}.optimizationStatus`, ["converged", "iteration-limit", "line-search-failed", "non-finite"]);
+  }
   for (const field of ["bucketStability", "adjacentBucketStabilityByItem"] as const) {
     if (diagnostics[field] !== undefined) numericRecord(diagnostics[field], `${path}.${field}`);
   }
@@ -180,9 +185,12 @@ function validateModelDiagnostics(value: unknown, path: string) {
       enumString(check.mode, `${path}.stoppingChecks[${index}].mode`, ["quick", "standard", "thorough"]);
       validateNumericFields(check, `${path}.stoppingChecks[${index}]`, [
         "target", "probabilityTarget", "requiredAdjacentStableItemCount", "allowedCrossTwoBucketCount",
+        "uniquePairRequired", "coveredItemRequired",
         "sampleCount", "stableSamples", "probability", "low", "high",
       ]);
-      optionalBoolean(check.ready, `${path}.stoppingChecks[${index}].ready`);
+      for (const field of ["evidenceSatisfied", "uniquePairsSatisfied", "itemCoverageSatisfied", "optimizerSatisfied", "ready"] as const) {
+        optionalBoolean(check[field], `${path}.stoppingChecks[${index}].${field}`);
+      }
     });
   }
   if (diagnostics.calibration !== undefined) {
@@ -459,10 +467,15 @@ export function validateBackupPayload(input: unknown): Pick<ValidatedBackup, "pa
       abilities: numericRecord(entry.abilities, `models[${index}].abilities`),
       uncertainty: numericRecord(entry.uncertainty, `models[${index}].uncertainty`),
       acceptedComparisons: requiredNumber(entry.acceptedComparisons, `models[${index}].acceptedComparisons`),
+      effectiveComparisons: optionalNumber(entry.effectiveComparisons, `models[${index}].effectiveComparisons`),
+      tieStrength: optionalNumber(entry.tieStrength, `models[${index}].tieStrength`),
       initialMeanUncertainty: requiredNumber(entry.initialMeanUncertainty, `models[${index}].initialMeanUncertainty`),
       currentMeanUncertainty: requiredNumber(entry.currentMeanUncertainty, `models[${index}].currentMeanUncertainty`),
       converged: requiredBoolean(entry.converged, `models[${index}].converged`),
       iterations: requiredNumber(entry.iterations, `models[${index}].iterations`),
+      optimizationStatus: entry.optimizationStatus === undefined
+        ? undefined
+        : enumString(entry.optimizationStatus, `models[${index}].optimizationStatus`, ["converged", "iteration-limit", "line-search-failed", "non-finite"]),
       diagnostics: validateModelDiagnostics(entry.diagnostics, `models[${index}].diagnostics`),
       updatedAt: requiredString(entry.updatedAt, `models[${index}].updatedAt`),
     };

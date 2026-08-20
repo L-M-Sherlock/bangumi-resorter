@@ -5,6 +5,7 @@ import {
   DistributionConfig,
   ModelState,
   NextPair,
+  OptimizationStatus,
   RankedItem,
   RankingComparisonInput,
   RankingDiagnostics,
@@ -16,8 +17,14 @@ import { effectiveDistributionWeights, normalizeScoreLevelCount } from "../distr
 import {
   allowedCrossTwoBucketCount,
   forecastProjectionHorizon,
+  minimumCoveredItems,
   minimumEvidence,
+  minimumUniquePairs,
+  MINIMUM_COVERAGE_WEIGHT,
+  repeatedPairEffectiveSampleSize,
+  REPEATED_PAIR_CORRELATION,
   requiredAdjacentStableItemCount,
+  SOURCE_AGE_HALF_LIFE_DAYS,
   stoppingCoverageTarget,
   STOPPING_MODE_ORDER,
   STOPPING_PROBABILITY_TARGET,
@@ -31,11 +38,16 @@ const GRADIENT_TOLERANCE = 1e-6;
 const PCG_TOLERANCE = 1e-4;
 const POSTERIOR_PCG_TOLERANCE = 1e-3;
 const BUCKET_STABILITY_TARGET = STOPPING_PROBABILITY_TARGET;
+const DEFAULT_TIE_STRENGTH = 0.35;
+const TIE_LOG_PRIOR_MEAN = Math.log(DEFAULT_TIE_STRENGTH);
+const TIE_LOG_PRIOR_STRENGTH = 1;
+const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
 
 interface IndexedComparison {
   left: number;
   right: number;
-  y: number;
+  outcome: "left" | "tie" | "right";
+  weight: number;
 }
 
 export interface FitResult {
@@ -45,6 +57,9 @@ export interface FitResult {
   converged: boolean;
   iterations: number;
   acceptedComparisons: number;
+  effectiveComparisons?: number;
+  tieStrength?: number;
+  optimizationStatus?: OptimizationStatus;
   posteriorSamples: Float64Array[];
 }
 
@@ -53,6 +68,8 @@ export interface FitOptions {
   priorScale?: number;
   posteriorSampleCount?: number;
   randomSeed?: number;
+  /** Primarily exposed for deterministic fail-closed tests and diagnostics. */
+  maxIterations?: number;
 }
 
 export interface PairSelectionOptions {
@@ -61,7 +78,7 @@ export interface PairSelectionOptions {
   boundaryWindow?: number;
   explorationInterval?: number;
   explorationRadius?: number;
-  /** Forecasts simulate ordinary adaptive questions, not calibration repeats. */
+  /** Whether scheduled calibration repeats participate in this selection path. */
   allowCalibration?: boolean;
   /** Internal cache used by long-running forecast paths. */
   selectionCache?: PairSelectionCache;
@@ -98,22 +115,39 @@ export interface StoppingForecastOptions {
   diagnosticStride?: number;
 }
 
-function sigmoid(value: number) {
-  if (value >= 0) {
-    const z = Math.exp(-value);
-    return 1 / (1 + z);
+export interface DavidsonProbabilities {
+  left: number;
+  tie: number;
+  right: number;
+}
+
+/** The shared three-result observation model used by fitting, selection, and forecast. */
+export function davidsonProbabilities(
+  difference: number,
+  tieStrength = DEFAULT_TIE_STRENGTH,
+): DavidsonProbabilities {
+  const bounded = Math.max(-80, Math.min(80, difference));
+  const leftLogWeight = bounded / 2;
+  const rightLogWeight = -bounded / 2;
+  const tieLogWeight = Math.log(Math.max(1e-8, tieStrength));
+  const maximum = Math.max(leftLogWeight, rightLogWeight, tieLogWeight);
+  const leftWeight = Math.exp(leftLogWeight - maximum);
+  const tieWeight = Math.exp(tieLogWeight - maximum);
+  const rightWeight = Math.exp(rightLogWeight - maximum);
+  const denominator = leftWeight + tieWeight + rightWeight;
+  return {
+    left: leftWeight / denominator,
+    tie: tieWeight / denominator,
+    right: rightWeight / denominator,
+  };
+}
+
+function categoricalEntropy(probabilities: DavidsonProbabilities) {
+  let entropy = 0;
+  for (const probability of [probabilities.left, probabilities.tie, probabilities.right]) {
+    if (probability > 0) entropy -= probability * Math.log(probability);
   }
-  const z = Math.exp(value);
-  return z / (1 + z);
-}
-
-function logSigmoid(value: number) {
-  return value >= 0 ? -Math.log1p(Math.exp(-value)) : value - Math.log1p(Math.exp(value));
-}
-
-function binaryEntropy(probability: number) {
-  const p = Math.min(1 - 1e-12, Math.max(1e-12, probability));
-  return -p * Math.log(p) - (1 - p) * Math.log(1 - p);
+  return entropy;
 }
 
 function dot(a: Float64Array, b: Float64Array) {
@@ -122,48 +156,89 @@ function dot(a: Float64Array, b: Float64Array) {
   return sum;
 }
 
-function evaluate(theta: Float64Array, prior: Float64Array, comparisons: IndexedComparison[], priorStrength: number) {
-  const gradient = new Float64Array(theta.length);
-  const diagonal = new Float64Array(theta.length);
-  diagonal.fill(priorStrength);
+interface ModelEvaluation {
+  objective: number;
+  gradient: Float64Array;
+  diagonal: Float64Array;
+  edgeWeights: Float64Array;
+  tieWeights: Float64Array;
+  crossWeights: Float64Array;
+}
+
+function evaluate(
+  parameters: Float64Array,
+  prior: Float64Array,
+  comparisons: IndexedComparison[],
+  priorStrength: number,
+): ModelEvaluation {
+  const itemCount = prior.length;
+  const tieIndex = itemCount;
+  const gradient = new Float64Array(parameters.length);
+  const diagonal = new Float64Array(parameters.length);
+  diagonal.fill(priorStrength, 0, itemCount);
+  diagonal[tieIndex] = TIE_LOG_PRIOR_STRENGTH;
   let objective = 0;
 
-  for (let i = 0; i < theta.length; i += 1) {
-    const diff = theta[i] - prior[i];
+  for (let i = 0; i < itemCount; i += 1) {
+    const diff = parameters[i] - prior[i];
     objective -= 0.5 * priorStrength * diff * diff;
     gradient[i] -= priorStrength * diff;
   }
+  const tiePriorDifference = parameters[tieIndex] - TIE_LOG_PRIOR_MEAN;
+  objective -= 0.5 * TIE_LOG_PRIOR_STRENGTH * tiePriorDifference ** 2;
+  gradient[tieIndex] -= TIE_LOG_PRIOR_STRENGTH * tiePriorDifference;
 
-  const weights = new Float64Array(comparisons.length);
+  const edgeWeights = new Float64Array(comparisons.length);
+  const tieWeights = new Float64Array(comparisons.length);
+  const crossWeights = new Float64Array(comparisons.length);
+  const tieStrength = Math.exp(parameters[tieIndex]);
   for (let k = 0; k < comparisons.length; k += 1) {
     const comparison = comparisons[k];
-    const difference = theta[comparison.left] - theta[comparison.right];
-    const probability = sigmoid(difference);
-    objective += comparison.y * logSigmoid(difference) + (1 - comparison.y) * logSigmoid(-difference);
-    const residual = comparison.y - probability;
+    const difference = parameters[comparison.left] - parameters[comparison.right];
+    const probabilities = davidsonProbabilities(difference, tieStrength);
+    const observedScore = comparison.outcome === "left" ? 1 : comparison.outcome === "right" ? -1 : 0;
+    const expectedScore = probabilities.left - probabilities.right;
+    const residual = comparison.weight * 0.5 * (observedScore - expectedScore);
+    const likelihood = probabilities[comparison.outcome];
+    objective += comparison.weight * Math.log(Math.max(1e-300, likelihood));
     gradient[comparison.left] += residual;
     gradient[comparison.right] -= residual;
-    const weight = Math.max(1e-12, probability * (1 - probability));
-    weights[k] = weight;
-    diagonal[comparison.left] += weight;
-    diagonal[comparison.right] += weight;
+    gradient[tieIndex] += comparison.weight
+      * (Number(comparison.outcome === "tie") - probabilities.tie);
+
+    const edgeWeight = comparison.weight * 0.25
+      * (probabilities.left + probabilities.right - expectedScore ** 2);
+    const tieWeight = comparison.weight * probabilities.tie * (1 - probabilities.tie);
+    const crossWeight = comparison.weight * -0.5 * expectedScore * probabilities.tie;
+    edgeWeights[k] = Math.max(0, edgeWeight);
+    tieWeights[k] = Math.max(0, tieWeight);
+    crossWeights[k] = crossWeight;
+    diagonal[comparison.left] += edgeWeights[k];
+    diagonal[comparison.right] += edgeWeights[k];
+    diagonal[tieIndex] += tieWeights[k];
   }
-  return { objective, gradient, diagonal, weights };
+  return { objective, gradient, diagonal, edgeWeights, tieWeights, crossWeights };
 }
 
 function hessianProduct(
   vector: Float64Array,
   comparisons: IndexedComparison[],
-  weights: Float64Array,
+  evaluation: Pick<ModelEvaluation, "edgeWeights" | "tieWeights" | "crossWeights">,
   priorStrength: number,
 ) {
   const output = new Float64Array(vector.length);
-  for (let i = 0; i < vector.length; i += 1) output[i] = priorStrength * vector[i];
+  const tieIndex = vector.length - 1;
+  for (let i = 0; i < tieIndex; i += 1) output[i] = priorStrength * vector[i];
+  output[tieIndex] = TIE_LOG_PRIOR_STRENGTH * vector[tieIndex];
   for (let k = 0; k < comparisons.length; k += 1) {
     const { left, right } = comparisons[k];
-    const weightedDifference = weights[k] * (vector[left] - vector[right]);
+    const difference = vector[left] - vector[right];
+    const weightedDifference = evaluation.edgeWeights[k] * difference
+      + evaluation.crossWeights[k] * vector[tieIndex];
     output[left] += weightedDifference;
     output[right] -= weightedDifference;
+    output[tieIndex] += evaluation.tieWeights[k] * vector[tieIndex]
+      + evaluation.crossWeights[k] * difference;
   }
   return output;
 }
@@ -172,7 +247,7 @@ function solvePcg(
   rightHandSide: Float64Array,
   diagonal: Float64Array,
   comparisons: IndexedComparison[],
-  weights: Float64Array,
+  evaluation: Pick<ModelEvaluation, "edgeWeights" | "tieWeights" | "crossWeights">,
   priorStrength: number,
   tolerance = PCG_TOLERANCE,
   iterationLimit = 200,
@@ -189,7 +264,7 @@ function solvePcg(
   const maxIterations = Math.max(1, Math.min(iterationLimit, size));
 
   for (let iteration = 0; iteration < maxIterations; iteration += 1) {
-    const product = hessianProduct(direction, comparisons, weights, priorStrength);
+    const product = hessianProduct(direction, comparisons, evaluation, priorStrength);
     const denominator = dot(direction, product);
     if (!Number.isFinite(denominator) || denominator <= 0) break;
     const alpha = residualDotZ / denominator;
@@ -242,10 +317,9 @@ function normalGenerator(random: () => number) {
 }
 
 function sampleLaplacePosterior(
-  theta: Float64Array,
+  parameters: Float64Array,
   comparisons: IndexedComparison[],
-  weights: Float64Array,
-  diagonal: Float64Array,
+  evaluation: ModelEvaluation,
   priorStrength: number,
   sampleCount: number,
   seed: number,
@@ -254,26 +328,53 @@ function sampleLaplacePosterior(
   const random = seededRandom(seed);
   const normal = normalGenerator(random);
   const priorNoiseScale = Math.sqrt(priorStrength);
+  const tieIndex = parameters.length - 1;
   for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex += 1) {
-    const noise = new Float64Array(theta.length);
-    for (let i = 0; i < noise.length; i += 1) noise[i] = priorNoiseScale * normal();
+    const noise = new Float64Array(parameters.length);
+    for (let i = 0; i < tieIndex; i += 1) noise[i] = priorNoiseScale * normal();
+    noise[tieIndex] = Math.sqrt(TIE_LOG_PRIOR_STRENGTH) * normal();
     for (let k = 0; k < comparisons.length; k += 1) {
-      const edgeNoise = Math.sqrt(weights[k]) * normal();
+      const edgeScale = Math.sqrt(Math.max(0, evaluation.edgeWeights[k]));
+      const firstNormal = normal();
+      const edgeNoise = edgeScale * firstNormal;
+      const correlatedTieNoise = edgeScale > 0
+        ? evaluation.crossWeights[k] / edgeScale * firstNormal
+        : 0;
+      const residualTieVariance = Math.max(
+        0,
+        evaluation.tieWeights[k]
+          - evaluation.crossWeights[k] ** 2 / Math.max(evaluation.edgeWeights[k], 1e-30),
+      );
       noise[comparisons[k].left] += edgeNoise;
       noise[comparisons[k].right] -= edgeNoise;
+      noise[tieIndex] += correlatedTieNoise + Math.sqrt(residualTieVariance) * normal();
     }
     const delta = solvePcg(
       noise,
-      diagonal,
+      evaluation.diagonal,
       comparisons,
-      weights,
+      evaluation,
       priorStrength,
       POSTERIOR_PCG_TOLERANCE,
       100,
     );
-    const sample = new Float64Array(theta.length);
-    for (let i = 0; i < theta.length; i += 1) sample[i] = theta[i] + delta[i];
+    const sample = new Float64Array(tieIndex);
+    for (let i = 0; i < tieIndex; i += 1) sample[i] = parameters[i] + delta[i];
     samples.push(sample);
+  }
+  recenterSamples(samples, parameters.subarray(0, tieIndex));
+  return samples;
+}
+
+/** Shift only the ensemble mean, preserving every centered sample and covariance. */
+export function recenterSamples(samples: Float64Array[], target: Float64Array) {
+  if (samples.length === 0) return samples;
+  for (let itemIndex = 0; itemIndex < target.length; itemIndex += 1) {
+    let mean = 0;
+    for (const sample of samples) mean += sample[itemIndex] ?? 0;
+    mean /= samples.length;
+    const shift = target[itemIndex] - mean;
+    for (const sample of samples) sample[itemIndex] += shift;
   }
   return samples;
 }
@@ -287,7 +388,8 @@ export function fitModel(
   if (items.length === 0) {
     return {
       abilities: {}, uncertainty: {}, meanUncertainty: 0, converged: true,
-      iterations: 0, acceptedComparisons: 0, posteriorSamples: [],
+      iterations: 0, acceptedComparisons: 0, effectiveComparisons: 0,
+      tieStrength: DEFAULT_TIE_STRENGTH, optimizationStatus: "converged", posteriorSamples: [],
     };
   }
   const indexById = new Map(items.map((item, index) => [item.subjectId, index]));
@@ -296,28 +398,39 @@ export function fitModel(
     const left = indexById.get(comparison.leftSubjectId);
     const right = indexById.get(comparison.rightSubjectId);
     if (left === undefined || right === undefined || left === right) continue;
-    comparisons.push({ left, right, y: comparison.outcome === "left" ? 1 : comparison.outcome === "right" ? 0 : 0.5 });
+    const weight = comparison.weight ?? 1;
+    if (!Number.isFinite(weight) || weight <= 0) continue;
+    comparisons.push({ left, right, outcome: comparison.outcome, weight });
   }
 
   const priorStrength = Math.max(1e-6, options.priorStrength ?? DEFAULT_PRIOR_STRENGTH);
   const priorScale = Math.max(0, options.priorScale ?? DEFAULT_PRIOR_SCALE);
   const prior = new Float64Array(items.map((item) => priorScale * (item.rate - 5.5)));
-  let theta = new Float64Array(items.map((item, index) => {
+  let parameters = new Float64Array(items.length + 1);
+  items.forEach((item, index) => {
     const previous = previousAbilities?.[item.subjectId];
-    return previous !== undefined && Number.isFinite(previous) ? previous : prior[index];
-  }));
+    parameters[index] = previous !== undefined && Number.isFinite(previous) ? previous : prior[index];
+  });
+  parameters[items.length] = TIE_LOG_PRIOR_MEAN;
   let converged = false;
   let iterations = 0;
+  let optimizationStatus: OptimizationStatus = "iteration-limit";
+  const maxIterations = Math.max(0, Math.round(options.maxIterations ?? MAX_OUTER));
 
-  for (iterations = 0; iterations < MAX_OUTER; iterations += 1) {
-    const current = evaluate(theta, prior, comparisons, priorStrength);
+  for (iterations = 0; iterations < maxIterations; iterations += 1) {
+    const current = evaluate(parameters, prior, comparisons, priorStrength);
     let gradientInfinityNorm = 0;
     for (const value of current.gradient) gradientInfinityNorm = Math.max(gradientInfinityNorm, Math.abs(value));
-    if (gradientInfinityNorm < GRADIENT_TOLERANCE) {
-      converged = true;
+    if (!Number.isFinite(current.objective) || !Number.isFinite(gradientInfinityNorm)) {
+      optimizationStatus = "non-finite";
       break;
     }
-    let step = solvePcg(current.gradient, current.diagonal, comparisons, current.weights, priorStrength);
+    if (gradientInfinityNorm < GRADIENT_TOLERANCE) {
+      converged = true;
+      optimizationStatus = "converged";
+      break;
+    }
+    let step = solvePcg(current.gradient, current.diagonal, comparisons, current, priorStrength);
     let directionalDerivative = dot(current.gradient, step);
     if (!Number.isFinite(directionalDerivative) || directionalDerivative <= 0) {
       step = new Float64Array(step.length);
@@ -327,26 +440,40 @@ export function fitModel(
     let scale = 1;
     let accepted = false;
     for (let lineIteration = 0; lineIteration < 20; lineIteration += 1) {
-      const candidate = new Float64Array(theta.length);
-      for (let i = 0; i < theta.length; i += 1) candidate[i] = theta[i] + scale * step[i];
+      const candidate = new Float64Array(parameters.length);
+      for (let i = 0; i < parameters.length; i += 1) candidate[i] = parameters[i] + scale * step[i];
       const candidateObjective = evaluate(candidate, prior, comparisons, priorStrength).objective;
       if (Number.isFinite(candidateObjective) && candidateObjective >= current.objective + 1e-4 * scale * directionalDerivative) {
-        theta = candidate;
+        parameters = candidate;
         accepted = true;
         break;
       }
       scale *= 0.5;
     }
-    if (!accepted) break;
+    if (!accepted) {
+      optimizationStatus = "line-search-failed";
+      break;
+    }
   }
 
-  const finalEvaluation = evaluate(theta, prior, comparisons, priorStrength);
+  const finalEvaluation = evaluate(parameters, prior, comparisons, priorStrength);
+  let finalGradientInfinityNorm = 0;
+  for (const value of finalEvaluation.gradient) {
+    finalGradientInfinityNorm = Math.max(finalGradientInfinityNorm, Math.abs(value));
+  }
+  if (Number.isFinite(finalEvaluation.objective)
+    && Number.isFinite(finalGradientInfinityNorm)
+    && finalGradientInfinityNorm < GRADIENT_TOLERANCE) {
+    converged = true;
+    optimizationStatus = "converged";
+  } else if (!Number.isFinite(finalEvaluation.objective) || !Number.isFinite(finalGradientInfinityNorm)) {
+    optimizationStatus = "non-finite";
+  }
   const sampleCount = Math.max(8, Math.round(options.posteriorSampleCount ?? DEFAULT_POSTERIOR_SAMPLES));
   const posteriorSamples = sampleLaplacePosterior(
-    theta,
+    parameters,
     comparisons,
-    finalEvaluation.weights,
-    finalEvaluation.diagonal,
+    finalEvaluation,
     priorStrength,
     sampleCount,
     options.randomSeed ?? 0x5eed1234,
@@ -355,8 +482,8 @@ export function fitModel(
   const uncertainty: Record<number, number> = {};
   let meanUncertainty = 0;
   items.forEach((item, index) => {
-    if (!Number.isFinite(theta[index])) throw new Error("模型计算产生了无效数值。");
-    abilities[item.subjectId] = theta[index];
+    if (!Number.isFinite(parameters[index])) throw new Error("模型计算产生了无效数值。");
+    abilities[item.subjectId] = parameters[index];
     let sampleMean = 0;
     for (const sample of posteriorSamples) sampleMean += sample[index];
     sampleMean /= posteriorSamples.length;
@@ -367,10 +494,103 @@ export function fitModel(
     meanUncertainty += uncertainty[item.subjectId];
   });
   meanUncertainty /= items.length;
-  return { abilities, uncertainty, meanUncertainty, converged, iterations, acceptedComparisons: comparisons.length, posteriorSamples };
+  const tieStrength = Math.exp(parameters[items.length]);
+  if (!Number.isFinite(tieStrength)) throw new Error("平局参数计算产生了无效数值。");
+  return {
+    abilities,
+    uncertainty,
+    meanUncertainty,
+    converged,
+    iterations,
+    acceptedComparisons: comparisons.length,
+    effectiveComparisons: comparisons.reduce((sum, comparison) => sum + comparison.weight, 0),
+    tieStrength,
+    optimizationStatus,
+    posteriorSamples,
+  };
 }
 
 function pairKey(a: number, b: number) { return a < b ? `${a}:${b}` : `${b}:${a}`; }
+
+export interface RankingEvidenceSummary {
+  comparisons: RankingComparisonInput[];
+  rawEvidenceCount: number;
+  evidenceCount: number;
+  uniquePairCount: number;
+  coveredItemCount: number;
+  /** Sum of source-age-decayed observations before the pair design effect. */
+  pairMass: Record<string, number>;
+  pairEffectiveWeight: Record<string, number>;
+  itemEffectiveWeight: Record<number, number>;
+}
+
+function sourceAgeWeight(entry: RankingHistoryInput) {
+  if (!entry.sourceCreatedAt) return 1;
+  const sourceTime = Date.parse(entry.sourceCreatedAt);
+  const copiedTime = Date.parse(entry.createdAt);
+  if (!Number.isFinite(sourceTime) || !Number.isFinite(copiedTime) || copiedTime <= sourceTime) return 1;
+  const ageDays = (copiedTime - sourceTime) / MILLISECONDS_PER_DAY;
+  return 2 ** (-ageDays / SOURCE_AGE_HALF_LIFE_DAYS);
+}
+
+/**
+ * Turn accepted history into fractional-likelihood observations.  Every
+ * calibration answer is ordinary preference evidence, but all answers about
+ * the same unordered pair share one correlation-adjusted cluster.
+ */
+export function summarizeRankingEvidence(
+  history: RankingHistoryInput[],
+  sessionId?: string,
+): RankingEvidenceSummary {
+  const accepted = history.filter((entry) =>
+    entry.outcome !== "skip" && (sessionId === undefined || entry.sessionId === sessionId));
+  const clusters = new Map<string, Array<{ entry: RankingHistoryInput; baseWeight: number }>>();
+  for (const entry of accepted) {
+    const key = pairKey(entry.leftSubjectId, entry.rightSubjectId);
+    const cluster = clusters.get(key) ?? [];
+    cluster.push({ entry, baseWeight: sourceAgeWeight(entry) });
+    clusters.set(key, cluster);
+  }
+
+  const comparisons: RankingComparisonInput[] = [];
+  const pairMass: Record<string, number> = {};
+  const pairEffectiveWeight: Record<string, number> = {};
+  const itemEffectiveWeight: Record<number, number> = {};
+  let evidenceCount = 0;
+  let uniquePairCount = 0;
+  for (const [key, cluster] of clusters) {
+    const mass = cluster.reduce((sum, observation) => sum + observation.baseWeight, 0);
+    const effectiveWeight = repeatedPairEffectiveSampleSize(mass);
+    const multiplier = mass > 0 ? effectiveWeight / mass : 0;
+    pairMass[key] = mass;
+    pairEffectiveWeight[key] = effectiveWeight;
+    evidenceCount += effectiveWeight;
+    if (effectiveWeight >= MINIMUM_COVERAGE_WEIGHT) uniquePairCount += 1;
+    const first = cluster[0].entry;
+    itemEffectiveWeight[first.leftSubjectId] = (itemEffectiveWeight[first.leftSubjectId] ?? 0) + effectiveWeight;
+    itemEffectiveWeight[first.rightSubjectId] = (itemEffectiveWeight[first.rightSubjectId] ?? 0) + effectiveWeight;
+    for (const { entry, baseWeight } of cluster) {
+      comparisons.push({
+        leftSubjectId: entry.leftSubjectId,
+        rightSubjectId: entry.rightSubjectId,
+        outcome: entry.outcome as "left" | "tie" | "right",
+        weight: baseWeight * multiplier,
+      });
+    }
+  }
+  const coveredItemCount = Object.values(itemEffectiveWeight)
+    .filter((weight) => weight >= MINIMUM_COVERAGE_WEIGHT).length;
+  return {
+    comparisons,
+    rawEvidenceCount: accepted.length,
+    evidenceCount,
+    uniquePairCount,
+    coveredItemCount,
+    pairMass,
+    pairEffectiveWeight,
+    itemEffectiveWeight,
+  };
+}
 
 function normalizedWinner(entry: Pick<RankingHistoryInput, "leftSubjectId" | "rightSubjectId" | "outcome">) {
   if (entry.outcome === "tie") return "tie";
@@ -477,14 +697,14 @@ function mappedRates<T extends RateItem>(ordered: T[], config: DistributionConfi
 
 function orderByAbilities<T extends RateItem>(items: T[], abilities: Record<number, number>) {
   return [...items].sort((a, b) =>
-    (abilities[b.subjectId] ?? 0) - (abilities[a.subjectId] ?? 0) || b.rate - a.rate || a.subjectId - b.subjectId,
+    (abilities[b.subjectId] ?? 0) - (abilities[a.subjectId] ?? 0) || a.subjectId - b.subjectId,
   );
 }
 
 function orderBySample(items: RankingItemInput[], sample: Float64Array) {
   const indices = items.map((_, index) => index);
   indices.sort((a, b) =>
-    sample[b] - sample[a] || items[b].rate - items[a].rate || items[a].subjectId - items[b].subjectId,
+    sample[b] - sample[a] || items[a].subjectId - items[b].subjectId,
   );
   return indices.map((index) => items[index]);
 }
@@ -616,26 +836,43 @@ function buildStoppingChecks(
   itemCount: number,
   sampleCount: number,
   stableSamplesByMode: Record<ComparisonBudgetMode, number>,
-  evidenceSatisfied: boolean,
+  evidence: Pick<RankingEvidenceSummary, "evidenceCount" | "uniquePairCount" | "coveredItemCount">,
+  evidenceRequired: number,
+  optimizerConverged: boolean,
 ): NonNullable<RankingDiagnostics["stoppingChecks"]> {
   return STOPPING_MODE_ORDER.map((mode) => {
     const target = stoppingCoverageTarget(mode);
     const stableSamples = stableSamplesByMode[mode];
     const interval = sampleCount > 0
       ? wilsonInterval(stableSamples, sampleCount)
-      : { low: 1, high: 1 };
+      : itemCount === 0 ? { low: 1, high: 1 } : { low: 0, high: 1 };
+    const uniquePairRequired = minimumUniquePairs(itemCount);
+    const coveredItemRequired = minimumCoveredItems(itemCount, mode);
+    const evidenceSatisfied = evidence.evidenceCount + 1e-12 >= evidenceRequired;
+    const uniquePairsSatisfied = evidence.uniquePairCount >= uniquePairRequired;
+    const itemCoverageSatisfied = evidence.coveredItemCount >= coveredItemRequired;
     return {
       mode,
       target,
       probabilityTarget: STOPPING_PROBABILITY_TARGET,
       requiredAdjacentStableItemCount: requiredAdjacentStableItemCount(itemCount, target),
       allowedCrossTwoBucketCount: allowedCrossTwoBucketCount(itemCount, target),
+      uniquePairRequired,
+      coveredItemRequired,
+      evidenceSatisfied,
+      uniquePairsSatisfied,
+      itemCoverageSatisfied,
+      optimizerSatisfied: optimizerConverged,
       sampleCount,
       stableSamples,
       probability: sampleCount > 0 ? stableSamples / sampleCount : 1,
       low: interval.low,
       high: interval.high,
-      ready: evidenceSatisfied && interval.low >= STOPPING_PROBABILITY_TARGET,
+      ready: evidenceSatisfied
+        && uniquePairsSatisfied
+        && itemCoverageSatisfied
+        && optimizerConverged
+        && interval.low >= STOPPING_PROBABILITY_TARGET,
     };
   });
 }
@@ -655,26 +892,42 @@ export function analyzeRanking(
   const stoppingMode = typeof stoppingModeOrLegacyTarget === "string"
     ? stoppingModeOrLegacyTarget
     : "standard";
+  const evidence = summarizeRankingEvidence(history, sessionId);
+  const evidenceRequired = minimumEvidence(items.length);
   if (items.length === 0 || fit.posteriorSamples.length === 0) {
     const calibration = calibrationDiagnostics(history);
-    const stoppingChecks = buildStoppingChecks(0, 0, {
+    const stoppingChecks = buildStoppingChecks(items.length, 0, {
       quick: 0, standard: 0, thorough: 0,
-    }, true);
+    }, evidence, evidenceRequired, fit.converged);
+    const activeCheck = stoppingChecks.find((check) => check.mode === stoppingMode)!;
     return {
-      method: "laplace-mc-v5", sampleCount: 0, bucketStability: {}, adjacentBucketStabilityByItem: {},
-      jointBucketStability: 1, jointBucketStableSamples: 0,
-      jointBucketStabilityLow: 1, jointBucketStabilityHigh: 1,
-      adjacentBucketStability: 1, adjacentBucketStableSamples: 0,
-      adjacentBucketStabilityLow: 1, adjacentBucketStabilityHigh: 1,
-      coverageTargetStability: 1, coverageTargetStableSamples: 0,
-      coverageTargetStabilityLow: 1, coverageTargetStabilityHigh: 1,
-      requiredAdjacentStableItemCount: 0, allowedCrossTwoBucketCount: 0,
+      method: "laplace-mc-v6", sampleCount: 0, bucketStability: {}, adjacentBucketStabilityByItem: {},
+      jointBucketStability: items.length === 0 ? 1 : 0, jointBucketStableSamples: 0,
+      jointBucketStabilityLow: items.length === 0 ? 1 : 0, jointBucketStabilityHigh: 1,
+      adjacentBucketStability: items.length === 0 ? 1 : 0, adjacentBucketStableSamples: 0,
+      adjacentBucketStabilityLow: items.length === 0 ? 1 : 0, adjacentBucketStabilityHigh: 1,
+      coverageTargetStability: items.length === 0 ? 1 : 0, coverageTargetStableSamples: 0,
+      coverageTargetStabilityLow: items.length === 0 ? 1 : 0, coverageTargetStabilityHigh: 1,
+      requiredAdjacentStableItemCount: requiredAdjacentStableItemCount(items.length),
+      allowedCrossTwoBucketCount: allowedCrossTwoBucketCount(items.length),
       expectedCrossTwoBucketCount: 0,
       crossTwoBucketCountMedian: 0, crossTwoBucketCountLow: 0, crossTwoBucketCountHigh: 0,
       maxBucketDisplacementMedian: 0, maxBucketDisplacementHigh: 0,
       expectedBucketChangeRate: 0, minBucketStability: 1,
-      decisionRiskRatio: 0, evidenceCount: 0, evidenceRequired: 0,
-      ready: true, stoppingChecks, stoppingBottleneckMode: stoppingMode, calibration,
+      decisionRiskRatio: decisionRiskRatio(activeCheck.low),
+      evidenceCount: evidence.evidenceCount,
+      rawEvidenceCount: evidence.rawEvidenceCount,
+      uniquePairCount: evidence.uniquePairCount,
+      uniquePairRequired: minimumUniquePairs(items.length),
+      coveredItemCount: evidence.coveredItemCount,
+      itemCoverageWeightRequired: MINIMUM_COVERAGE_WEIGHT,
+      repeatedPairCorrelation: REPEATED_PAIR_CORRELATION,
+      sourceAgeHalfLifeDays: SOURCE_AGE_HALF_LIFE_DAYS,
+      tieStrength: fit.tieStrength,
+      optimizerConverged: fit.converged,
+      optimizationStatus: fit.optimizationStatus,
+      evidenceRequired,
+      ready: activeCheck.ready, stoppingChecks, stoppingBottleneckMode: stoppingMode, calibration,
     };
   }
   const mapOrder = orderByAbilities(items, fit.abilities);
@@ -684,19 +937,18 @@ export function analyzeRanking(
   const jointInterval = wilsonInterval(metrics.jointBucketStableSamples, fit.posteriorSamples.length);
   const adjacentInterval = wilsonInterval(metrics.adjacentBucketStableSamples, fit.posteriorSamples.length);
   const coverageTargetInterval = wilsonInterval(metrics.coverageTargetStableSamples, fit.posteriorSamples.length);
-  const evidenceCount = history.filter((entry) => entry.sessionId === sessionId && entry.outcome !== "skip").length;
-  const evidenceRequired = minimumEvidence(items.length);
   const calibration = calibrationDiagnostics(history);
-  const evidenceSatisfied = evidenceCount >= evidenceRequired;
   const stoppingChecks = buildStoppingChecks(
     items.length,
     fit.posteriorSamples.length,
     coverageTargetStableSamplesByMode,
-    evidenceSatisfied,
+    evidence,
+    evidenceRequired,
+    fit.converged,
   );
   const activeCheck = stoppingChecks.find((check) => check.mode === stoppingMode)!;
   return {
-    method: "laplace-mc-v5",
+    method: "laplace-mc-v6",
     sampleCount: fit.posteriorSamples.length,
     ...metrics,
     jointBucketStabilityLow: jointInterval.low,
@@ -706,7 +958,17 @@ export function analyzeRanking(
     coverageTargetStabilityLow: coverageTargetInterval.low,
     coverageTargetStabilityHigh: coverageTargetInterval.high,
     decisionRiskRatio: decisionRiskRatio(activeCheck.low),
-    evidenceCount,
+    evidenceCount: evidence.evidenceCount,
+    rawEvidenceCount: evidence.rawEvidenceCount,
+    uniquePairCount: evidence.uniquePairCount,
+    uniquePairRequired: minimumUniquePairs(items.length),
+    coveredItemCount: evidence.coveredItemCount,
+    itemCoverageWeightRequired: MINIMUM_COVERAGE_WEIGHT,
+    repeatedPairCorrelation: REPEATED_PAIR_CORRELATION,
+    sourceAgeHalfLifeDays: SOURCE_AGE_HALF_LIFE_DAYS,
+    tieStrength: fit.tieStrength,
+    optimizerConverged: fit.converged,
+    optimizationStatus: fit.optimizationStatus,
     evidenceRequired,
     ready: activeCheck.ready,
     stoppingChecks,
@@ -720,26 +982,33 @@ function posteriorInformation(
   second: number,
   samples: Float64Array[],
   indexById: Map<number, number>,
+  tieStrength: number,
   sampleStride = 1,
 ) {
   if (samples.length === 0) return 0;
   const firstIndex = indexById.get(first);
   const secondIndex = indexById.get(second);
   if (firstIndex === undefined || secondIndex === undefined) return 0;
-  let meanProbability = 0;
+  const meanProbabilities: DavidsonProbabilities = { left: 0, tie: 0, right: 0 };
   let conditionalEntropy = 0;
   const stride = Math.max(1, Math.round(sampleStride));
   let sampleCount = 0;
   for (let sampleIndex = 0; sampleIndex < samples.length; sampleIndex += stride) {
     const sample = samples[sampleIndex];
-    const probability = sigmoid(sample[firstIndex] - sample[secondIndex]);
-    meanProbability += probability;
-    conditionalEntropy += binaryEntropy(probability);
+    const probabilities = davidsonProbabilities(
+      sample[firstIndex] - sample[secondIndex], tieStrength,
+    );
+    meanProbabilities.left += probabilities.left;
+    meanProbabilities.tie += probabilities.tie;
+    meanProbabilities.right += probabilities.right;
+    conditionalEntropy += categoricalEntropy(probabilities);
     sampleCount += 1;
   }
-  meanProbability /= Math.max(1, sampleCount);
+  meanProbabilities.left /= Math.max(1, sampleCount);
+  meanProbabilities.tie /= Math.max(1, sampleCount);
+  meanProbabilities.right /= Math.max(1, sampleCount);
   conditionalEntropy /= Math.max(1, sampleCount);
-  return Math.max(0, binaryEntropy(meanProbability) - conditionalEntropy);
+  return Math.max(0, categoricalEntropy(meanProbabilities) - conditionalEntropy);
 }
 
 function nextCalibrationPair(
@@ -831,7 +1100,8 @@ function globalExplorationPair(
           repeats: pairCounts.get(key) ?? 0,
           secondCount: itemCounts.get(second.subjectId) ?? 0,
           information: posteriorInformation(
-            first.subjectId, second.subjectId, fit.posteriorSamples, indexById, posteriorSampleStride,
+            first.subjectId, second.subjectId, fit.posteriorSamples, indexById,
+            fit.tieStrength ?? DEFAULT_TIE_STRENGTH, posteriorSampleStride,
           ),
           tieBreak: hash(`${randomSeed}:${version}:${key}:exploration`),
         });
@@ -957,7 +1227,8 @@ export function chooseNextPair(
         considered += 1;
         if (!ignoreCooldown && cooled.has(key)) continue;
         const information = posteriorInformation(
-          first, second, fit.posteriorSamples, indexById, posteriorSampleStride,
+          first, second, fit.posteriorSamples, indexById,
+          fit.tieStrength ?? DEFAULT_TIE_STRENGTH, posteriorSampleStride,
         );
         const score = information / (1 + (counts.get(key) ?? 0));
         if (!best || score > best.score + 1e-12
@@ -1028,7 +1299,6 @@ function ratesByItem(items: RankingItemInput[], sample: Float64Array, scoreByRan
   const indices = items.map((_, index) => index);
   indices.sort((left, right) =>
     sample[right] - sample[left]
-      || items[right].rate - items[left].rate
       || items[left].subjectId - items[right].subjectId);
   const output = new Uint8Array(items.length);
   for (let rankIndex = 0; rankIndex < indices.length; rankIndex += 1) {
@@ -1065,7 +1335,12 @@ export interface StoppingForecastRolloutInput {
   rolloutSeeds: Uint32Array;
   scoreByRank: Uint8Array;
   acceptedComparisons: number;
+  tieStrength: number;
+  optimizerConverged: boolean;
   evidenceRequired: number;
+  uniquePairRequired: number;
+  pairMass: Record<string, number>;
+  itemEffectiveWeight: Record<number, number>;
   diagnosticStride: number;
   /** Internal safety bound used as the actual finite forecast window. */
   simulationHorizon: number;
@@ -1081,14 +1356,9 @@ export interface StoppingForecastRolloutInput {
  * policy as the product: choose one pair, draw one Davidson response, and
  * update a small posterior ensemble before checking the stopping event again.
  *
- * These constants are deliberately fixed.  They describe a conservative
- * response model for a *forecast*, not parameters estimated from a user's
- * historical calibration answers (historical calibration is intentionally out
- * of scope for this revision).
+ * The response probabilities and importance update use the same fitted
+ * Davidson likelihood as the real-data fit and information-gain calculation.
  */
-const FORECAST_DAVIDSON_TIE_STRENGTH = 0.35;
-const FORECAST_LAPSE_RATE = 0.04;
-const FORECAST_UPDATE_TEMPERATURE = 0.72;
 const FORECAST_MIN_PAIR_VARIANCE = 1e-8;
 // Sorting every posterior draw is the dominant cost for large collections.
 // A sixteen-answer cadence is frequent enough to adapt exploration and keeps
@@ -1096,36 +1366,12 @@ const FORECAST_MIN_PAIR_VARIANCE = 1e-8;
 // the stopping event on every real answer.
 const FORECAST_DEFAULT_DIAGNOSTIC_STRIDE = 16;
 
-interface DavidsonProbabilities {
-  left: number;
-  tie: number;
-  right: number;
-}
-
-function davidsonProbabilities(difference: number): DavidsonProbabilities {
-  // With strengths exp(theta), dividing Davidson's denominator by the
-  // geometric mean leaves exp(d/2), exp(-d/2), and a constant tie weight.
-  const bounded = Math.max(-40, Math.min(40, difference));
-  const leftWeight = Math.exp(bounded / 2);
-  const rightWeight = Math.exp(-bounded / 2);
-  const tieWeight = FORECAST_DAVIDSON_TIE_STRENGTH;
-  const denominator = leftWeight + rightWeight + tieWeight;
-  const base = {
-    left: leftWeight / denominator,
-    tie: tieWeight / denominator,
-    right: rightWeight / denominator,
-  };
-  // A small fixed lapse prevents a deterministic answer from making a future
-  // path infinitely certain.  It is mixed uniformly across all three buttons.
-  return {
-    left: (1 - FORECAST_LAPSE_RATE) * base.left + FORECAST_LAPSE_RATE / 3,
-    tie: (1 - FORECAST_LAPSE_RATE) * base.tie + FORECAST_LAPSE_RATE / 3,
-    right: (1 - FORECAST_LAPSE_RATE) * base.right + FORECAST_LAPSE_RATE / 3,
-  };
-}
-
-function simulatedOutcome(difference: number, random: () => number): "left" | "tie" | "right" {
-  const probabilities = davidsonProbabilities(difference);
+function simulatedOutcome(
+  difference: number,
+  random: () => number,
+  tieStrength: number,
+): "left" | "tie" | "right" {
+  const probabilities = davidsonProbabilities(difference, tieStrength);
   const draw = random();
   if (draw < probabilities.left) return "left";
   if (draw < probabilities.left + probabilities.tie) return "tie";
@@ -1135,8 +1381,9 @@ function simulatedOutcome(difference: number, random: () => number): "left" | "t
 function outcomeLikelihood(
   difference: number,
   outcome: "left" | "tie" | "right",
+  tieStrength: number,
 ) {
-  const probabilities = davidsonProbabilities(difference);
+  const probabilities = davidsonProbabilities(difference, tieStrength);
   return outcome === "left" ? probabilities.left
     : outcome === "right" ? probabilities.right
       : probabilities.tie;
@@ -1156,10 +1403,13 @@ export function updateForecastPosterior(
   leftIndex: number,
   rightIndex: number,
   outcome: "left" | "tie" | "right",
+  tieStrength = DEFAULT_TIE_STRENGTH,
+  observationWeight = 1,
 ) {
   const itemCount = posteriorSamples[0]?.length ?? 0;
   const gains = new Float64Array(itemCount);
-  if (posteriorSamples.length === 0 || itemCount === 0) return gains;
+  const safeObservationWeight = Math.max(0, observationWeight);
+  if (posteriorSamples.length === 0 || itemCount === 0 || safeObservationWeight === 0) return gains;
   const differences = new Float64Array(posteriorSamples.length);
   let mean = 0;
   for (let sampleIndex = 0; sampleIndex < posteriorSamples.length; sampleIndex += 1) {
@@ -1173,11 +1423,16 @@ export function updateForecastPosterior(
   for (const difference of differences) variance += (difference - mean) ** 2;
   variance /= Math.max(1, differences.length - 1);
 
-  // A degenerate hand-written/test ensemble still needs to react to a new
-  // answer.  The fallback is a deliberately modest pseudo-observation shift.
+  // Degenerate hand-written/test ensembles cannot be importance-reweighted.
+  // Use one ridge-regularized Davidson Newton step in the observed direction.
   if (variance < FORECAST_MIN_PAIR_VARIANCE) {
-    const target = outcome === "left" ? 0.9 : outcome === "right" ? -0.9 : 0;
-    const shift = Math.max(-0.75, Math.min(0.75, (target - mean) * 0.2));
+    const probabilities = davidsonProbabilities(mean, tieStrength);
+    const observedScore = outcome === "left" ? 1 : outcome === "right" ? -1 : 0;
+    const expectedScore = probabilities.left - probabilities.right;
+    const gradient = safeObservationWeight * 0.5 * (observedScore - expectedScore);
+    const curvature = safeObservationWeight * 0.25
+      * (probabilities.left + probabilities.right - expectedScore ** 2);
+    const shift = gradient / (1 + curvature);
     for (const sample of posteriorSamples) {
       sample[leftIndex] += shift / 2;
       sample[rightIndex] -= shift / 2;
@@ -1188,7 +1443,8 @@ export function updateForecastPosterior(
   }
 
   const logWeights = differences.map((difference) =>
-    FORECAST_UPDATE_TEMPERATURE * Math.log(Math.max(1e-12, outcomeLikelihood(difference, outcome))));
+    safeObservationWeight
+      * Math.log(Math.max(1e-12, outcomeLikelihood(difference, outcome, tieStrength))));
   const maximum = Math.max(...logWeights);
   let weightTotal = 0;
   let weightedMean = 0;
@@ -1204,18 +1460,10 @@ export function updateForecastPosterior(
   }
   weightedVariance /= Math.max(weightTotal, Number.EPSILON);
 
-  // Temper once more in moment space.  This makes the update stable when a
-  // path repeatedly asks nearly identical pairs while retaining the observed
-  // direction of evidence.
-  // A simulated answer is less informative than a real refit: the response
-  // model, sampled truth and finite ensemble all add uncertainty. Temper the
-  // moment move to avoid systematically overconfident forecasts.
-  const meanBlend = 0.6;
-  const nextMean = mean + meanBlend * (weightedMean - mean);
-  const nextVariance = Math.max(
-    FORECAST_MIN_PAIR_VARIANCE,
-    variance * (1 - meanBlend) + weightedVariance * meanBlend,
-  );
+  // Moment-match the exactly importance-weighted one-answer posterior.  The
+  // affine ensemble transform preserves graph-wide covariance propagation.
+  const nextMean = weightedMean;
+  const nextVariance = Math.max(FORECAST_MIN_PAIR_VARIANCE, weightedVariance);
   const scale = Math.sqrt(nextVariance / variance);
   const differenceDeltas = new Float64Array(posteriorSamples.length);
   let covarianceDenominator = 0;
@@ -1260,6 +1508,9 @@ function fitFromForecastEnsemble(
   items: RankingItemInput[],
   posteriorSamples: Float64Array[],
   acceptedComparisons: number,
+  effectiveComparisons: number,
+  tieStrength: number,
+  optimizerConverged: boolean,
 ): FitResult {
   const abilities: Record<number, number> = {};
   const uncertainty: Record<number, number> = {};
@@ -1269,8 +1520,9 @@ function fitFromForecastEnsemble(
       uncertainty[item.subjectId] = 0;
     }
     return {
-      abilities, uncertainty, meanUncertainty: 0, converged: true, iterations: 0,
-      acceptedComparisons, posteriorSamples,
+      abilities, uncertainty, meanUncertainty: 0, converged: optimizerConverged, iterations: 0,
+      acceptedComparisons, effectiveComparisons, tieStrength,
+      optimizationStatus: optimizerConverged ? "converged" : "iteration-limit", posteriorSamples,
     };
   }
   for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
@@ -1287,9 +1539,12 @@ function fitFromForecastEnsemble(
     abilities,
     uncertainty,
     meanUncertainty: 0,
-    converged: true,
+    converged: optimizerConverged,
     iterations: 1,
     acceptedComparisons,
+    effectiveComparisons,
+    tieStrength,
+    optimizationStatus: optimizerConverged ? "converged" : "iteration-limit",
     posteriorSamples,
   };
 }
@@ -1327,15 +1582,24 @@ function forecastStoppingEventLows(
   scoreByRank: Uint8Array,
   evidenceCount: number,
   evidenceRequired: number,
+  uniquePairCount: number,
+  uniquePairRequired: number,
+  coveredItemCount: number,
+  optimizerConverged: boolean,
 ) {
-  if (evidenceCount < evidenceRequired || posteriorSamples.length === 0) {
+  if (evidenceCount + 1e-12 < evidenceRequired
+    || uniquePairCount < uniquePairRequired
+    || !optimizerConverged
+    || posteriorSamples.length === 0) {
     return { quick: 0, standard: 0, thorough: 0 };
   }
   const referenceRates = ratesByItem(items, abilities, scoreByRank);
   const stableSamples = coverageTargetStableSampleCounts(items, referenceRates, posteriorSamples, scoreByRank);
   return Object.fromEntries(STOPPING_MODE_ORDER.map((mode) => [
     mode,
-    wilsonInterval(stableSamples[mode], posteriorSamples.length).low,
+    coveredItemCount >= minimumCoveredItems(items.length, mode)
+      ? wilsonInterval(stableSamples[mode], posteriorSamples.length).low
+      : 0,
   ])) as Record<ComparisonBudgetMode, number>;
 }
 
@@ -1355,6 +1619,7 @@ function forecastHistoryRecord(
     outcome,
     acceptedCountAtAnswer,
     queryKind: pair.queryKind,
+    calibrationOfComparisonId: pair.calibrationOfComparisonId,
     createdAt: new Date(answerIndex * 1000).toISOString(),
   };
 }
@@ -1418,13 +1683,25 @@ function simulateForecastRollout(
     input.items, history, input.sessionId, acceptedComparisons,
   );
   let evidenceCount = input.evidenceCount;
-  const fit = fitFromForecastEnsemble(input.items, posteriorSamples, acceptedComparisons);
-  const abilities = new Float64Array(input.items.map((item) => fit.abilities[item.subjectId] ?? 0));
+  const pairMass = new Map(Object.entries(input.pairMass));
+  const itemEffectiveWeight = new Map(
+    Object.entries(input.itemEffectiveWeight).map(([subjectId, weight]) => [Number(subjectId), weight]),
+  );
+  let uniquePairCount = [...pairMass.values()]
+    .filter((mass) => repeatedPairEffectiveSampleSize(mass) >= MINIMUM_COVERAGE_WEIGHT).length;
+  let coveredItemCount = [...itemEffectiveWeight.values()]
+    .filter((weight) => weight >= MINIMUM_COVERAGE_WEIGHT).length;
+  const fit = fitFromForecastEnsemble(
+    input.items, posteriorSamples, acceptedComparisons, evidenceCount,
+    input.tieStrength, input.optimizerConverged,
+  );
+  const abilities = input.currentAbilities.slice();
+  input.items.forEach((item, index) => { fit.abilities[item.subjectId] = abilities[index]; });
   let diagnostics = input.initialDiagnostics;
   const diagnosticStride = Math.max(1, Math.round(input.diagnosticStride));
   const stoppingCheckStride = Math.max(8, diagnosticStride);
   const stoppingTimes = Object.fromEntries(STOPPING_MODE_ORDER.map((mode) => [mode, Number.POSITIVE_INFINITY])) as Record<ComparisonBudgetMode, number>;
-  if (evidenceCount >= input.evidenceRequired) {
+  if (input.optimizerConverged && evidenceCount >= input.evidenceRequired) {
     for (const mode of STOPPING_MODE_ORDER) {
       if (input.initialDiagnostics.stoppingChecks?.find((check) => check.mode === mode)?.ready) {
         stoppingTimes[mode] = 0;
@@ -1450,7 +1727,6 @@ function simulateForecastRollout(
       answerIndex + input.modelVersion,
       {
         ...input.selectionOptions,
-        allowCalibration: false,
         selectionCache,
         candidateLimit: input.items.length > 80 ? 96 : (input.selectionOptions.candidateLimit ?? 64),
         posteriorSampleStride: input.items.length > 80 ? 16 : (input.selectionOptions.posteriorSampleStride ?? 4),
@@ -1462,8 +1738,18 @@ function simulateForecastRollout(
     if (leftIndex === undefined || rightIndex === undefined || leftIndex === rightIndex) {
       return stoppingTimes;
     }
-    const outcome = simulatedOutcome(truth[leftIndex] - truth[rightIndex], random);
-    const meanShifts = updateForecastPosterior(posteriorSamples, leftIndex, rightIndex, outcome);
+    const selectedKey = pairKey(pair.leftSubjectId, pair.rightSubjectId);
+    const previousMass = pairMass.get(selectedKey) ?? 0;
+    const previousEffectiveWeight = repeatedPairEffectiveSampleSize(previousMass);
+    const nextMass = previousMass + 1;
+    const nextEffectiveWeight = repeatedPairEffectiveSampleSize(nextMass);
+    const effectiveIncrement = nextEffectiveWeight - previousEffectiveWeight;
+    const outcome = simulatedOutcome(
+      truth[leftIndex] - truth[rightIndex], random, input.tieStrength,
+    );
+    const meanShifts = updateForecastPosterior(
+      posteriorSamples, leftIndex, rightIndex, outcome, input.tieStrength, effectiveIncrement,
+    );
     for (let itemIndex = 0; itemIndex < input.items.length; itemIndex += 1) {
       const shift = meanShifts[itemIndex];
       fit.abilities[input.items[itemIndex].subjectId] += shift;
@@ -1471,9 +1757,19 @@ function simulateForecastRollout(
     }
     acceptedComparisons += 1;
     fit.acceptedComparisons = acceptedComparisons;
-    evidenceCount += 1;
+    pairMass.set(selectedKey, nextMass);
+    evidenceCount += effectiveIncrement;
+    fit.effectiveComparisons = evidenceCount;
+    if (previousEffectiveWeight < MINIMUM_COVERAGE_WEIGHT
+      && nextEffectiveWeight >= MINIMUM_COVERAGE_WEIGHT) uniquePairCount += 1;
+    for (const subjectId of [pair.leftSubjectId, pair.rightSubjectId]) {
+      const previousItemWeight = itemEffectiveWeight.get(subjectId) ?? 0;
+      const nextItemWeight = previousItemWeight + effectiveIncrement;
+      itemEffectiveWeight.set(subjectId, nextItemWeight);
+      if (previousItemWeight < MINIMUM_COVERAGE_WEIGHT
+        && nextItemWeight >= MINIMUM_COVERAGE_WEIGHT) coveredItemCount += 1;
+    }
     history.push(forecastHistoryRecord(input, pair, outcome, acceptedComparisons, rolloutSeed, answerIndex));
-    const selectedKey = pairKey(pair.leftSubjectId, pair.rightSubjectId);
     selectionCache.pairCounts.set(selectedKey, (selectionCache.pairCounts.get(selectedKey) ?? 0) + 1);
     selectionCache.itemCounts.set(pair.leftSubjectId, (selectionCache.itemCounts.get(pair.leftSubjectId) ?? 0) + 1);
     selectionCache.itemCounts.set(pair.rightSubjectId, (selectionCache.itemCounts.get(pair.rightSubjectId) ?? 0) + 1);
@@ -1489,6 +1785,10 @@ function simulateForecastRollout(
         input.scoreByRank,
         evidenceCount,
         input.evidenceRequired,
+        uniquePairCount,
+        input.uniquePairRequired,
+        coveredItemCount,
+        input.optimizerConverged,
       );
       for (const mode of STOPPING_MODE_ORDER) {
         if (!Number.isFinite(stoppingTimes[mode])
@@ -1526,6 +1826,8 @@ export function prepareStoppingForecastRollouts(
   const selectedSamples = Array.from({ length: forecastSampleCount }, (_, index) =>
     fit.posteriorSamples[Math.floor(index * fit.posteriorSamples.length / forecastSampleCount)].slice());
   const currentAbilities = new Float64Array(items.map((item) => fit.abilities[item.subjectId] ?? 0));
+  recenterSamples(selectedSamples, currentAbilities);
+  const evidence = summarizeRankingEvidence(history, sessionId);
   const effectiveHistory = history.map((entry) => ({ ...entry }));
   const requestedProjectionHorizon = Math.max(
     5,
@@ -1543,7 +1845,7 @@ export function prepareStoppingForecastRollouts(
     // Forecast random streams depend on evidence, never on a cached model
     // version, so switching away from a mode and back is exactly reproducible.
     modelVersion: 0,
-    selectionOptions: { ...(options.pairSelection ?? {}), allowCalibration: false },
+    selectionOptions: { ...(options.pairSelection ?? {}), allowCalibration: true },
     initialDiagnostics: diagnostics,
     currentAbilities,
     forecastSamples: selectedSamples,
@@ -1551,11 +1853,16 @@ export function prepareStoppingForecastRollouts(
     rolloutSeeds,
     scoreByRank: forecastScoreByRank(items, distribution),
     acceptedComparisons: fit.acceptedComparisons,
+    tieStrength: fit.tieStrength ?? DEFAULT_TIE_STRENGTH,
+    optimizerConverged: fit.converged,
     evidenceRequired: diagnostics.evidenceRequired,
+    uniquePairRequired: diagnostics.uniquePairRequired ?? minimumUniquePairs(items.length),
+    pairMass: evidence.pairMass,
+    itemEffectiveWeight: evidence.itemEffectiveWeight,
     diagnosticStride: Math.max(1, Math.round(options.diagnosticStride ?? FORECAST_DEFAULT_DIAGNOSTIC_STRIDE)),
     simulationHorizon,
     projectionHorizon: simulationHorizon,
-    evidenceCount: diagnostics.evidenceCount,
+    evidenceCount: evidence.evidenceCount,
     stoppingMode: options.stoppingMode ?? "standard",
   };
 }
@@ -1568,7 +1875,7 @@ export function forecastStoppingTimeRolloutsByMode(
 ) {
   const stoppingTimes = Object.fromEntries(STOPPING_MODE_ORDER.map((mode) => [mode, [] as number[]])) as StoppingTimesByMode;
   if (rolloutCount <= 0) return stoppingTimes;
-  if (input.forecastSamples.length === 0) {
+  if (!input.optimizerConverged || input.forecastSamples.length === 0) {
     for (const mode of STOPPING_MODE_ORDER) stoppingTimes[mode] = Array<number>(rolloutCount).fill(Number.POSITIVE_INFINITY);
     return stoppingTimes;
   }
@@ -1606,7 +1913,7 @@ function summarizeStoppingTimes(
 ): StoppingForecast {
   const rolloutCount = stoppingTimes.length;
   const base = {
-    method: "posterior-contraction-mc-v10" as const,
+    method: "posterior-contraction-mc-v11" as const,
     rolloutCount,
     nextCheckpoint,
     projectionHorizon,
@@ -1693,10 +2000,9 @@ export function summarizeStoppingTimeRolloutsByMode(
 ) {
   return Object.fromEntries(STOPPING_MODE_ORDER.map((mode) => {
     const check = diagnostics.stoppingChecks?.find((entry) => entry.mode === mode);
-    const ready = diagnostics.evidenceCount >= diagnostics.evidenceRequired
-      && (check
-        ? check.low >= (check.probabilityTarget ?? STOPPING_PROBABILITY_TARGET)
-        : mode === "standard" && diagnostics.coverageTargetStabilityLow >= STOPPING_PROBABILITY_TARGET);
+    const ready = check?.ready ?? (diagnostics.evidenceCount >= diagnostics.evidenceRequired
+      && mode === "standard"
+      && diagnostics.coverageTargetStabilityLow >= STOPPING_PROBABILITY_TARGET);
     return [mode, summarizeStoppingTimeRollouts(
       stoppingTimesByMode[mode], projectionHorizon,
       { ...diagnostics, ready }, posteriorAvailable,
@@ -1800,10 +2106,13 @@ export function toModelState(
     abilities: result.abilities,
     uncertainty: result.uncertainty,
     acceptedComparisons: result.acceptedComparisons,
+    effectiveComparisons: result.effectiveComparisons,
+    tieStrength: result.tieStrength,
     initialMeanUncertainty: initialMeanUncertainty ?? result.meanUncertainty,
     currentMeanUncertainty: result.meanUncertainty,
     converged: result.converged,
     iterations: result.iterations,
+    optimizationStatus: result.optimizationStatus,
     diagnostics,
     updatedAt: new Date().toISOString(),
   };

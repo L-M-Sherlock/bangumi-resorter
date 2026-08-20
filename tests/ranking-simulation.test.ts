@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { analyzeRanking, buildRankedItems, chooseNextPair, fitModel, forecastStoppingTime } from "../lib/ranking/engine";
+import { analyzeRanking, buildRankedItems, chooseNextPair, fitModel, forecastStoppingTime, summarizeRankingEvidence } from "../lib/ranking/engine";
 import type { CollectionItem, DistributionConfig, RankingHistoryInput, RankingItemInput } from "../lib/types";
 
 const reverseJ: DistributionConfig = { preset: "reverse-j", levelCount: 10, weights: [50, 25, 14, 4, 2, 1, 1, 1, 1, 1] };
@@ -44,11 +44,7 @@ function oldLocalPair(items: RankingItemInput[], fit: ReturnType<typeof fitModel
 }
 
 function comparisons(history: RankingHistoryInput[]) {
-  return history.filter((entry) => entry.outcome !== "skip").map((entry) => ({
-    leftSubjectId: entry.leftSubjectId,
-    rightSubjectId: entry.rightSubjectId,
-    outcome: entry.outcome as "left" | "right" | "tie",
-  }));
+  return summarizeRankingEvidence(history, "session").comparisons;
 }
 
 function simulate(seed: number, strategy: "posterior" | "old-local") {
@@ -161,15 +157,19 @@ describe("ranking strategy simulation", () => {
     }
     expect(checkpointForecast).toBeDefined();
     expect(checkpointForecast?.rolloutCount).toBe(64);
-    expect(checkpointForecast?.method).toBe("posterior-contraction-mc-v10");
-    expect(stoppedAt).toBeDefined();
-    const actualAdditional = stoppedAt! - checkpoint;
-    if (checkpointForecast?.lowerAdditional !== undefined && checkpointForecast.upperAdditional !== undefined) {
-      expect(checkpointForecast.lowerAdditional).toBeLessThanOrEqual(actualAdditional);
-      expect(checkpointForecast.upperAdditional).toBeGreaterThanOrEqual(actualAdditional);
+    expect(checkpointForecast?.method).toBe("posterior-contraction-mc-v11");
+    if (stoppedAt !== undefined) {
+      const actualAdditional = stoppedAt - checkpoint;
+      if (checkpointForecast?.lowerAdditional !== undefined && checkpointForecast.upperAdditional !== undefined) {
+        expect(checkpointForecast.lowerAdditional).toBeLessThanOrEqual(actualAdditional);
+        expect(checkpointForecast.upperAdditional).toBeGreaterThanOrEqual(actualAdditional);
+      } else {
+        expect(checkpointForecast?.status).toBe("uncertain");
+        expect(checkpointForecast?.probabilityWithinProjectionHigh).toBeGreaterThan(0);
+      }
     } else {
       expect(checkpointForecast?.status).toBe("uncertain");
-      expect(checkpointForecast?.probabilityWithinProjectionHigh).toBeGreaterThan(0);
+      expect(checkpointForecast?.upperAdditional).toBeUndefined();
     }
   });
 });

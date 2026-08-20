@@ -21,8 +21,8 @@ export const TERM_DEFINITIONS = {
     sectionId: "pairwise-comparisons",
   },
   "bradley-terry": {
-    label: "Bradley–Terry 模型",
-    summary: "一种成对比较模型：两部作品的潜在偏好差越大，前者在比较中胜出的概率越高。",
+    label: "Davidson 成对比较模型",
+    summary: "Bradley–Terry 的三结果扩展：用两部作品的潜在分数差和平局强度共同描述左胜、右胜与平局；本项目以带正则化的 MAP 形式拟合。",
     sectionId: "preference-model",
   },
   "logistic-function": {
@@ -92,7 +92,7 @@ export const TERM_DEFINITIONS = {
   },
   "calibration-repeat": {
     label: "校准复问",
-    summary: "隔一段时间把旧问题交换左右后再问一次，用来诊断判断波动；它不改变停止门槛。",
+    summary: "隔一段时间把旧问题交换左右后再问一次。答案会按同一作品对的相关重复证据折权入模，一致率另用于诊断判断波动。",
     sectionId: "question-selection",
   },
   "score-bucket": {

@@ -1944,10 +1944,10 @@ export async function previewBackupImport(
 function validModel(model: ModelState | undefined, session: SortingSession, links: SessionItem[]) {
   if (!model || model.version !== session.modelVersion) return false;
   const diagnostics = model.diagnostics;
-  if (diagnostics?.method !== "laplace-mc-v5"
-    || diagnostics.forecast?.method !== "posterior-contraction-mc-v10"
+  if (diagnostics?.method !== "laplace-mc-v6"
+    || diagnostics.forecast?.method !== "posterior-contraction-mc-v11"
     || !(["quick", "standard", "thorough"] as const)
-      .every((mode) => diagnostics.forecasts?.[mode]?.method === "posterior-contraction-mc-v10")
+      .every((mode) => diagnostics.forecasts?.[mode]?.method === "posterior-contraction-mc-v11")
     || !session.priorMode) return false;
   const allowed = new Set(links.filter((entry) => entry.sessionId === session.id).map((entry) => String(entry.subjectId)));
   const abilities = Object.keys(model.abilities);
