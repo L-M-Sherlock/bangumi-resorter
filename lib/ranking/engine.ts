@@ -59,14 +59,39 @@ export interface PairSelectionOptions {
   boundaryWindow?: number;
   explorationInterval?: number;
   explorationRadius?: number;
+  /** Forecasts simulate ordinary adaptive questions, not calibration repeats. */
+  allowCalibration?: boolean;
+  /** Internal cache used by long-running forecast paths. */
+  selectionCache?: PairSelectionCache;
+  /** Limit expensive posterior-information evaluations in a forecast path. */
+  candidateLimit?: number;
+  posteriorSampleStride?: number;
+}
+
+interface PairSelectionCache {
+  pairCounts: Map<string, number>;
+  itemCounts: Map<number, number>;
+  cooled: Set<string>;
+  nonCalibrationCount: number;
 }
 
 export interface StoppingForecastOptions {
   randomSeed: number;
+  /**
+   * Kept for backwards-compatible serialized requests.  The sequential
+   * forecaster no longer turns this scalar into a synthetic amount of
+   * evidence; future answers are simulated one at a time instead.
+   */
   forecastEfficiency?: number;
   rolloutCount?: number;
   /** Finite Monte Carlo look-ahead only; never an answering limit. */
   projectionHorizon?: number;
+  /** The same question-selection policy used by the selected inference mode. */
+  pairSelection?: PairSelectionOptions;
+  /** Legacy request field; forecast orientation is intentionally version-independent. */
+  modelVersion?: number;
+  /** Recompute the expensive ranking diagnostics every N simulated answers. */
+  diagnosticStride?: number;
 }
 
 function sigmoid(value: number) {
@@ -635,6 +660,7 @@ function posteriorInformation(
   second: number,
   samples: Float64Array[],
   indexById: Map<number, number>,
+  sampleStride = 1,
 ) {
   if (samples.length === 0) return 0;
   const firstIndex = indexById.get(first);
@@ -642,13 +668,17 @@ function posteriorInformation(
   if (firstIndex === undefined || secondIndex === undefined) return 0;
   let meanProbability = 0;
   let conditionalEntropy = 0;
-  for (const sample of samples) {
+  const stride = Math.max(1, Math.round(sampleStride));
+  let sampleCount = 0;
+  for (let sampleIndex = 0; sampleIndex < samples.length; sampleIndex += stride) {
+    const sample = samples[sampleIndex];
     const probability = sigmoid(sample[firstIndex] - sample[secondIndex]);
     meanProbability += probability;
     conditionalEntropy += binaryEntropy(probability);
+    sampleCount += 1;
   }
-  meanProbability /= samples.length;
-  conditionalEntropy /= samples.length;
+  meanProbability /= Math.max(1, sampleCount);
+  conditionalEntropy /= Math.max(1, sampleCount);
   return Math.max(0, binaryEntropy(meanProbability) - conditionalEntropy);
 }
 
@@ -689,15 +719,19 @@ function globalExplorationPair(
   version: number,
   randomSeed: number,
   radius: number,
+  cache?: PairSelectionCache,
+  posteriorSampleStride = 1,
 ): { first: number; second: number; score: number } | undefined {
-  const pairCounts = new Map<string, number>();
-  const itemCounts = new Map(items.map((item) => [item.subjectId, 0]));
-  for (const entry of history) {
-    if (entry.outcome === "skip") continue;
-    const key = pairKey(entry.leftSubjectId, entry.rightSubjectId);
-    pairCounts.set(key, (pairCounts.get(key) ?? 0) + 1);
-    itemCounts.set(entry.leftSubjectId, (itemCounts.get(entry.leftSubjectId) ?? 0) + 1);
-    itemCounts.set(entry.rightSubjectId, (itemCounts.get(entry.rightSubjectId) ?? 0) + 1);
+  const pairCounts = cache?.pairCounts ?? new Map<string, number>();
+  const itemCounts = cache?.itemCounts ?? new Map(items.map((item) => [item.subjectId, 0]));
+  if (!cache) {
+    for (const entry of history) {
+      if (entry.outcome === "skip") continue;
+      const key = pairKey(entry.leftSubjectId, entry.rightSubjectId);
+      pairCounts.set(key, (pairCounts.get(key) ?? 0) + 1);
+      itemCounts.set(entry.leftSubjectId, (itemCounts.get(entry.leftSubjectId) ?? 0) + 1);
+      itemCounts.set(entry.rightSubjectId, (itemCounts.get(entry.rightSubjectId) ?? 0) + 1);
+    }
   }
   const indexById = new Map(items.map((item, index) => [item.subjectId, index]));
   const ordered = orderByAbilities(items, fit.abilities);
@@ -736,7 +770,9 @@ function globalExplorationPair(
           cooled: cooled.has(key),
           repeats: pairCounts.get(key) ?? 0,
           secondCount: itemCounts.get(second.subjectId) ?? 0,
-          information: posteriorInformation(first.subjectId, second.subjectId, fit.posteriorSamples, indexById),
+          information: posteriorInformation(
+            first.subjectId, second.subjectId, fit.posteriorSamples, indexById, posteriorSampleStride,
+          ),
           tieBreak: hash(`${randomSeed}:${version}:${key}:exploration`),
         });
       }
@@ -769,20 +805,27 @@ export function chooseNextPair(
   options: PairSelectionOptions = {},
 ): NextPair | undefined {
   if (items.length < 2) return undefined;
-  const calibration = nextCalibrationPair(history, sessionId, version, randomSeed);
+  const calibration = options.allowCalibration === false
+    ? undefined
+    : nextCalibrationPair(history, sessionId, version, randomSeed);
   if (calibration) return calibration;
 
   const ordered = orderByAbilities(items, fit.abilities);
-  const counts = new Map<string, number>();
-  for (const entry of history) {
-    if (entry.outcome === "skip") continue;
-    const key = pairKey(entry.leftSubjectId, entry.rightSubjectId);
-    counts.set(key, (counts.get(key) ?? 0) + 1);
+  const selectionCache = options.selectionCache;
+  const counts = selectionCache?.pairCounts ?? new Map<string, number>();
+  if (!selectionCache) {
+    for (const entry of history) {
+      if (entry.outcome === "skip") continue;
+      const key = pairKey(entry.leftSubjectId, entry.rightSubjectId);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
   }
-  const cooled = new Set(history
+  const cooled = selectionCache?.cooled ?? new Set(history
     .filter((entry) => entry.outcome === "skip" && fit.acceptedComparisons - entry.acceptedCountAtAnswer < 20)
     .map((entry) => pairKey(entry.leftSubjectId, entry.rightSubjectId)));
-  const nonCalibrationCount = history.filter((entry) => entry.sessionId === sessionId && entry.queryKind !== "calibration").length;
+  const nonCalibrationCount = selectionCache?.nonCalibrationCount
+    ?? history.filter((entry) => entry.sessionId === sessionId && entry.queryKind !== "calibration").length;
+  const posteriorSampleStride = Math.max(1, Math.round(options.posteriorSampleStride ?? 1));
   let selected: { first: number; second: number; score: number } | undefined;
   let queryKind: NextPair["queryKind"] = "adaptive";
   const explorationInterval = Math.max(1, Math.round(options.explorationInterval ?? 10));
@@ -790,6 +833,7 @@ export function chooseNextPair(
     const explorationRadius = Math.max(1, Math.round(options.explorationRadius ?? 5));
     const exploration = globalExplorationPair(
       items, history, fit, diagnostics, cooled, version, randomSeed, explorationRadius,
+      selectionCache, posteriorSampleStride,
     );
     if (exploration) {
       selected = exploration;
@@ -799,6 +843,15 @@ export function chooseNextPair(
 
   if (!selected) {
     const candidatePairs = new Map<string, [number, number]>();
+    const candidateCapacity = options.candidateLimit === undefined
+      ? Number.POSITIVE_INFINITY
+      : Math.max(128, Math.round(options.candidateLimit) * 4);
+    const addCandidate = (first: number, second: number) => {
+      const key = pairKey(first, second);
+      if (candidatePairs.has(key) || candidatePairs.size < candidateCapacity) {
+        candidatePairs.set(key, [first, second]);
+      }
+    };
     const maxRankDistance = Math.max(1, options.maxRankDistance ?? 3);
     const maxRateGap = Math.max(0, options.maxRateGap ?? 10);
     for (let distance = 1; distance <= Math.min(maxRankDistance, ordered.length - 1); distance += 1) {
@@ -806,7 +859,7 @@ export function chooseNextPair(
         const first = ordered[index];
         const second = ordered[index + distance];
         if (Math.abs(first.rate - second.rate) <= maxRateGap) {
-          candidatePairs.set(pairKey(first.subjectId, second.subjectId), [first.subjectId, second.subjectId]);
+          addCandidate(first.subjectId, second.subjectId);
         }
       }
     }
@@ -816,21 +869,36 @@ export function chooseNextPair(
       if (mapRates.get(ordered[cut - 1].subjectId) === mapRates.get(ordered[cut].subjectId)) continue;
       for (let left = Math.max(0, cut - boundaryWindow); left < cut; left += 1) {
         for (let right = cut; right < Math.min(ordered.length, cut + boundaryWindow); right += 1) {
-          candidatePairs.set(pairKey(ordered[left].subjectId, ordered[right].subjectId), [ordered[left].subjectId, ordered[right].subjectId]);
+          addCandidate(ordered[left].subjectId, ordered[right].subjectId);
         }
       }
     }
     if (candidatePairs.size === 0) {
       for (let index = 0; index + 1 < ordered.length; index += 1) {
-        candidatePairs.set(pairKey(ordered[index].subjectId, ordered[index + 1].subjectId), [ordered[index].subjectId, ordered[index + 1].subjectId]);
+        addCandidate(ordered[index].subjectId, ordered[index + 1].subjectId);
       }
     }
     const indexById = new Map(items.map((item, index) => [item.subjectId, index]));
+    const candidateEntries = [...candidatePairs.entries()];
+    const candidateLimit = options.candidateLimit === undefined
+      ? candidateEntries.length
+      : Math.max(1, Math.round(options.candidateLimit));
+    const candidateStride = Math.max(1, Math.ceil(candidateEntries.length / candidateLimit));
+    const candidateOffset = candidateStride === 1
+      ? 0
+      : hash(`${randomSeed}:${version}:candidate-window`) % candidateStride;
     const choose = (ignoreCooldown: boolean) => {
       let best: { first: number; second: number; score: number; key: string } | undefined;
-      for (const [key, [first, second]] of candidatePairs) {
+      let considered = 0;
+      for (let candidateIndex = candidateOffset;
+        candidateIndex < candidateEntries.length && considered < candidateLimit;
+        candidateIndex += candidateStride) {
+        const [key, [first, second]] = candidateEntries[candidateIndex];
+        considered += 1;
         if (!ignoreCooldown && cooled.has(key)) continue;
-        const information = posteriorInformation(first, second, fit.posteriorSamples, indexById);
+        const information = posteriorInformation(
+          first, second, fit.posteriorSamples, indexById, posteriorSampleStride,
+        );
         const score = information / (1 + (counts.get(key) ?? 0));
         if (!best || score > best.score + 1e-12
           || (Math.abs(score - best.score) <= 1e-12 && key < best.key)) {
@@ -877,69 +945,6 @@ function wilsonInterval(successes: number, trials: number, z = 1.644853626951472
   };
 }
 
-function contractionRiskCurve(
-  items: RankingItemInput[],
-  currentAbilities: Float64Array,
-  scoreByRank: Uint8Array,
-  truth: Float64Array,
-  forecastSamples: Float64Array[],
-) {
-  const points: Array<{ scale: number; risk: number }> = [];
-  let monotoneRisk = Number.POSITIVE_INFINITY;
-  const pointCount = 9;
-  for (let pointIndex = 0; pointIndex < pointCount; pointIndex += 1) {
-    const scale = Math.exp(Math.log(0.025) * pointIndex / (pointCount - 1));
-    const center = new Float64Array(items.length);
-    for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
-      const current = currentAbilities[itemIndex];
-      center[itemIndex] = current + (1 - scale) * (truth[itemIndex] - current);
-    }
-    const referenceRates = ratesByItem(items, center, scoreByRank);
-    // The forecast only needs the coverage count.  Computing all assignment
-    // diagnostics here (per-item stability, displacement quantiles, etc.)
-    // needlessly multiplies the hottest loop in the simulation.
-    const coverageTargetStableSamples = coverageTargetStableSampleCount(
-      items, referenceRates, forecastSamples, scoreByRank, center, currentAbilities, scale,
-    );
-    const conservativeStability = wilsonInterval(
-      coverageTargetStableSamples,
-      forecastSamples.length,
-    ).low;
-    const risk = decisionRiskRatio(conservativeStability);
-    monotoneRisk = Math.min(monotoneRisk, risk);
-    points.push({ scale, risk: monotoneRisk });
-  }
-  return points;
-}
-
-function coverageTargetStableSampleCount(
-  items: RankingItemInput[],
-  referenceRates: Uint8Array,
-  posteriorSamples: Float64Array[],
-  scoreByRank: Uint8Array,
-  center: Float64Array,
-  currentAbilities: Float64Array,
-  scale: number,
-) {
-  const allowedCrossCount = allowedCrossTwoBucketCount(items.length);
-  let stableSamples = 0;
-  for (const sample of posteriorSamples) {
-    const contracted = new Float64Array(items.length);
-    for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
-      contracted[itemIndex] = center[itemIndex]
-        + scale * (sample[itemIndex] - currentAbilities[itemIndex]);
-    }
-    const sampleRates = ratesByItem(items, contracted, scoreByRank);
-    let crossTwoBucketCount = 0;
-    for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
-      if (Math.abs(referenceRates[itemIndex] - sampleRates[itemIndex]) > 1) crossTwoBucketCount += 1;
-      if (crossTwoBucketCount > allowedCrossCount) break;
-    }
-    if (crossTwoBucketCount <= allowedCrossCount) stableSamples += 1;
-  }
-  return stableSamples;
-}
-
 function forecastScoreByRank(items: RankingItemInput[], distribution: DistributionConfig) {
   const levelCount = normalizeScoreLevelCount(distribution.levelCount);
   const weights = effectiveDistributionWeights(items, distribution);
@@ -972,37 +977,6 @@ function ratesByItem(items: RankingItemInput[], sample: Float64Array, scoreByRan
   return output;
 }
 
-function interpolatedRisk(points: Array<{ scale: number; risk: number }>, scale: number) {
-  if (scale >= points[0].scale) return points[0].risk;
-  const last = points[points.length - 1];
-  if (scale <= last.scale) return last.risk;
-  for (let index = 1; index < points.length; index += 1) {
-    const lower = points[index];
-    const upper = points[index - 1];
-    if (scale > upper.scale || scale < lower.scale) continue;
-    const position = (Math.log(scale) - Math.log(upper.scale)) / (Math.log(lower.scale) - Math.log(upper.scale));
-    return upper.risk + position * (lower.risk - upper.risk);
-  }
-  return last.risk;
-}
-
-/** Finds the first integer accepted by a monotone false-to-true predicate. */
-function firstPassingInteger(
-  minimum: number,
-  maximum: number,
-  passes: (value: number) => boolean,
-) {
-  let low = Math.ceil(minimum);
-  let high = Math.floor(maximum);
-  if (low > high || !passes(high)) return Number.POSITIVE_INFINITY;
-  while (low < high) {
-    const middle = low + Math.floor((high - low) / 2);
-    if (passes(middle)) high = middle;
-    else low = middle + 1;
-  }
-  return low;
-}
-
 export interface StoppingForecastSimulation {
   forecast: StoppingForecast;
   stoppingTimes: number[];
@@ -1014,17 +988,384 @@ function forecastRandomSeed(options: StoppingForecastOptions, diagnostics: Ranki
 
 export interface StoppingForecastRolloutInput {
   items: RankingItemInput[];
+  distribution: DistributionConfig;
+  history: RankingHistoryInput[];
+  sessionId: string;
+  modelVersion: number;
+  selectionOptions: PairSelectionOptions;
+  initialDiagnostics: RankingDiagnostics;
+  /** Initial MAP abilities retained for worker/backward compatibility. */
   currentAbilities: Float64Array;
   forecastSamples: Float64Array[];
   truthSamples: Float64Array[];
-  efficiencyMultipliers: Float64Array;
+  rolloutSeeds: Uint32Array;
   scoreByRank: Uint8Array;
-  baseEfficiency: number;
-  effectiveEvidence: number;
-  minimumAdditional: number;
+  acceptedComparisons: number;
+  evidenceRequired: number;
+  diagnosticStride: number;
+  /** Internal safety bound used as the actual finite forecast window. */
+  simulationHorizon: number;
   projectionHorizon: number;
   evidenceCount: number;
   ready: boolean;
+}
+
+/**
+ * The old forecast extrapolated a single scalar contraction curve.  That
+ * assumes every future answer is equally informative and, importantly, never
+ * chooses or answers a question.  The forecast now runs the same adaptive
+ * policy as the product: choose one pair, draw one Davidson response, and
+ * update a small posterior ensemble before checking the stopping event again.
+ *
+ * These constants are deliberately fixed.  They describe a conservative
+ * response model for a *forecast*, not parameters estimated from a user's
+ * historical calibration answers (historical calibration is intentionally out
+ * of scope for this revision).
+ */
+const FORECAST_DAVIDSON_TIE_STRENGTH = 0.35;
+const FORECAST_LAPSE_RATE = 0.04;
+const FORECAST_UPDATE_TEMPERATURE = 0.72;
+const FORECAST_MIN_PAIR_VARIANCE = 1e-8;
+// Sorting every posterior draw is the dominant cost for large collections.
+// A sixteen-answer cadence is frequent enough to adapt exploration and keeps
+// the interactive forecast responsive; the public model itself still checks
+// the stopping event on every real answer.
+const FORECAST_DEFAULT_DIAGNOSTIC_STRIDE = 32;
+
+interface DavidsonProbabilities {
+  left: number;
+  tie: number;
+  right: number;
+}
+
+function davidsonProbabilities(difference: number): DavidsonProbabilities {
+  // With strengths exp(theta), dividing Davidson's denominator by the
+  // geometric mean leaves exp(d/2), exp(-d/2), and a constant tie weight.
+  const bounded = Math.max(-40, Math.min(40, difference));
+  const leftWeight = Math.exp(bounded / 2);
+  const rightWeight = Math.exp(-bounded / 2);
+  const tieWeight = FORECAST_DAVIDSON_TIE_STRENGTH;
+  const denominator = leftWeight + rightWeight + tieWeight;
+  const base = {
+    left: leftWeight / denominator,
+    tie: tieWeight / denominator,
+    right: rightWeight / denominator,
+  };
+  // A small fixed lapse prevents a deterministic answer from making a future
+  // path infinitely certain.  It is mixed uniformly across all three buttons.
+  return {
+    left: (1 - FORECAST_LAPSE_RATE) * base.left + FORECAST_LAPSE_RATE / 3,
+    tie: (1 - FORECAST_LAPSE_RATE) * base.tie + FORECAST_LAPSE_RATE / 3,
+    right: (1 - FORECAST_LAPSE_RATE) * base.right + FORECAST_LAPSE_RATE / 3,
+  };
+}
+
+function simulatedOutcome(difference: number, random: () => number): "left" | "tie" | "right" {
+  const probabilities = davidsonProbabilities(difference);
+  const draw = random();
+  if (draw < probabilities.left) return "left";
+  if (draw < probabilities.left + probabilities.tie) return "tie";
+  return "right";
+}
+
+function outcomeLikelihood(
+  difference: number,
+  outcome: "left" | "tie" | "right",
+) {
+  const probabilities = davidsonProbabilities(difference);
+  return outcome === "left" ? probabilities.left
+    : outcome === "right" ? probabilities.right
+      : probabilities.tie;
+}
+
+/**
+ * Apply an ensemble-transform Kalman-style update to one pairwise direction.
+ * Only theta[left] - theta[right] is changed; all orthogonal directions are
+ * preserved.  Tempered likelihood weights keep a 64-member ensemble useful
+ * over a long simulated path and avoid pretending that the approximate
+ * Davidson response model is exact.
+ */
+function updateForecastPosterior(
+  posteriorSamples: Float64Array[],
+  leftIndex: number,
+  rightIndex: number,
+  outcome: "left" | "tie" | "right",
+) {
+  if (posteriorSamples.length === 0) return 0;
+  const differences = posteriorSamples.map((sample) => sample[leftIndex] - sample[rightIndex]);
+  let mean = 0;
+  for (const difference of differences) mean += difference;
+  mean /= differences.length;
+  let variance = 0;
+  for (const difference of differences) variance += (difference - mean) ** 2;
+  variance /= Math.max(1, differences.length - 1);
+
+  // A degenerate hand-written/test ensemble still needs to react to a new
+  // answer.  The fallback is a deliberately modest pseudo-observation shift.
+  if (variance < FORECAST_MIN_PAIR_VARIANCE) {
+    const target = outcome === "left" ? 0.9 : outcome === "right" ? -0.9 : 0;
+    const shift = Math.max(-0.75, Math.min(0.75, (target - mean) * 0.2));
+    for (const sample of posteriorSamples) {
+      sample[leftIndex] += shift / 2;
+      sample[rightIndex] -= shift / 2;
+    }
+    return shift;
+  }
+
+  const logWeights = differences.map((difference) =>
+    FORECAST_UPDATE_TEMPERATURE * Math.log(Math.max(1e-12, outcomeLikelihood(difference, outcome))));
+  const maximum = Math.max(...logWeights);
+  let weightTotal = 0;
+  let weightedMean = 0;
+  for (const logWeight of logWeights) weightTotal += Math.exp(logWeight - maximum);
+  for (let index = 0; index < differences.length; index += 1) {
+    weightedMean += differences[index] * Math.exp(logWeights[index] - maximum);
+  }
+  weightedMean /= Math.max(weightTotal, Number.EPSILON);
+  let weightedVariance = 0;
+  for (let index = 0; index < differences.length; index += 1) {
+    const weight = Math.exp(logWeights[index] - maximum);
+    weightedVariance += weight * (differences[index] - weightedMean) ** 2;
+  }
+  weightedVariance /= Math.max(weightTotal, Number.EPSILON);
+
+  // Temper once more in moment space.  This makes the update stable when a
+  // path repeatedly asks nearly identical pairs while retaining the observed
+  // direction of evidence.
+  const meanBlend = 0.82;
+  const nextMean = mean + meanBlend * (weightedMean - mean);
+  const nextVariance = Math.max(
+    FORECAST_MIN_PAIR_VARIANCE,
+    variance * (1 - meanBlend) + weightedVariance * meanBlend,
+  );
+  const scale = Math.sqrt(nextVariance / variance);
+  let differenceDeltaTotal = 0;
+  for (let index = 0; index < posteriorSamples.length; index += 1) {
+    const nextDifference = nextMean + scale * (differences[index] - mean);
+    const delta = nextDifference - differences[index];
+    differenceDeltaTotal += delta;
+    posteriorSamples[index][leftIndex] += delta / 2;
+    posteriorSamples[index][rightIndex] -= delta / 2;
+  }
+  return differenceDeltaTotal / posteriorSamples.length;
+}
+
+function fitFromForecastEnsemble(
+  items: RankingItemInput[],
+  posteriorSamples: Float64Array[],
+  acceptedComparisons: number,
+): FitResult {
+  const abilities: Record<number, number> = {};
+  const uncertainty: Record<number, number> = {};
+  if (posteriorSamples.length === 0) {
+    for (const item of items) {
+      abilities[item.subjectId] = 0;
+      uncertainty[item.subjectId] = 0;
+    }
+    return {
+      abilities, uncertainty, meanUncertainty: 0, converged: true, iterations: 0,
+      acceptedComparisons, posteriorSamples,
+    };
+  }
+  for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
+    let mean = 0;
+    for (const sample of posteriorSamples) mean += sample[itemIndex];
+    mean /= posteriorSamples.length;
+    abilities[items[itemIndex].subjectId] = mean;
+    // Pair selection and stopping read the ensemble directly.  Computing all
+    // marginal variances at every simulated answer would double the hottest
+    // O(items × samples) loop without changing either decision.
+    uncertainty[items[itemIndex].subjectId] = 0;
+  }
+  return {
+    abilities,
+    uncertainty,
+    meanUncertainty: 0,
+    converged: true,
+    iterations: 1,
+    acceptedComparisons,
+    posteriorSamples,
+  };
+}
+
+function coverageTargetStableSampleCount(
+  items: RankingItemInput[],
+  referenceRates: Uint8Array,
+  posteriorSamples: Float64Array[],
+  scoreByRank: Uint8Array,
+) {
+  const allowedCrossCount = allowedCrossTwoBucketCount(items.length);
+  let stableSamples = 0;
+  for (const sample of posteriorSamples) {
+    const sampleRates = ratesByItem(items, sample, scoreByRank);
+    let crossTwoBucketCount = 0;
+    for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
+      if (Math.abs(referenceRates[itemIndex] - sampleRates[itemIndex]) > 1) crossTwoBucketCount += 1;
+      if (crossTwoBucketCount > allowedCrossCount) break;
+    }
+    if (crossTwoBucketCount <= allowedCrossCount) stableSamples += 1;
+  }
+  return stableSamples;
+}
+
+function forecastStoppingEventPassed(
+  items: RankingItemInput[],
+  abilities: Float64Array,
+  posteriorSamples: Float64Array[],
+  scoreByRank: Uint8Array,
+  evidenceCount: number,
+  evidenceRequired: number,
+) {
+  if (evidenceCount < evidenceRequired || posteriorSamples.length === 0) return false;
+  const referenceRates = ratesByItem(items, abilities, scoreByRank);
+  const stableSamples = coverageTargetStableSampleCount(items, referenceRates, posteriorSamples, scoreByRank);
+  return wilsonInterval(stableSamples, posteriorSamples.length).low >= STOPPING_PROBABILITY_TARGET;
+}
+
+function forecastHistoryRecord(
+  input: StoppingForecastRolloutInput,
+  pair: NextPair,
+  outcome: "left" | "tie" | "right",
+  acceptedCountAtAnswer: number,
+  rolloutSeed: number,
+  answerIndex: number,
+): RankingHistoryInput {
+  return {
+    recordId: `forecast:${rolloutSeed.toString(16)}:${answerIndex}`,
+    sessionId: input.sessionId,
+    leftSubjectId: pair.leftSubjectId,
+    rightSubjectId: pair.rightSubjectId,
+    outcome,
+    acceptedCountAtAnswer,
+    queryKind: pair.queryKind,
+    createdAt: new Date(answerIndex * 1000).toISOString(),
+  };
+}
+
+function createForecastSelectionCache(
+  items: RankingItemInput[],
+  history: RankingHistoryInput[],
+  sessionId: string,
+  acceptedComparisons: number,
+): PairSelectionCache {
+  const pairCounts = new Map<string, number>();
+  const itemCounts = new Map(items.map((item) => [item.subjectId, 0]));
+  const cooled = new Set<string>();
+  let nonCalibrationCount = 0;
+  for (const entry of history) {
+    if (entry.outcome === "skip") {
+      if (acceptedComparisons - entry.acceptedCountAtAnswer < 20) {
+        cooled.add(pairKey(entry.leftSubjectId, entry.rightSubjectId));
+      }
+      continue;
+    }
+    const key = pairKey(entry.leftSubjectId, entry.rightSubjectId);
+    pairCounts.set(key, (pairCounts.get(key) ?? 0) + 1);
+    itemCounts.set(entry.leftSubjectId, (itemCounts.get(entry.leftSubjectId) ?? 0) + 1);
+    itemCounts.set(entry.rightSubjectId, (itemCounts.get(entry.rightSubjectId) ?? 0) + 1);
+    if (entry.sessionId === sessionId && entry.queryKind !== "calibration") nonCalibrationCount += 1;
+  }
+  return { pairCounts, itemCounts, cooled, nonCalibrationCount };
+}
+
+function refreshForecastSelectionDiagnostics(
+  items: RankingItemInput[],
+  fit: FitResult,
+  distribution: DistributionConfig,
+  previous: RankingDiagnostics,
+) {
+  const mapOrder = orderByAbilities(items, fit.abilities);
+  const mapRates = mappedRates(mapOrder, distribution);
+  // Selection needs only a rough unstable-item ranking.  Use a deterministic
+  // eighth of the ensemble here; the stopping event itself still evaluates all
+  // forecast members at its check cadence.
+  const diagnosticSamples = fit.posteriorSamples.filter((_, index) => index % 8 === 0);
+  const metrics = assignmentMetrics(items, mapRates, diagnosticSamples, distribution);
+  // Question selection only consumes the per-item stability maps.  Rebuilding
+  // calibration and rescanning an ever-growing synthetic history here would
+  // be quadratic in the forecast horizon without affecting the selected pair.
+  return { ...previous, ...metrics };
+}
+
+function simulateForecastRollout(
+  input: StoppingForecastRolloutInput,
+  truth: Float64Array,
+  rolloutSeed: number,
+) {
+  const random = seededRandom(rolloutSeed);
+  const posteriorSamples = input.forecastSamples.map((sample) => sample.slice());
+  const indexById = new Map(input.items.map((item, index) => [item.subjectId, index]));
+  const history = input.history.slice();
+  let acceptedComparisons = input.acceptedComparisons;
+  const selectionCache = createForecastSelectionCache(
+    input.items, history, input.sessionId, acceptedComparisons,
+  );
+  let evidenceCount = input.evidenceCount;
+  const fit = fitFromForecastEnsemble(input.items, posteriorSamples, acceptedComparisons);
+  const abilities = new Float64Array(input.items.map((item) => fit.abilities[item.subjectId] ?? 0));
+  let diagnostics = input.initialDiagnostics;
+  const diagnosticStride = Math.max(1, Math.round(input.diagnosticStride));
+  const stoppingCheckStride = Math.max(8, diagnosticStride);
+
+  for (let answerIndex = 1; answerIndex <= input.simulationHorizon; answerIndex += 1) {
+    if (answerIndex === 1 || (answerIndex - 1) % diagnosticStride === 0) {
+      diagnostics = refreshForecastSelectionDiagnostics(
+        input.items, fit, input.distribution, diagnostics,
+      );
+    }
+    const pair = chooseNextPair(
+      input.items,
+      history,
+      fit,
+      diagnostics,
+      input.distribution,
+      input.sessionId,
+      input.modelVersion,
+      answerIndex + input.modelVersion,
+      {
+        ...input.selectionOptions,
+        allowCalibration: false,
+        selectionCache,
+        candidateLimit: input.items.length > 80 ? 96 : (input.selectionOptions.candidateLimit ?? 64),
+        posteriorSampleStride: input.items.length > 80 ? 16 : (input.selectionOptions.posteriorSampleStride ?? 4),
+      },
+    );
+    if (!pair) return Number.POSITIVE_INFINITY;
+    const leftIndex = indexById.get(pair.leftSubjectId);
+    const rightIndex = indexById.get(pair.rightSubjectId);
+    if (leftIndex === undefined || rightIndex === undefined || leftIndex === rightIndex) {
+      return Number.POSITIVE_INFINITY;
+    }
+    const outcome = simulatedOutcome(truth[leftIndex] - truth[rightIndex], random);
+    const differenceDelta = updateForecastPosterior(posteriorSamples, leftIndex, rightIndex, outcome);
+    fit.abilities[pair.leftSubjectId] += differenceDelta / 2;
+    fit.abilities[pair.rightSubjectId] -= differenceDelta / 2;
+    abilities[leftIndex] += differenceDelta / 2;
+    abilities[rightIndex] -= differenceDelta / 2;
+    acceptedComparisons += 1;
+    fit.acceptedComparisons = acceptedComparisons;
+    evidenceCount += 1;
+    history.push(forecastHistoryRecord(input, pair, outcome, acceptedComparisons, rolloutSeed, answerIndex));
+    const selectedKey = pairKey(pair.leftSubjectId, pair.rightSubjectId);
+    selectionCache.pairCounts.set(selectedKey, (selectionCache.pairCounts.get(selectedKey) ?? 0) + 1);
+    selectionCache.itemCounts.set(pair.leftSubjectId, (selectionCache.itemCounts.get(pair.leftSubjectId) ?? 0) + 1);
+    selectionCache.itemCounts.set(pair.rightSubjectId, (selectionCache.itemCounts.get(pair.rightSubjectId) ?? 0) + 1);
+    if (pair.queryKind !== "calibration") selectionCache.nonCalibrationCount += 1;
+    const checkNow = answerIndex <= Math.min(4, stoppingCheckStride)
+      || answerIndex % stoppingCheckStride === 0
+      || evidenceCount === input.evidenceRequired;
+    if (checkNow) {
+      if (forecastStoppingEventPassed(
+        input.items,
+        abilities,
+        posteriorSamples,
+        input.scoreByRank,
+        evidenceCount,
+        input.evidenceRequired,
+      )) return answerIndex;
+    }
+  }
+  return Number.POSITIVE_INFINITY;
 }
 
 export function prepareStoppingForecastRollouts(
@@ -1037,51 +1378,55 @@ export function prepareStoppingForecastRollouts(
   options: StoppingForecastOptions,
   rolloutCount = Math.max(16, Math.round(options.rolloutCount ?? 64)),
 ): StoppingForecastRolloutInput {
-  const touched = new Set<number>();
-  for (const entry of history) {
-    if (entry.sessionId !== sessionId || entry.outcome === "skip") continue;
-    touched.add(entry.leftSubjectId);
-    touched.add(entry.rightSubjectId);
-  }
-  const coverage = touched.size / Math.max(1, items.length);
   const forecastSampleCount = Math.min(64, fit.posteriorSamples.length);
-  // Preserve the original shared random stream before distributing the
-  // expensive curves. Workers receive only the selected truths and scalar
-  // efficiencies, so splitting the rollouts cannot change their results.
+  // Preserve the shared random stream before distributing paths to workers.
+  // Each path receives its own seed, so splitting the paths cannot change the
+  // simulated questions or responses.
   const random = seededRandom(forecastRandomSeed(options, diagnostics));
-  const normal = normalGenerator(random);
   const truthSamples: Float64Array[] = [];
-  const efficiencyMultipliers = new Float64Array(rolloutCount);
+  const rolloutSeeds = new Uint32Array(rolloutCount);
   for (let rollout = 0; rollout < rolloutCount && fit.posteriorSamples.length > 0; rollout += 1) {
-    truthSamples.push(fit.posteriorSamples[Math.floor(random() * fit.posteriorSamples.length)]);
-    efficiencyMultipliers[rollout] = Math.exp(0.55 * normal() - 0.5 * 0.55 ** 2);
+    truthSamples.push(fit.posteriorSamples[Math.floor(random() * fit.posteriorSamples.length)].slice());
+    rolloutSeeds[rollout] = Math.floor(random() * 0x100000000) >>> 0;
   }
+  const selectedSamples = Array.from({ length: forecastSampleCount }, (_, index) =>
+    fit.posteriorSamples[Math.floor(index * fit.posteriorSamples.length / forecastSampleCount)].slice());
+  const currentAbilities = new Float64Array(items.map((item) => fit.abilities[item.subjectId] ?? 0));
+  const effectiveHistory = history.map((entry) => ({ ...entry }));
+  const requestedProjectionHorizon = Math.max(
+    5,
+    Math.round(options.projectionHorizon ?? forecastProjectionHorizon(items.length)),
+  );
+  const simulationHorizon = Math.min(
+    requestedProjectionHorizon,
+    Math.max(120, Math.min(500, Math.ceil(items.length * 1.75))),
+  );
   return {
-    items,
-    currentAbilities: new Float64Array(items.map((item) => fit.abilities[item.subjectId] ?? 0)),
-    forecastSamples: Array.from({ length: forecastSampleCount }, (_, index) =>
-      fit.posteriorSamples[Math.floor(index * fit.posteriorSamples.length / forecastSampleCount)]),
+    items: items.map((item) => ({ ...item })),
+    distribution: { ...distribution, weights: [...distribution.weights] },
+    history: effectiveHistory,
+    sessionId,
+    // Forecast random streams depend on evidence, never on a cached model
+    // version, so switching away from a mode and back is exactly reproducible.
+    modelVersion: 0,
+    selectionOptions: { ...(options.pairSelection ?? {}), allowCalibration: false },
+    initialDiagnostics: diagnostics,
+    currentAbilities,
+    forecastSamples: selectedSamples,
     truthSamples,
-    efficiencyMultipliers,
+    rolloutSeeds,
     scoreByRank: forecastScoreByRank(items, distribution),
-    baseEfficiency: Math.max(0.15, (options.forecastEfficiency ?? 1) * (0.65 + 0.7 * coverage)),
-    effectiveEvidence: Math.max(8, diagnostics.evidenceCount),
-    minimumAdditional: Math.max(1, diagnostics.evidenceRequired - diagnostics.evidenceCount),
-    projectionHorizon: Math.max(
-      5,
-      Math.round(options.projectionHorizon ?? forecastProjectionHorizon(items.length)),
-    ),
+    acceptedComparisons: fit.acceptedComparisons,
+    evidenceRequired: diagnostics.evidenceRequired,
+    diagnosticStride: Math.max(1, Math.round(options.diagnosticStride ?? FORECAST_DEFAULT_DIAGNOSTIC_STRIDE)),
+    simulationHorizon,
+    projectionHorizon: simulationHorizon,
     evidenceCount: diagnostics.evidenceCount,
     ready: diagnostics.ready,
   };
 }
 
-/**
- * Calculate an independently seeded slice of the Monte Carlo rollouts.
- *
- * Random choices are precomputed by `prepareStoppingForecastRollouts`, making
- * the result invariant when this slice is split among multiple workers.
- */
+/** Calculate an independently seeded slice of sequential forecast rollouts. */
 export function forecastStoppingTimeRollouts(
   input: StoppingForecastRolloutInput,
   rolloutStart: number,
@@ -1099,15 +1444,8 @@ export function forecastStoppingTimeRollouts(
       stoppingTimes.push(Number.POSITIVE_INFINITY);
       continue;
     }
-    const curve = contractionRiskCurve(
-      input.items, input.currentAbilities, input.scoreByRank, truth, input.forecastSamples,
-    );
-    const efficiency = input.baseEfficiency * input.efficiencyMultipliers[absoluteIndex];
-    const stop = firstPassingInteger(input.minimumAdditional, input.projectionHorizon, (additional) => {
-      const scale = Math.sqrt(input.effectiveEvidence / (input.effectiveEvidence + efficiency * additional));
-      return interpolatedRisk(curve, scale) <= 1 + 1e-9;
-    });
-    stoppingTimes.push(stop);
+    const seed = input.rolloutSeeds[absoluteIndex] ?? hash(`${absoluteIndex}:forecast`);
+    stoppingTimes.push(simulateForecastRollout(input, truth, seed));
   }
   return stoppingTimes;
 }
@@ -1221,7 +1559,7 @@ export function forecastStoppingTimeSimulation(
   );
   const stoppingTimes = forecastStoppingTimeRollouts(input, 0, rolloutCount);
   return summarizeStoppingTimeRollouts(
-    stoppingTimes, projectionHorizon, diagnostics, fit.posteriorSamples.length > 0,
+    stoppingTimes, input.projectionHorizon, diagnostics, fit.posteriorSamples.length > 0,
   );
 }
 

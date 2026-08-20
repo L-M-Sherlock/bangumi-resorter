@@ -152,7 +152,7 @@ export const TERM_DEFINITIONS = {
   },
   "dynamic-forecast": {
     label: "动态剩余预测",
-    summary: "用后验收缩路径估计还需多少有效比较；它会随新证据重算，是区间而不是承诺题量。",
+    summary: "逐题模拟选题、回答和后验更新，估计还需多少有效比较；它会随新证据重算，是区间而不是承诺题量。",
     sectionId: "remaining-forecast",
   },
   "inference-mode": {

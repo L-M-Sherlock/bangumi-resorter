@@ -117,17 +117,31 @@ export function prepareRanking(request: RankingRequest): PreparedRanking {
         request.sessionId,
       );
     }
-    return { mode, result, diagnostics };
+    return { mode, result, diagnostics, tuning };
   });
   const active = evaluations[evaluations.length - 1];
-  const forecastOptions = { randomSeed: request.randomSeed, forecastEfficiency: activeTuning.forecastEfficiency };
+  const forecastOptionsFor = (tuning: ReturnType<typeof rankingTuning>): StoppingForecastOptions => ({
+    randomSeed: request.randomSeed,
+    // Retained for compatibility with older callers; the sequential
+    // forecaster does not convert this into a synthetic evidence multiplier.
+    forecastEfficiency: tuning.forecastEfficiency,
+    modelVersion: request.version,
+    pairSelection: {
+      maxRateGap: tuning.maxRateGap,
+      maxRankDistance: tuning.maxRankDistance,
+      boundaryWindow: tuning.boundaryWindow,
+      explorationInterval: tuning.explorationInterval,
+      explorationRadius: tuning.explorationRadius,
+      allowCalibration: false,
+    },
+  });
   return {
     request,
-    active: { fit: active.result, diagnostics: active.diagnostics, options: forecastOptions },
+    active: { fit: active.result, diagnostics: active.diagnostics, options: forecastOptionsFor(active.tuning) },
     forecasts: evaluations.map((evaluation) => ({
       fit: evaluation.result,
       diagnostics: evaluation.diagnostics,
-      options: forecastOptions,
+      options: forecastOptionsFor(evaluation.tuning),
     })),
     modes: evaluations.map((evaluation) => evaluation.mode),
     activeTuning,

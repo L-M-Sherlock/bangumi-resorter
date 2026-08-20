@@ -833,7 +833,11 @@ kbd { padding: 2px 5px; border: 1px solid rgba(255,255,255,.35); border-radius: 
   .metric-grid { grid-template-columns: repeat(2, 1fr); }
   .comparison-stage { grid-template-columns: 1fr 28px 1fr; gap: 6px; }
   .media-card { padding: 7px; }
-  .poster-image.wide, .poster-fallback.wide, .poster-frame.wide { aspect-ratio: .78 / 1; }
+  /* Keep the two choices reachable on a short phone viewport even when the
+     forecast and minimum-evidence notices are both visible.  The card still
+     retains enough artwork to identify the work; desktop/tablet proportions
+     remain unchanged. */
+  .poster-image.wide, .poster-fallback.wide, .poster-frame.wide { aspect-ratio: 1.18 / 1; max-height: 100px; }
   .media-copy { min-height: 84px; padding: 10px 2px 8px; }
   .media-copy h2 { font-size: 17px; }
   .media-copy p { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

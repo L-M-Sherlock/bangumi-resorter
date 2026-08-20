@@ -62,6 +62,10 @@ export function minimumEvidence(itemCount: number) {
 }
 
 export function rankingTuning(mode: ComparisonBudgetMode) {
+  // Legacy forecastEfficiency values remain in serialized requests for
+  // compatibility.  The sequential forecaster no longer interprets them as
+  // an evidence multiplier; mode differences come from these selection and
+  // prior settings instead.
   if (mode === "quick") {
     return {
       priorStrength: 1.2, priorScale: 0.7,
