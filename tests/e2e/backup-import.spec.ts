@@ -310,7 +310,7 @@ test("deletes a migrated legacy clone and switches to the remaining snapshot", a
   await expect(dialog).toContainText("会话 1");
   await expect(dialog).toContainText("判断 1");
   await expect(dialog).toContainText("导入批次 1");
-  await expect(dialog).toContainText("模型 1");
+  await expect(dialog).toContainText("模型 0");
   await expect(dialog).toContainText("同账号最近的剩余快照");
   const removeButton = dialog.getByRole("button", { name: "永久删除副本" });
   await expect(removeButton).toBeDisabled();

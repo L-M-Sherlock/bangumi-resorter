@@ -1,6 +1,7 @@
 import {
   CalibrationDiagnostics,
   CollectionItem,
+  ComparisonBudgetMode,
   DistributionConfig,
   ModelState,
   NextPair,
@@ -17,6 +18,8 @@ import {
   forecastProjectionHorizon,
   minimumEvidence,
   requiredAdjacentStableItemCount,
+  stoppingCoverageTarget,
+  STOPPING_MODE_ORDER,
   STOPPING_PROBABILITY_TARGET,
 } from "./strategy";
 
@@ -28,7 +31,6 @@ const GRADIENT_TOLERANCE = 1e-6;
 const PCG_TOLERANCE = 1e-4;
 const POSTERIOR_PCG_TOLERANCE = 1e-3;
 const BUCKET_STABILITY_TARGET = STOPPING_PROBABILITY_TARGET;
-const STOPPING_EVENT_ERROR_TOLERANCE = 1 - STOPPING_PROBABILITY_TARGET;
 
 interface IndexedComparison {
   left: number;
@@ -77,6 +79,8 @@ interface PairSelectionCache {
 
 export interface StoppingForecastOptions {
   randomSeed: number;
+  /** Active display mode; all three ordered modes are simulated together. */
+  stoppingMode?: ComparisonBudgetMode;
   /**
    * Kept for backwards-compatible serialized requests.  The sequential
    * forecaster no longer turns this scalar into a synthetic amount of
@@ -494,6 +498,7 @@ interface AssignmentMetrics {
   adjacentBucketStableSamples: number;
   coverageTargetStability: number;
   coverageTargetStableSamples: number;
+  coverageTargetStableSamplesByMode: Record<ComparisonBudgetMode, number>;
   requiredAdjacentStableItemCount: number;
   allowedCrossTwoBucketCount: number;
   expectedCrossTwoBucketCount: number;
@@ -564,6 +569,12 @@ function assignmentMetricsFromRates(
     if (adjacentStable) adjacentStableWeight += weight;
     if (crossTwoBucketCount <= allowedCrossCount) coverageTargetStableWeight += weight;
   }
+  const coverageTargetStableSamplesByMode = Object.fromEntries(
+    STOPPING_MODE_ORDER.map((mode) => {
+      const allowed = allowedCrossTwoBucketCount(items.length, stoppingCoverageTarget(mode));
+      return [mode, crossTwoBucketCounts.filter((count) => count <= allowed).length];
+    }),
+  ) as Record<ComparisonBudgetMode, number>;
   const denominator = Math.max(totalWeight, Number.EPSILON);
   const bucketStability: Record<number, number> = {};
   const adjacentBucketStabilityByItem: Record<number, number> = {};
@@ -583,6 +594,7 @@ function assignmentMetricsFromRates(
     adjacentBucketStableSamples: adjacentStableWeight,
     coverageTargetStability: coverageTargetStableWeight / denominator,
     coverageTargetStableSamples: coverageTargetStableWeight,
+    coverageTargetStableSamplesByMode,
     requiredAdjacentStableItemCount: requiredAdjacentCount,
     allowedCrossTwoBucketCount: allowedCrossCount,
     expectedCrossTwoBucketCount: crossTwoBucketCounts.reduce((sum, value) => sum + value, 0) / denominator,
@@ -596,8 +608,36 @@ function assignmentMetricsFromRates(
   };
 }
 
-function decisionRiskRatio(stoppingEventStability: number) {
-  return (1 - stoppingEventStability) / STOPPING_EVENT_ERROR_TOLERANCE;
+function decisionRiskRatio(stoppingEventStability: number, probabilityTarget = STOPPING_PROBABILITY_TARGET) {
+  return (1 - stoppingEventStability) / Math.max(1e-12, 1 - probabilityTarget);
+}
+
+function buildStoppingChecks(
+  itemCount: number,
+  sampleCount: number,
+  stableSamplesByMode: Record<ComparisonBudgetMode, number>,
+  evidenceSatisfied: boolean,
+): NonNullable<RankingDiagnostics["stoppingChecks"]> {
+  return STOPPING_MODE_ORDER.map((mode) => {
+    const target = stoppingCoverageTarget(mode);
+    const stableSamples = stableSamplesByMode[mode];
+    const interval = sampleCount > 0
+      ? wilsonInterval(stableSamples, sampleCount)
+      : { low: 1, high: 1 };
+    return {
+      mode,
+      target,
+      probabilityTarget: STOPPING_PROBABILITY_TARGET,
+      requiredAdjacentStableItemCount: requiredAdjacentStableItemCount(itemCount, target),
+      allowedCrossTwoBucketCount: allowedCrossTwoBucketCount(itemCount, target),
+      sampleCount,
+      stableSamples,
+      probability: sampleCount > 0 ? stableSamples / sampleCount : 1,
+      low: interval.low,
+      high: interval.high,
+      ready: evidenceSatisfied && interval.low >= STOPPING_PROBABILITY_TARGET,
+    };
+  });
 }
 
 export function analyzeRanking(
@@ -606,11 +646,22 @@ export function analyzeRanking(
   distribution: DistributionConfig,
   history: RankingHistoryInput[],
   sessionId: string,
+  stoppingModeOrLegacyTarget: ComparisonBudgetMode | number = "standard",
 ): RankingDiagnostics {
+  // A numeric sixth argument was accepted by pre-v10 callers as the active
+  // probability threshold. Coverage targets are now mode-specific, so retain
+  // that call shape by selecting the standard mode rather than changing the
+  // new semantics based on an arbitrary number.
+  const stoppingMode = typeof stoppingModeOrLegacyTarget === "string"
+    ? stoppingModeOrLegacyTarget
+    : "standard";
   if (items.length === 0 || fit.posteriorSamples.length === 0) {
     const calibration = calibrationDiagnostics(history);
+    const stoppingChecks = buildStoppingChecks(0, 0, {
+      quick: 0, standard: 0, thorough: 0,
+    }, true);
     return {
-      method: "laplace-mc-v4", sampleCount: 0, bucketStability: {}, adjacentBucketStabilityByItem: {},
+      method: "laplace-mc-v5", sampleCount: 0, bucketStability: {}, adjacentBucketStabilityByItem: {},
       jointBucketStability: 1, jointBucketStableSamples: 0,
       jointBucketStabilityLow: 1, jointBucketStabilityHigh: 1,
       adjacentBucketStability: 1, adjacentBucketStableSamples: 0,
@@ -623,22 +674,29 @@ export function analyzeRanking(
       maxBucketDisplacementMedian: 0, maxBucketDisplacementHigh: 0,
       expectedBucketChangeRate: 0, minBucketStability: 1,
       decisionRiskRatio: 0, evidenceCount: 0, evidenceRequired: 0,
-      ready: true, calibration,
+      ready: true, stoppingChecks, stoppingBottleneckMode: stoppingMode, calibration,
     };
   }
   const mapOrder = orderByAbilities(items, fit.abilities);
   const mapRates = mappedRates(mapOrder, distribution);
-  const metrics = assignmentMetrics(items, mapRates, fit.posteriorSamples, distribution);
+  const assignment = assignmentMetrics(items, mapRates, fit.posteriorSamples, distribution);
+  const { coverageTargetStableSamplesByMode, ...metrics } = assignment;
   const jointInterval = wilsonInterval(metrics.jointBucketStableSamples, fit.posteriorSamples.length);
   const adjacentInterval = wilsonInterval(metrics.adjacentBucketStableSamples, fit.posteriorSamples.length);
   const coverageTargetInterval = wilsonInterval(metrics.coverageTargetStableSamples, fit.posteriorSamples.length);
-  const risk = decisionRiskRatio(coverageTargetInterval.low);
   const evidenceCount = history.filter((entry) => entry.sessionId === sessionId && entry.outcome !== "skip").length;
   const evidenceRequired = minimumEvidence(items.length);
   const calibration = calibrationDiagnostics(history);
   const evidenceSatisfied = evidenceCount >= evidenceRequired;
+  const stoppingChecks = buildStoppingChecks(
+    items.length,
+    fit.posteriorSamples.length,
+    coverageTargetStableSamplesByMode,
+    evidenceSatisfied,
+  );
+  const activeCheck = stoppingChecks.find((check) => check.mode === stoppingMode)!;
   return {
-    method: "laplace-mc-v4",
+    method: "laplace-mc-v5",
     sampleCount: fit.posteriorSamples.length,
     ...metrics,
     jointBucketStabilityLow: jointInterval.low,
@@ -647,10 +705,12 @@ export function analyzeRanking(
     adjacentBucketStabilityHigh: adjacentInterval.high,
     coverageTargetStabilityLow: coverageTargetInterval.low,
     coverageTargetStabilityHigh: coverageTargetInterval.high,
-    decisionRiskRatio: risk,
+    decisionRiskRatio: decisionRiskRatio(activeCheck.low),
     evidenceCount,
     evidenceRequired,
-    ready: evidenceSatisfied && risk <= 1 + 1e-9,
+    ready: activeCheck.ready,
+    stoppingChecks,
+    stoppingBottleneckMode: stoppingMode,
     calibration,
   };
 }
@@ -980,10 +1040,14 @@ function ratesByItem(items: RankingItemInput[], sample: Float64Array, scoreByRan
 export interface StoppingForecastSimulation {
   forecast: StoppingForecast;
   stoppingTimes: number[];
+  forecasts: Record<ComparisonBudgetMode, StoppingForecast>;
+  stoppingTimesByMode: StoppingTimesByMode;
 }
 
+export type StoppingTimesByMode = Record<ComparisonBudgetMode, number[]>;
+
 function forecastRandomSeed(options: StoppingForecastOptions, diagnostics: RankingDiagnostics) {
-  return hash(`${options.randomSeed}:${diagnostics.evidenceCount}:coverage-90-adjacent:forecast`);
+  return hash(`${options.randomSeed}:${diagnostics.evidenceCount}:coverage-80-90-95-adjacent:forecast`);
 }
 
 export interface StoppingForecastRolloutInput {
@@ -1007,7 +1071,7 @@ export interface StoppingForecastRolloutInput {
   simulationHorizon: number;
   projectionHorizon: number;
   evidenceCount: number;
-  ready: boolean;
+  stoppingMode: ComparisonBudgetMode;
 }
 
 /**
@@ -1030,7 +1094,7 @@ const FORECAST_MIN_PAIR_VARIANCE = 1e-8;
 // A sixteen-answer cadence is frequent enough to adapt exploration and keeps
 // the interactive forecast responsive; the public model itself still checks
 // the stopping event on every real answer.
-const FORECAST_DEFAULT_DIAGNOSTIC_STRIDE = 32;
+const FORECAST_DEFAULT_DIAGNOSTIC_STRIDE = 16;
 
 interface DavidsonProbabilities {
   left: number;
@@ -1080,21 +1144,30 @@ function outcomeLikelihood(
 
 /**
  * Apply an ensemble-transform Kalman-style update to one pairwise direction.
- * Only theta[left] - theta[right] is changed; all orthogonal directions are
- * preserved.  Tempered likelihood weights keep a 64-member ensemble useful
- * over a long simulated path and avoid pretending that the approximate
- * Davidson response model is exact.
+ * The observed difference is transformed first, then that change is
+ * propagated through Cov(theta_i, theta_left - theta_right) to every related
+ * item.  This mirrors the graph-wide contraction of a Laplace refit without
+ * refitting the full model after every simulated answer.
+ *
+ * @internal Exported so the covariance-propagation invariant can be tested.
  */
-function updateForecastPosterior(
+export function updateForecastPosterior(
   posteriorSamples: Float64Array[],
   leftIndex: number,
   rightIndex: number,
   outcome: "left" | "tie" | "right",
 ) {
-  if (posteriorSamples.length === 0) return 0;
-  const differences = posteriorSamples.map((sample) => sample[leftIndex] - sample[rightIndex]);
+  const itemCount = posteriorSamples[0]?.length ?? 0;
+  const gains = new Float64Array(itemCount);
+  if (posteriorSamples.length === 0 || itemCount === 0) return gains;
+  const differences = new Float64Array(posteriorSamples.length);
   let mean = 0;
-  for (const difference of differences) mean += difference;
+  for (let sampleIndex = 0; sampleIndex < posteriorSamples.length; sampleIndex += 1) {
+    const sample = posteriorSamples[sampleIndex];
+    const difference = sample[leftIndex] - sample[rightIndex];
+    differences[sampleIndex] = difference;
+    mean += difference;
+  }
   mean /= differences.length;
   let variance = 0;
   for (const difference of differences) variance += (difference - mean) ** 2;
@@ -1109,7 +1182,9 @@ function updateForecastPosterior(
       sample[leftIndex] += shift / 2;
       sample[rightIndex] -= shift / 2;
     }
-    return shift;
+    gains[leftIndex] = shift / 2;
+    gains[rightIndex] = -shift / 2;
+    return gains;
   }
 
   const logWeights = differences.map((difference) =>
@@ -1132,22 +1207,53 @@ function updateForecastPosterior(
   // Temper once more in moment space.  This makes the update stable when a
   // path repeatedly asks nearly identical pairs while retaining the observed
   // direction of evidence.
-  const meanBlend = 0.82;
+  // A simulated answer is less informative than a real refit: the response
+  // model, sampled truth and finite ensemble all add uncertainty. Temper the
+  // moment move to avoid systematically overconfident forecasts.
+  const meanBlend = 0.6;
   const nextMean = mean + meanBlend * (weightedMean - mean);
   const nextVariance = Math.max(
     FORECAST_MIN_PAIR_VARIANCE,
     variance * (1 - meanBlend) + weightedVariance * meanBlend,
   );
   const scale = Math.sqrt(nextVariance / variance);
-  let differenceDeltaTotal = 0;
-  for (let index = 0; index < posteriorSamples.length; index += 1) {
-    const nextDifference = nextMean + scale * (differences[index] - mean);
-    const delta = nextDifference - differences[index];
-    differenceDeltaTotal += delta;
-    posteriorSamples[index][leftIndex] += delta / 2;
-    posteriorSamples[index][rightIndex] -= delta / 2;
+  const differenceDeltas = new Float64Array(posteriorSamples.length);
+  let covarianceDenominator = 0;
+  let meanDifferenceDelta = 0;
+  for (let sampleIndex = 0; sampleIndex < posteriorSamples.length; sampleIndex += 1) {
+    const centered = differences[sampleIndex] - mean;
+    covarianceDenominator += centered * centered;
+    const nextDifference = nextMean + scale * centered;
+    const delta = nextDifference - differences[sampleIndex];
+    differenceDeltas[sampleIndex] = delta;
+    meanDifferenceDelta += delta;
   }
-  return differenceDeltaTotal / posteriorSamples.length;
+  meanDifferenceDelta /= posteriorSamples.length;
+
+  for (let itemIndex = 0; itemIndex < itemCount; itemIndex += 1) {
+    let covarianceNumerator = 0;
+    for (let sampleIndex = 0; sampleIndex < posteriorSamples.length; sampleIndex += 1) {
+      const value = posteriorSamples[sampleIndex][itemIndex];
+      covarianceNumerator += value * (differences[sampleIndex] - mean);
+    }
+    gains[itemIndex] = covarianceNumerator / covarianceDenominator;
+  }
+  // The direct comparison direction is observed rather than estimated from a
+  // noisy cross-covariance, so keep it exact and symmetric.
+  gains[leftIndex] = 0.5;
+  gains[rightIndex] = -0.5;
+
+  for (let sampleIndex = 0; sampleIndex < posteriorSamples.length; sampleIndex += 1) {
+    const sample = posteriorSamples[sampleIndex];
+    const delta = differenceDeltas[sampleIndex];
+    for (let itemIndex = 0; itemIndex < itemCount; itemIndex += 1) {
+      sample[itemIndex] += gains[itemIndex] * delta;
+    }
+  }
+  for (let itemIndex = 0; itemIndex < itemCount; itemIndex += 1) {
+    gains[itemIndex] *= meanDifferenceDelta;
+  }
+  return gains;
 }
 
 function fitFromForecastEnsemble(
@@ -1188,27 +1294,33 @@ function fitFromForecastEnsemble(
   };
 }
 
-function coverageTargetStableSampleCount(
+function coverageTargetStableSampleCounts(
   items: RankingItemInput[],
   referenceRates: Uint8Array,
   posteriorSamples: Float64Array[],
   scoreByRank: Uint8Array,
 ) {
-  const allowedCrossCount = allowedCrossTwoBucketCount(items.length);
-  let stableSamples = 0;
+  const allowedCrossCounts = Object.fromEntries(STOPPING_MODE_ORDER.map((mode) => [
+    mode,
+    allowedCrossTwoBucketCount(items.length, stoppingCoverageTarget(mode)),
+  ])) as Record<ComparisonBudgetMode, number>;
+  const largestAllowance = Math.max(...Object.values(allowedCrossCounts));
+  const stableSamples = Object.fromEntries(STOPPING_MODE_ORDER.map((mode) => [mode, 0])) as Record<ComparisonBudgetMode, number>;
   for (const sample of posteriorSamples) {
     const sampleRates = ratesByItem(items, sample, scoreByRank);
     let crossTwoBucketCount = 0;
     for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
       if (Math.abs(referenceRates[itemIndex] - sampleRates[itemIndex]) > 1) crossTwoBucketCount += 1;
-      if (crossTwoBucketCount > allowedCrossCount) break;
+      if (crossTwoBucketCount > largestAllowance) break;
     }
-    if (crossTwoBucketCount <= allowedCrossCount) stableSamples += 1;
+    for (const mode of STOPPING_MODE_ORDER) {
+      if (crossTwoBucketCount <= allowedCrossCounts[mode]) stableSamples[mode] += 1;
+    }
   }
   return stableSamples;
 }
 
-function forecastStoppingEventPassed(
+function forecastStoppingEventLows(
   items: RankingItemInput[],
   abilities: Float64Array,
   posteriorSamples: Float64Array[],
@@ -1216,10 +1328,15 @@ function forecastStoppingEventPassed(
   evidenceCount: number,
   evidenceRequired: number,
 ) {
-  if (evidenceCount < evidenceRequired || posteriorSamples.length === 0) return false;
+  if (evidenceCount < evidenceRequired || posteriorSamples.length === 0) {
+    return { quick: 0, standard: 0, thorough: 0 };
+  }
   const referenceRates = ratesByItem(items, abilities, scoreByRank);
-  const stableSamples = coverageTargetStableSampleCount(items, referenceRates, posteriorSamples, scoreByRank);
-  return wilsonInterval(stableSamples, posteriorSamples.length).low >= STOPPING_PROBABILITY_TARGET;
+  const stableSamples = coverageTargetStableSampleCounts(items, referenceRates, posteriorSamples, scoreByRank);
+  return Object.fromEntries(STOPPING_MODE_ORDER.map((mode) => [
+    mode,
+    wilsonInterval(stableSamples[mode], posteriorSamples.length).low,
+  ])) as Record<ComparisonBudgetMode, number>;
 }
 
 function forecastHistoryRecord(
@@ -1306,6 +1423,15 @@ function simulateForecastRollout(
   let diagnostics = input.initialDiagnostics;
   const diagnosticStride = Math.max(1, Math.round(input.diagnosticStride));
   const stoppingCheckStride = Math.max(8, diagnosticStride);
+  const stoppingTimes = Object.fromEntries(STOPPING_MODE_ORDER.map((mode) => [mode, Number.POSITIVE_INFINITY])) as Record<ComparisonBudgetMode, number>;
+  if (evidenceCount >= input.evidenceRequired) {
+    for (const mode of STOPPING_MODE_ORDER) {
+      if (input.initialDiagnostics.stoppingChecks?.find((check) => check.mode === mode)?.ready) {
+        stoppingTimes[mode] = 0;
+      }
+    }
+  }
+  if (STOPPING_MODE_ORDER.every((mode) => Number.isFinite(stoppingTimes[mode]))) return stoppingTimes;
 
   for (let answerIndex = 1; answerIndex <= input.simulationHorizon; answerIndex += 1) {
     if (answerIndex === 1 || (answerIndex - 1) % diagnosticStride === 0) {
@@ -1330,18 +1456,19 @@ function simulateForecastRollout(
         posteriorSampleStride: input.items.length > 80 ? 16 : (input.selectionOptions.posteriorSampleStride ?? 4),
       },
     );
-    if (!pair) return Number.POSITIVE_INFINITY;
+    if (!pair) return stoppingTimes;
     const leftIndex = indexById.get(pair.leftSubjectId);
     const rightIndex = indexById.get(pair.rightSubjectId);
     if (leftIndex === undefined || rightIndex === undefined || leftIndex === rightIndex) {
-      return Number.POSITIVE_INFINITY;
+      return stoppingTimes;
     }
     const outcome = simulatedOutcome(truth[leftIndex] - truth[rightIndex], random);
-    const differenceDelta = updateForecastPosterior(posteriorSamples, leftIndex, rightIndex, outcome);
-    fit.abilities[pair.leftSubjectId] += differenceDelta / 2;
-    fit.abilities[pair.rightSubjectId] -= differenceDelta / 2;
-    abilities[leftIndex] += differenceDelta / 2;
-    abilities[rightIndex] -= differenceDelta / 2;
+    const meanShifts = updateForecastPosterior(posteriorSamples, leftIndex, rightIndex, outcome);
+    for (let itemIndex = 0; itemIndex < input.items.length; itemIndex += 1) {
+      const shift = meanShifts[itemIndex];
+      fit.abilities[input.items[itemIndex].subjectId] += shift;
+      abilities[itemIndex] += shift;
+    }
     acceptedComparisons += 1;
     fit.acceptedComparisons = acceptedComparisons;
     evidenceCount += 1;
@@ -1355,17 +1482,24 @@ function simulateForecastRollout(
       || answerIndex % stoppingCheckStride === 0
       || evidenceCount === input.evidenceRequired;
     if (checkNow) {
-      if (forecastStoppingEventPassed(
+      const stoppingEventLows = forecastStoppingEventLows(
         input.items,
         abilities,
         posteriorSamples,
         input.scoreByRank,
         evidenceCount,
         input.evidenceRequired,
-      )) return answerIndex;
+      );
+      for (const mode of STOPPING_MODE_ORDER) {
+        if (!Number.isFinite(stoppingTimes[mode])
+          && stoppingEventLows[mode] >= STOPPING_PROBABILITY_TARGET) {
+          stoppingTimes[mode] = answerIndex;
+        }
+      }
+      if (STOPPING_MODE_ORDER.every((mode) => Number.isFinite(stoppingTimes[mode]))) return stoppingTimes;
     }
   }
-  return Number.POSITIVE_INFINITY;
+  return stoppingTimes;
 }
 
 export function prepareStoppingForecastRollouts(
@@ -1422,32 +1556,44 @@ export function prepareStoppingForecastRollouts(
     simulationHorizon,
     projectionHorizon: simulationHorizon,
     evidenceCount: diagnostics.evidenceCount,
-    ready: diagnostics.ready,
+    stoppingMode: options.stoppingMode ?? "standard",
   };
 }
 
-/** Calculate an independently seeded slice of sequential forecast rollouts. */
-export function forecastStoppingTimeRollouts(
+/** Calculate an independently seeded slice; each path records all ordered thresholds. */
+export function forecastStoppingTimeRolloutsByMode(
   input: StoppingForecastRolloutInput,
   rolloutStart: number,
   rolloutCount: number,
 ) {
-  if (rolloutCount <= 0) return [];
-  if (input.ready) return Array<number>(rolloutCount).fill(0);
-  if (input.forecastSamples.length === 0) return Array<number>(rolloutCount).fill(Number.POSITIVE_INFINITY);
-  const stoppingTimes: number[] = [];
+  const stoppingTimes = Object.fromEntries(STOPPING_MODE_ORDER.map((mode) => [mode, [] as number[]])) as StoppingTimesByMode;
+  if (rolloutCount <= 0) return stoppingTimes;
+  if (input.forecastSamples.length === 0) {
+    for (const mode of STOPPING_MODE_ORDER) stoppingTimes[mode] = Array<number>(rolloutCount).fill(Number.POSITIVE_INFINITY);
+    return stoppingTimes;
+  }
 
   for (let offset = 0; offset < rolloutCount; offset += 1) {
     const absoluteIndex = rolloutStart + offset;
     const truth = input.truthSamples[absoluteIndex];
     if (!truth) {
-      stoppingTimes.push(Number.POSITIVE_INFINITY);
+      for (const mode of STOPPING_MODE_ORDER) stoppingTimes[mode].push(Number.POSITIVE_INFINITY);
       continue;
     }
     const seed = input.rolloutSeeds[absoluteIndex] ?? hash(`${absoluteIndex}:forecast`);
-    stoppingTimes.push(simulateForecastRollout(input, truth, seed));
+    const result = simulateForecastRollout(input, truth, seed);
+    for (const mode of STOPPING_MODE_ORDER) stoppingTimes[mode].push(result[mode]);
   }
   return stoppingTimes;
+}
+
+/** Backwards-compatible active-mode projection helper. */
+export function forecastStoppingTimeRollouts(
+  input: StoppingForecastRolloutInput,
+  rolloutStart: number,
+  rolloutCount: number,
+) {
+  return forecastStoppingTimeRolloutsByMode(input, rolloutStart, rolloutCount)[input.stoppingMode];
 }
 
 function summarizeStoppingTimes(
@@ -1460,7 +1606,7 @@ function summarizeStoppingTimes(
 ): StoppingForecast {
   const rolloutCount = stoppingTimes.length;
   const base = {
-    method: "posterior-contraction-mc-v6" as const,
+    method: "posterior-contraction-mc-v10" as const,
     rolloutCount,
     nextCheckpoint,
     projectionHorizon,
@@ -1525,7 +1671,37 @@ export function summarizeStoppingTimeRollouts(
       probabilityWithinProjectionHigh: 1,
     },
     stoppingTimes,
+    forecasts: {
+      quick: forecast,
+      standard: forecast,
+      thorough: forecast,
+    },
+    stoppingTimesByMode: {
+      quick: stoppingTimes,
+      standard: stoppingTimes,
+      thorough: stoppingTimes,
+    },
   };
+}
+
+export function summarizeStoppingTimeRolloutsByMode(
+  stoppingTimesByMode: StoppingTimesByMode,
+  projectionHorizon: number,
+  diagnostics: Pick<RankingDiagnostics,
+    "evidenceCount" | "evidenceRequired" | "coverageTargetStabilityLow" | "stoppingChecks">,
+  posteriorAvailable = true,
+) {
+  return Object.fromEntries(STOPPING_MODE_ORDER.map((mode) => {
+    const check = diagnostics.stoppingChecks?.find((entry) => entry.mode === mode);
+    const ready = diagnostics.evidenceCount >= diagnostics.evidenceRequired
+      && (check
+        ? check.low >= (check.probabilityTarget ?? STOPPING_PROBABILITY_TARGET)
+        : mode === "standard" && diagnostics.coverageTargetStabilityLow >= STOPPING_PROBABILITY_TARGET);
+    return [mode, summarizeStoppingTimeRollouts(
+      stoppingTimesByMode[mode], projectionHorizon,
+      { ...diagnostics, ready }, posteriorAvailable,
+    ).forecast];
+  })) as Record<ComparisonBudgetMode, StoppingForecast>;
 }
 
 export function forecastStoppingTimeSimulation(
@@ -1538,29 +1714,20 @@ export function forecastStoppingTimeSimulation(
   options: StoppingForecastOptions,
 ): StoppingForecastSimulation {
   const rolloutCount = Math.max(16, Math.round(options.rolloutCount ?? 64));
-  const targetReady = diagnostics.ready;
-  const projectionHorizon = Math.max(
-    5,
-    Math.round(options.projectionHorizon ?? forecastProjectionHorizon(items.length)),
-  );
-  const nextCheckpoint = 10;
-  if (targetReady) {
-    const stoppingTimes = Array<number>(rolloutCount).fill(0);
-    return {
-      forecast: summarizeStoppingTimes(
-        stoppingTimes, projectionHorizon, nextCheckpoint,
-        diagnostics.evidenceCount, diagnostics.evidenceRequired, true,
-      ),
-      stoppingTimes,
-    };
-  }
+  const stoppingMode = options.stoppingMode ?? "standard";
   const input = prepareStoppingForecastRollouts(
     items, fit, distribution, history, sessionId, diagnostics, options, rolloutCount,
   );
-  const stoppingTimes = forecastStoppingTimeRollouts(input, 0, rolloutCount);
-  return summarizeStoppingTimeRollouts(
-    stoppingTimes, input.projectionHorizon, diagnostics, fit.posteriorSamples.length > 0,
+  const stoppingTimesByMode = forecastStoppingTimeRolloutsByMode(input, 0, rolloutCount);
+  const forecasts = summarizeStoppingTimeRolloutsByMode(
+    stoppingTimesByMode, input.projectionHorizon, diagnostics, fit.posteriorSamples.length > 0,
   );
+  return {
+    forecast: forecasts[stoppingMode],
+    stoppingTimes: stoppingTimesByMode[stoppingMode],
+    forecasts,
+    stoppingTimesByMode,
+  };
 }
 
 export function combineStoppingForecastSimulations(

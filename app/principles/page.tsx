@@ -24,6 +24,11 @@ const sections = [
 
 const clumpedRatings = [1, 1, 2, 3, 7, 16, 44, 88, 63, 22];
 const tailRatings = [3, 5, 8, 14, 20, 20, 12, 8, 6, 4];
+const stoppingModes = [
+  { label: "快速", coverage: 80 },
+  { label: "标准", coverage: 90 },
+  { label: "精细", coverage: 95 },
+] as const;
 
 function MiniHistogram({ values, label }: { values: number[]; label: string }) {
   const max = Math.max(...values);
@@ -92,10 +97,10 @@ export default function PrinciplesPage() {
         </section>
 
         <section>
-          <SectionHeading id="inference-modes">原评分先验与三种模式</SectionHeading>
-          <p><Term term="prior">原评分先验</Term>回答的是一个取舍：我们愿意多大程度相信旧评分仍代表当前偏好？快速模式使用强先验，只校正附近顺序；标准模式允许比较显著改写原评分；精细模式不采用原评分顺序，让比较本身支撑排序。</p>
-          <p>这三种<Term term="inference-mode">推断模式</Term>不是三个互不相干的进度条。停止检查采用嵌套要求：标准必须同时通过快速与标准模型，精细必须通过全部三种模型。因此更高模式不会凭一次偶然的宽松估计先于低模式达标。</p>
-          <div className="principles-table-wrap"><table className="principles-mode-table"><thead><tr><th>模式</th><th>原评分作用</th><th>探索范围</th><th>适合的问题</th></tr></thead><tbody><tr><th>快速</th><td>强顺序先验</td><td>局部为主</td><td>在旧评分基础上纠正明显错位</td></tr><tr><th>标准</th><td>中等顺序先验</td><td>边界与全局均衡</td><td>允许偏好显著改变旧评分</td></tr><tr><th>精细</th><td>不采用顺序先验</td><td>高覆盖全局比较</td><td>让比较独立支撑完整排序</td></tr></tbody></table></div>
+          <SectionHeading id="inference-modes">先验强度与停止严格度</SectionHeading>
+          <p><Term term="prior">原评分先验</Term>回答的是一个取舍：我们愿意多大程度相信旧评分仍代表当前偏好？强先验让 Bangumi 原评分提供明显的初始顺序，适合旧评分大体可靠时加速冷启动；默认的弱先验不采用原评分顺序，只保留很弱的零均值正则，让两两判断主导结果。两者使用完全相同的候选范围与探索节奏。</p>
+          <p><Term term="inference-mode">停止严格度</Term>是另一个独立选择。快速、标准、精细分别要求至少 80%、90% 与 95% 的作品在后验样本中最多偏移一档；三个覆盖事件的 90% MC 下界都必须达到 90%。因为覆盖事件彼此嵌套，且三档共享后验、下一题策略和每一条未来模拟路径，所以快速达标时间不晚于标准，标准不晚于精细；切换停止档位无需重新拟合模型。</p>
+          <div className="principles-table-wrap"><table className="principles-mode-table"><thead><tr><th>维度</th><th>选项</th><th>改变什么</th><th>不改变什么</th></tr></thead><tbody><tr><th rowSpan={2}>先验强度</th><td>强先验</td><td>原评分中心与正则强度</td><td>选题规则、停止阈值</td></tr><tr><td>弱先验（默认）</td><td>弱零均值正则</td><td>选题规则、停止阈值</td></tr><tr><th rowSpan={3}>停止严格度</th><td>快速：80% 覆盖</td><td>允许 20% 跨两档</td><td>90% MC 门槛、后验、下一题、未来路径</td></tr><tr><td>标准：90% 覆盖</td><td>允许 10% 跨两档</td><td>90% MC 门槛、后验、下一题、未来路径</td></tr><tr><td>精细：95% 覆盖</td><td>允许 5% 跨两档</td><td>90% MC 门槛、后验、下一题、未来路径</td></tr></tbody></table></div>
         </section>
 
         <section>
@@ -113,17 +118,17 @@ export default function PrinciplesPage() {
         <section>
           <SectionHeading id="stopping-rule">何时算作足够稳定</SectionHeading>
           <p>要求每部作品都固定在唯一一档，会让最靠近边界的作品永远拖住整个项目。本站把实质错误定义为<Term term="cross-two-buckets">跨两档</Term>：相邻档摆动可以接受，移动两档或更多才计入损失。</p>
-          <p>在每一次 <Term term="monte-carlo">Monte Carlo 模拟</Term>的后验排序里，至少 90% 的作品必须相对当前结果最多偏移一档；然后，满足这个总体事件的概率之 <Term term="wilson-bound">Wilson 下界</Term>还必须达到 90%。使用 <Term term="mc-lower-bound">MC 下界</Term>而非观察比例，是为了避免 64 或 128 次模拟中的偶然好运被误报成稳定。</p>
+          <p>在每一次 <Term term="monte-carlo">Monte Carlo 模拟</Term>的后验排序里，快速、标准和精细分别要求至少 80%、90% 或 95% 的作品相对当前结果最多偏移一档。满足相应覆盖事件的概率之 <Term term="wilson-bound">Wilson 下界</Term>还必须统一达到 90%。使用 <Term term="mc-lower-bound">MC 下界</Term>而非观察比例，是为了避免 64 或 128 次模拟中的偶然好运被误报成稳定。</p>
           <figure className="principle-figure stopping-figure">
-            <div className="stopping-grid" role="img" aria-label="一百个作品中九十个最多偏移一档，十个允许跨两档">{Array.from({ length: 100 }, (_, index) => <i className={index < 90 ? "within" : "outside"} key={index} />)}</div>
-            <figcaption><b>90 个</b>最多偏移一档；<b>10 个</b>可以跨两档。真正停止还要求这个事件的保守概率下界达到 90%，并满足最低本会话证据量。</figcaption>
+            <div className="stopping-levels">{stoppingModes.map((mode) => <div className="stopping-level" key={mode.label}><b>{mode.label} · {mode.coverage}% 覆盖</b><div className="stopping-grid" role="img" aria-label={`一百个作品中至少 ${mode.coverage} 个最多偏移一档`}>{Array.from({ length: 100 }, (_, index) => <i className={index < mode.coverage ? "within" : "outside"} key={index} />)}</div></div>)}</div>
+            <figcaption>覆盖目标越高，允许<Term term="cross-two-buckets">跨两档</Term>的作品越少。三个事件都要求保守概率下界达到 <b>90%</b>，并满足最低本会话证据量。</figcaption>
           </figure>
           <p><Term term="adjacent-tolerance">后验期望相邻容差覆盖</Term>是平均诊断；<Term term="bucket-stability">精确分桶稳定度</Term>描述单部作品；<Term term="maximum-displacement">最坏偏移</Term>观察最极端的尾部。它们帮助解释风险，但都不能替代上述总体停止事件。</p>
         </section>
 
         <section>
           <SectionHeading id="remaining-forecast">剩余次数如何预测</SectionHeading>
-          <p><Term term="dynamic-forecast">动态剩余预测</Term>不是把当前进度除以平均速度。系统从当前后验抽取 64 条代表性路径；每条路径按当前模式选择下一对，模拟一次左胜、平局或右胜（含固定的小幅 lapse），用方向性秩一更新改写该对的后验，再检查模式自己的停止事件，最后报告 10%、50% 与 90% 分位数。</p>
+          <p><Term term="dynamic-forecast">动态剩余预测</Term>不是把当前进度除以平均速度。系统从当前后验抽取 64 条代表性路径；每条路径使用统一策略选择下一对，模拟一次左胜、平局或右胜（含固定的小幅 lapse），再依据后验协方差把这次比较的信息传播到所有相关作品。为避免把模拟回答和有限样本当作完整重拟合的精确信息，每次后验更新会保守折扣其强度；系统每 16 次模拟回答检查一次，并同时记录 80%、90% 与 95% 覆盖事件的保守概率下界首次达到 90% 的时刻，最后分别报告 10%、50% 与 90% 分位数。这种逐路径共用保证三档预测理论上单调。</p>
           <p>所以区间可能变宽、变窄甚至暂时上升：新答案可能暴露此前被先验掩盖的不确定性。预测窗口内没有成功路径也不证明目标不可达。它只说明，在当前模型和有限前瞻下，还没有足够证据给出有限上界；大型收藏的前瞻窗口会设上限以保持界面响应。</p>
         </section>
 

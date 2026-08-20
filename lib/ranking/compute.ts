@@ -1,8 +1,7 @@
-import type { ComparisonBudgetMode, RankingDiagnostics, RankingHistoryInput } from "../types";
+import type { ComparisonBudgetMode, ModelState, RankingDiagnostics, RankingHistoryInput } from "../types";
 import {
   analyzeRanking,
   chooseNextPair,
-  combineStoppingForecastSimulations,
   fitModel,
   forecastStoppingTimeSimulation,
   toModelState,
@@ -11,13 +10,17 @@ import {
   type StoppingForecastSimulation,
 } from "./engine";
 import type { RankingRequest, RankingSuccess } from "./protocol";
-import { rankingTuning, STOPPING_PROBABILITY_TARGET } from "./strategy";
+import {
+  legacyPriorMode,
+  rankingTuning,
+  STOPPING_MODE_ORDER,
+  STOPPING_PROBABILITY_TARGET,
+} from "./strategy";
 
 const BASE_POSTERIOR_SAMPLES = 64;
 const ESTABLISHED_POSTERIOR_SAMPLES = 128;
 const REFINED_POSTERIOR_SAMPLES = 2048;
 const POSTERIOR_SEED_SALT = 0x9e3779b9;
-const MODE_ORDER: ComparisonBudgetMode[] = ["quick", "standard", "thorough"];
 
 function currentSessionAnswerCount(history: RankingHistoryInput[], sessionId: string) {
   return history.filter((entry) => entry.sessionId === sessionId && entry.outcome !== "skip").length;
@@ -37,15 +40,51 @@ export function posteriorRandomSeed(sessionSeed: number) {
 
 export function needsPosteriorRefinement(
   diagnostics: Pick<RankingDiagnostics,
-    "evidenceCount" | "evidenceRequired" | "coverageTargetStabilityLow" | "coverageTargetStabilityHigh">,
+    "evidenceCount" | "evidenceRequired" | "coverageTargetStabilityLow" | "coverageTargetStabilityHigh" | "stoppingChecks">,
 ) {
+  const intervals = diagnostics.stoppingChecks?.length
+    ? diagnostics.stoppingChecks
+    : [{ low: diagnostics.coverageTargetStabilityLow, high: diagnostics.coverageTargetStabilityHigh }];
   return diagnostics.evidenceCount >= diagnostics.evidenceRequired
-    && diagnostics.coverageTargetStabilityLow < STOPPING_PROBABILITY_TARGET
-    && diagnostics.coverageTargetStabilityHigh >= STOPPING_PROBABILITY_TARGET;
+    && intervals.some((interval) =>
+      interval.low < STOPPING_PROBABILITY_TARGET
+      && interval.high >= STOPPING_PROBABILITY_TARGET);
 }
 
-function requiredStoppingModes(mode: ComparisonBudgetMode) {
-  return MODE_ORDER.slice(0, MODE_ORDER.indexOf(mode) + 1);
+/**
+ * Select another coverage target without refitting the shared posterior or
+ * rerunning its shared future paths. Returns undefined for legacy caches that
+ * do not yet contain all three forecasts, allowing callers to recompute once.
+ */
+export function retargetStoppingMode(
+  model: ModelState,
+  mode: ComparisonBudgetMode,
+  version = model.version,
+): ModelState | undefined {
+  const diagnostics = model.diagnostics;
+  if (!diagnostics
+    || !STOPPING_MODE_ORDER.every((entry) =>
+      diagnostics.forecasts?.[entry]?.method === "posterior-contraction-mc-v10")
+    || !STOPPING_MODE_ORDER.every((entry) =>
+      diagnostics.stoppingChecks?.some((check) => check.mode === entry))) {
+    return undefined;
+  }
+  const stoppingChecks = diagnostics.stoppingChecks!;
+  const activeCheck = stoppingChecks.find((entry) => entry.mode === mode)!;
+  return {
+    ...model,
+    version,
+    diagnostics: {
+      ...diagnostics,
+      stoppingChecks,
+      stoppingBottleneckMode: mode,
+      ready: activeCheck.ready,
+      decisionRiskRatio: (1 - activeCheck.low)
+        / Math.max(1e-12, 1 - (activeCheck.probabilityTarget ?? STOPPING_PROBABILITY_TARGET)),
+      forecast: diagnostics.forecasts![mode],
+    },
+    updatedAt: new Date().toISOString(),
+  };
 }
 
 export interface PreparedStoppingForecast {
@@ -71,7 +110,8 @@ export function prepareRanking(request: RankingRequest): PreparedRanking {
       outcome: entry.outcome as "left" | "tie" | "right",
     }));
   const activeMode = request.budgetMode ?? "standard";
-  const activeDefaults = rankingTuning(activeMode);
+  const priorMode = request.priorMode ?? legacyPriorMode(activeMode);
+  const activeDefaults = rankingTuning(priorMode);
   const activeTuning = {
     ...activeDefaults,
     priorStrength: request.priorStrength ?? activeDefaults.priorStrength,
@@ -83,67 +123,59 @@ export function prepareRanking(request: RankingRequest): PreparedRanking {
     explorationRadius: request.explorationRadius ?? activeDefaults.explorationRadius,
     forecastEfficiency: request.forecastEfficiency ?? activeDefaults.forecastEfficiency,
   };
-  const evaluations = requiredStoppingModes(activeMode).map((mode) => {
-    const defaults = rankingTuning(mode);
-    const tuning = mode === activeMode ? activeTuning : defaults;
-    const fitOptions = {
-      priorStrength: tuning.priorStrength,
-      priorScale: tuning.priorScale,
-      randomSeed: posteriorRandomSeed(request.randomSeed),
-    };
-    let result = fitModel(request.items, comparisons, undefined, {
+  const fitOptions = {
+    priorStrength: activeTuning.priorStrength,
+    priorScale: activeTuning.priorScale,
+    randomSeed: posteriorRandomSeed(request.randomSeed),
+  };
+  let result = fitModel(request.items, comparisons, undefined, {
+    ...fitOptions,
+    posteriorSampleCount: basePosteriorSampleCount(request),
+  });
+  let diagnostics = analyzeRanking(
+    request.items,
+    result,
+    request.distribution,
+    request.history,
+    request.sessionId,
+    activeMode,
+  );
+  // Refine when the interval crosses any of the three ordered thresholds, so
+  // sampling precision is independent from the currently selected strictness.
+  if (needsPosteriorRefinement(diagnostics)) {
+    result = fitModel(request.items, comparisons, result.abilities, {
       ...fitOptions,
-      posteriorSampleCount: basePosteriorSampleCount(request),
+      posteriorSampleCount: REFINED_POSTERIOR_SAMPLES,
     });
-    let diagnostics = analyzeRanking(
+    diagnostics = analyzeRanking(
       request.items,
       result,
       request.distribution,
       request.history,
       request.sessionId,
+      activeMode,
     );
-    // A larger, deterministic sample resolves Monte Carlo ambiguity only when
-    // the first interval actually crosses the stopping boundary.
-    if (needsPosteriorRefinement(diagnostics)) {
-      result = fitModel(request.items, comparisons, result.abilities, {
-        ...fitOptions,
-        posteriorSampleCount: REFINED_POSTERIOR_SAMPLES,
-      });
-      diagnostics = analyzeRanking(
-        request.items,
-        result,
-        request.distribution,
-        request.history,
-        request.sessionId,
-      );
-    }
-    return { mode, result, diagnostics, tuning };
-  });
-  const active = evaluations[evaluations.length - 1];
-  const forecastOptionsFor = (tuning: ReturnType<typeof rankingTuning>): StoppingForecastOptions => ({
+  }
+  const forecastOptions: StoppingForecastOptions = {
     randomSeed: request.randomSeed,
-    // Retained for compatibility with older callers; the sequential
-    // forecaster does not convert this into a synthetic evidence multiplier.
-    forecastEfficiency: tuning.forecastEfficiency,
+    stoppingMode: activeMode,
+    forecastEfficiency: activeTuning.forecastEfficiency,
     modelVersion: request.version,
     pairSelection: {
-      maxRateGap: tuning.maxRateGap,
-      maxRankDistance: tuning.maxRankDistance,
-      boundaryWindow: tuning.boundaryWindow,
-      explorationInterval: tuning.explorationInterval,
-      explorationRadius: tuning.explorationRadius,
+      maxRateGap: activeTuning.maxRateGap,
+      maxRankDistance: activeTuning.maxRankDistance,
+      boundaryWindow: activeTuning.boundaryWindow,
+      explorationInterval: activeTuning.explorationInterval,
+      explorationRadius: activeTuning.explorationRadius,
       allowCalibration: false,
     },
-  });
+  };
+  const active = { fit: result, diagnostics, options: forecastOptions };
   return {
     request,
-    active: { fit: active.result, diagnostics: active.diagnostics, options: forecastOptionsFor(active.tuning) },
-    forecasts: evaluations.map((evaluation) => ({
-      fit: evaluation.result,
-      diagnostics: evaluation.diagnostics,
-      options: forecastOptionsFor(evaluation.tuning),
-    })),
-    modes: evaluations.map((evaluation) => evaluation.mode),
+    active,
+    forecasts: [active],
+    modes: [...STOPPING_MODE_ORDER],
     activeTuning,
   };
 }
@@ -152,24 +184,23 @@ export function finalizeRanking(
   prepared: PreparedRanking,
   simulations: StoppingForecastSimulation[],
 ): RankingSuccess {
-  const { request, active, forecasts, modes, activeTuning } = prepared;
-  if (simulations.length !== forecasts.length) throw new Error("停止预测结果数量不匹配。");
-  const stoppingChecks = forecasts.map(({ diagnostics }, index) => ({
-    mode: modes[index],
-    sampleCount: diagnostics.sampleCount,
-    stableSamples: diagnostics.coverageTargetStableSamples,
-    probability: diagnostics.coverageTargetStability,
-    low: diagnostics.coverageTargetStabilityLow,
-    high: diagnostics.coverageTargetStabilityHigh,
-    ready: diagnostics.ready,
-  }));
-  const bottleneck = stoppingChecks.reduce((worst, check) => check.low < worst.low ? check : worst);
+  const { request, active, activeTuning } = prepared;
+  if (simulations.length !== 1) throw new Error("停止预测结果数量不匹配。");
+  const activeMode = request.budgetMode ?? "standard";
+  const stoppingChecks = active.diagnostics.stoppingChecks;
+  if (!stoppingChecks || !STOPPING_MODE_ORDER.every((mode) =>
+    stoppingChecks.some((check) => check.mode === mode))) {
+    throw new Error("停止覆盖检查结果不完整。");
+  }
+  const activeCheck = stoppingChecks.find((check) => check.mode === activeMode)!;
   const diagnostics = active.diagnostics;
   diagnostics.stoppingChecks = stoppingChecks;
-  diagnostics.stoppingBottleneckMode = bottleneck.mode;
-  diagnostics.ready = stoppingChecks.every((check) => check.ready);
-  diagnostics.decisionRiskRatio = Math.max(...forecasts.map((evaluation) => evaluation.diagnostics.decisionRiskRatio));
-  diagnostics.forecast = combineStoppingForecastSimulations(simulations, diagnostics);
+  diagnostics.stoppingBottleneckMode = activeMode;
+  diagnostics.ready = activeCheck.ready;
+  diagnostics.decisionRiskRatio = (1 - activeCheck.low)
+    / Math.max(1e-12, 1 - (activeCheck.probabilityTarget ?? STOPPING_PROBABILITY_TARGET));
+  diagnostics.forecasts = simulations[0].forecasts;
+  diagnostics.forecast = simulations[0].forecasts[activeMode];
   const model = toModelState(
     request.sessionId,
     request.version,
@@ -199,15 +230,15 @@ export function finalizeRanking(
 
 export function computeRanking(request: RankingRequest): RankingSuccess {
   const prepared = prepareRanking(request);
-  const simulations = prepared.forecasts.map(({ fit, diagnostics, options }) =>
-    forecastStoppingTimeSimulation(
-      request.items,
-      fit,
-      request.distribution,
-      request.history,
-      request.sessionId,
-      diagnostics,
-      options,
-    ));
+  const { fit, diagnostics, options } = prepared.active;
+  const simulations = [forecastStoppingTimeSimulation(
+    request.items,
+    fit,
+    request.distribution,
+    request.history,
+    request.sessionId,
+    diagnostics,
+    options,
+  )];
   return finalizeRanking(prepared, simulations);
 }

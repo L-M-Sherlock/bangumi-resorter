@@ -37,7 +37,7 @@ export const TERM_DEFINITIONS = {
   },
   prior: {
     label: "先验",
-    summary: "在读取新比较之前对排序的初始约束。本项目可让 Bangumi 原评分提供强、中等或零顺序先验。",
+    summary: "在读取新比较之前对排序的初始约束。本项目提供强先验与弱先验，并与停止严格度分开选择。",
     sectionId: "inference-modes",
   },
   posterior: {
@@ -147,7 +147,7 @@ export const TERM_DEFINITIONS = {
   },
   "mc-lower-bound": {
     label: "MC 下界",
-    summary: "Monte Carlo 成功比例的 Wilson 置信下界。本项目要求它达到 90%，而不只看点估计。",
+    summary: "Monte Carlo 成功比例的 Wilson 置信下界。三档各自的覆盖事件都要求它达到 90%，而不只看点估计。",
     sectionId: "stopping-rule",
   },
   "dynamic-forecast": {
@@ -156,8 +156,8 @@ export const TERM_DEFINITIONS = {
     sectionId: "remaining-forecast",
   },
   "inference-mode": {
-    label: "推断模式",
-    summary: "快速、标准和精细模式分别要求强先验、强加中等先验、以及全部三种先验检查通过。",
+    label: "停止严格度",
+    summary: "快速、标准和精细分别要求 80%、90% 和 95% 的作品最多偏移一档，并共用 90% 的 MC 下界门槛。",
     sectionId: "inference-modes",
   },
   snapshot: {

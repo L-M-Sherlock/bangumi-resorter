@@ -36,6 +36,7 @@ function request(): RankingRequest {
     history,
     distribution: { preset: "uniform", levelCount: 10, weights: Array(10).fill(1) },
     budgetMode: "quick",
+    priorMode: "weak",
   };
 }
 
@@ -81,6 +82,14 @@ describe("parallel stopping forecast", () => {
     });
 
     expect(parallel).toEqual(sequential);
+    for (const simulation of parallel) {
+      for (let index = 0; index < simulation.stoppingTimesByMode.quick.length; index += 1) {
+        expect(simulation.stoppingTimesByMode.quick[index])
+          .toBeLessThanOrEqual(simulation.stoppingTimesByMode.standard[index]);
+        expect(simulation.stoppingTimesByMode.standard[index])
+          .toBeLessThanOrEqual(simulation.stoppingTimesByMode.thorough[index]);
+      }
+    }
     expect(workers).toHaveLength(4);
     expect(workers.every((worker) => worker.terminated)).toBe(true);
   });
@@ -103,9 +112,18 @@ describe("parallel stopping forecast", () => {
     expect(workers.every((worker) => worker.terminated)).toBe(true);
   });
 
-  it("does not create child workers after every nested stopping mode is ready", async () => {
+  it("does not create child workers after the strictest threshold is ready", async () => {
     const prepared = prepareRanking(request());
-    for (const forecast of prepared.forecasts) forecast.diagnostics.ready = true;
+    for (const forecast of prepared.forecasts) {
+      forecast.diagnostics.evidenceCount = forecast.diagnostics.evidenceRequired;
+      forecast.diagnostics.coverageTargetStabilityLow = 1;
+      forecast.diagnostics.ready = true;
+      forecast.diagnostics.stoppingChecks?.forEach((check) => {
+        check.low = 1;
+        check.high = 1;
+        check.ready = true;
+      });
+    }
     let created = 0;
     const result = await computePreparedForecasts(prepared, {
       hardwareConcurrency: 4,
@@ -117,7 +135,8 @@ describe("parallel stopping forecast", () => {
     });
 
     expect(created).toBe(0);
-    expect(result.every((simulation) => simulation.forecast.status === "ready")).toBe(true);
+    expect(result.every((simulation) => Object.values(simulation.forecasts)
+      .every((forecast) => forecast.status === "ready"))).toBe(true);
   });
 
   it("falls back to the single-worker calculation when a child worker fails", async () => {

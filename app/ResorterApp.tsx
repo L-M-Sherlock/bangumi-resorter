@@ -21,6 +21,7 @@ import {
   commitComparisonDeletion,
   commitSnapshotDeletion,
   commitSessionBudgetMode,
+  commitSessionPriorMode,
   commitSessionDistribution,
   commitResponse,
   commitUndo,
@@ -62,12 +63,17 @@ import { bangumiCoverVariant } from "@/lib/images";
 import { LOCAL_PROJECT_MARKER_KEY, PRINCIPLES_RETURN_PENDING_KEY, PRINCIPLES_RETURN_TARGET_KEY, sitePath } from "@/lib/site-path";
 import type { TermKey } from "@/lib/terminology";
 import { buildRankedItems } from "@/lib/ranking/engine";
+import { retargetStoppingMode } from "@/lib/ranking/compute";
 import {
   BUDGET_MODE_COPY,
+  PRIOR_MODE_COPY,
   allowedCrossTwoBucketCount,
   rankingTuning,
   recommendedDistribution,
   sessionBudgetMode,
+  sessionPriorMode,
+  stoppingCoverageTarget,
+  STOPPING_PROBABILITY_TARGET,
 } from "@/lib/ranking/strategy";
 import { RankingWorkerClient } from "@/lib/ranking/worker-client";
 import {
@@ -100,6 +106,7 @@ import {
   ModelState,
   NextPair,
   Profile,
+  PriorMode,
   RankedItem,
   RankingHistoryInput,
   Snapshot,
@@ -233,11 +240,13 @@ function stoppingStability(diagnostics?: ModelState["diagnostics"]) {
 
 function StoppingCriterionDetail({ diagnostics }: { diagnostics?: ModelState["diagnostics"] }) {
   if (!diagnostics) return <>正在估计停止条件</>;
-  const allowance = diagnostics.allowedCrossTwoBucketCount;
+  const bottleneck = diagnostics.stoppingChecks?.find((check) =>
+    check.mode === diagnostics.stoppingBottleneckMode);
+  const allowance = bottleneck?.allowedCrossTwoBucketCount ?? diagnostics.allowedCrossTwoBucketCount;
   const allowanceCopy = allowance === undefined ? "至多 10% 作品" : `最多 ${allowance} 部作品`;
   return <>达标样本 <Term term="monte-carlo">{stoppingStability(diagnostics)}</Term>
-    {diagnostics.stoppingChecks && diagnostics.stoppingChecks.length > 1 && <>；<Term term="inference-mode">嵌套模式下界</Term> {diagnostics.stoppingChecks.map((check) => `${BUDGET_MODE_COPY[check.mode].label} ${percent(check.low)}`).join("、")}</>}
-    ；每个样本允许{allowanceCopy}<Term term="cross-two-buckets">跨两档</Term>，停止要求所有模式检查的 <Term term="mc-lower-bound">90% MC 下界</Term>达到 90%</>;
+    {diagnostics.stoppingChecks && diagnostics.stoppingChecks.length > 1 && <>；三档覆盖目标依次为 {diagnostics.stoppingChecks.map((check) => `${BUDGET_MODE_COPY[check.mode].label} ${percent(check.target)}`).join("、")}，各自事件的 <Term term="mc-lower-bound">90% MC 下界</Term>均需达到 {percent(bottleneck?.probabilityTarget ?? STOPPING_PROBABILITY_TARGET)}</>}
+    ；当前模式每个样本允许{allowanceCopy}<Term term="cross-two-buckets">跨两档</Term></>;
 }
 
 function formatDate(date?: string) {
@@ -1117,9 +1126,14 @@ interface TagDerivationDraft {
 }
 
 const NEW_SESSION_INFERENCE_OPTIONS: Array<ThemedSelectOption<ComparisonBudgetMode>> = [
-  { value: "quick", label: "快速（推荐）" },
-  { value: "standard", label: "标准" },
-  { value: "thorough", label: "精细" },
+  { value: "quick", label: "快速 · 80% 覆盖（推荐）" },
+  { value: "standard", label: "标准 · 90% 覆盖" },
+  { value: "thorough", label: "精细 · 95% 覆盖" },
+];
+
+const PRIOR_MODE_OPTIONS: Array<ThemedSelectOption<PriorMode>> = [
+  { value: "weak", label: "弱先验（推荐）" },
+  { value: "strong", label: "强先验" },
 ];
 
 const MANUAL_OUTCOME_OPTIONS: Array<ThemedSelectOption<Exclude<ComparisonOutcome, "skip">>> = [
@@ -1146,6 +1160,7 @@ function LibraryView({ snapshot, items, sessions, legacySessionIds, onStart, onR
     statuses: CollectionType[],
     distribution: DistributionConfig,
     budgetMode: ComparisonBudgetMode,
+    priorMode: PriorMode,
     tagFilter?: SessionTagFilter,
     sourceSessionId?: string,
     expectedSourceVersion?: number,
@@ -1166,6 +1181,7 @@ function LibraryView({ snapshot, items, sessions, legacySessionIds, onStart, onR
   const [scoreLevelCount, setScoreLevelCount] = useState(DEFAULT_SCORE_LEVELS);
   const [customWeights, setCustomWeights] = useState(distributionConfig("uniform", DEFAULT_SCORE_LEVELS).weights);
   const [budgetMode, setBudgetMode] = useState<ComparisonBudgetMode>("quick");
+  const [priorMode, setPriorMode] = useState<PriorMode>("weak");
   const [sourceSessionId, setSourceSessionId] = useState("");
   const [importPreview, setImportPreview] = useState<ComparisonImportPreview>();
   const [previewBusy, setPreviewBusy] = useState(false);
@@ -1295,6 +1311,7 @@ function LibraryView({ snapshot, items, sessions, legacySessionIds, onStart, onR
         statuses,
         distributionConfig(preset, scoreLevelCount, customWeights),
         budgetMode,
+        priorMode,
         tagFilter,
         sourceSessionId || undefined,
         currentImportPreview?.sourceVersion,
@@ -1395,20 +1412,21 @@ function LibraryView({ snapshot, items, sessions, legacySessionIds, onStart, onR
           <div className="start-action-copy">
             <span>当前将排序</span>
             <strong>{SUBJECT_TYPES[selectedType]} · {selectedItems.length} 部</strong>
-            <small>{tagFilterSummary(tagFilter)} · {BUDGET_MODE_COPY[budgetMode].label}模式 · {scoreLevelCount} 档 · 动态停止 · {sourceSessionId ? (currentImportPreview ? `导入 ${currentImportPreview.importableCount} 条历史判断` : "已选择历史来源") : "不导入历史判断"}</small>
+            <small>{tagFilterSummary(tagFilter)} · {PRIOR_MODE_COPY[priorMode].label} · {BUDGET_MODE_COPY[budgetMode].label}停止 · {scoreLevelCount} 档 · {sourceSessionId ? (currentImportPreview ? `导入 ${currentImportPreview.importableCount} 条历史判断` : "已选择历史来源") : "不导入历史判断"}</small>
           </div>
           <button className="primary-button" onClick={start} disabled={busy || currentPreviewBusy || Boolean(currentPreviewError) || Boolean(sourceSessionId && !currentImportPreview) || selectedItems.length < 2}>{busy ? "正在准备模型…" : `开始${BUDGET_MODE_COPY[budgetMode].label}比较`}<span>→</span></button>
         </div>
         <details className="start-settings">
-          <summary><span><strong>调整范围与模型设置</strong><small>收藏状态、个人标签、推断模式、评分档数与历史导入</small></span><b aria-hidden="true">⌄</b></summary>
+          <summary><span><strong>调整范围与模型设置</strong><small>收藏状态、个人标签、先验强度、停止严格度、评分档数与历史导入</small></span><b aria-hidden="true">⌄</b></summary>
           <div className="start-settings-body">
             <div className="field-group"><span className="field-label" id="collection-status-label">收藏状态</span><div className="chip-row" role="group" aria-labelledby="collection-status-label">{collectionEntries.map(([type, label]) => <button key={type} className={statuses.includes(type) ? "selected" : ""} onClick={() => { clearImportPreview(); setStatuses((value) => value.includes(type) ? value.filter((item) => item !== type) : [...value, type]); }}>{label}</button>)}</div></div>
             <div className="field-group"><label htmlFor="new-session-tag-search">个人标签（全部匹配）</label><TagFilterSelector id="new-session-tag-search" items={baseItems} selectedTags={selectedTags} onChange={(next) => { clearImportPreview(); setSelectedTags(next); }} /><small className="field-help">标签来自你的 Bangumi 收藏；选择多个标签时，作品必须同时包含全部标签。</small></div>
-            <div className="field-group"><label htmlFor="comparison-budget">推断模式</label><ThemedSelect id="comparison-budget" value={budgetMode} options={NEW_SESSION_INFERENCE_OPTIONS} ariaLabel="推断模式" menuLabel="推断模式选项" onChange={setBudgetMode} /><small className="field-help"><Term term="inference-mode">模式说明</Term>：{BUDGET_MODE_COPY[budgetMode].description} · 每次回答后<Term term="dynamic-forecast">动态重估剩余区间</Term></small></div>
+            <div className="field-group"><label htmlFor="prior-mode">旧评分先验</label><ThemedSelect id="prior-mode" value={priorMode} options={PRIOR_MODE_OPTIONS} ariaLabel="旧评分先验" menuLabel="旧评分先验选项" onChange={setPriorMode} /><small className="field-help"><Term term="prior">{PRIOR_MODE_COPY[priorMode].label}</Term>：{PRIOR_MODE_COPY[priorMode].description}</small></div>
+            <div className="field-group"><label htmlFor="comparison-budget">停止严格度</label><ThemedSelect id="comparison-budget" value={budgetMode} options={NEW_SESSION_INFERENCE_OPTIONS} ariaLabel="停止严格度" menuLabel="停止严格度选项" onChange={setBudgetMode} /><small className="field-help"><Term term="inference-mode">{BUDGET_MODE_COPY[budgetMode].label}停止</Term>：{BUDGET_MODE_COPY[budgetMode].description} · 每次回答后<Term term="dynamic-forecast">动态重估剩余区间</Term></small></div>
             <div className="field-group"><label htmlFor="score-level-count">评分档数</label><ScoreLevelSelect id="score-level-count" value={scoreLevelCount} onChange={(nextLevelCount) => { setScoreLevelCount(nextLevelCount); setCustomWeights((weights) => resampleDistributionWeights(weights, nextLevelCount)); }} /><small className="field-help">可选择 <Term term="score-bucket">3–20 档</Term>；档数越多，一档越窄，通常需要更多判断才能稳定。</small></div>
             <div className="field-group"><label htmlFor="distribution-preset">新评分分布</label><ThemedSelect id="distribution-preset" value={preset} options={distributionPresetOptions(scoreLevelCount)} ariaLabel="新评分分布" menuLabel="新评分分布选项" onChange={(nextPreset) => setManualPreset(nextPreset)} /><small className="field-help"><Term term="score-distribution">目标分布</Term> · {manualPreset === undefined ? `已按 ${selectedItems.length} 个条目的规模自动推荐` : "已使用手动选择"}</small>{preset === "reverse-j" && <small className="field-help"><Term term="reverse-j">反 J 分布</Term>把最多作品放在低分档，越高分档越稀疏；系统会按当前档数保持累计分布形状。</small>}{preset === "high-tail" && <small className="field-help"><Term term="high-tail">高分辨率尾部</Term>会把高分区域切得更细，方便区分真正偏爱的作品。</small>}{preset === "custom" && <DistributionWeights weights={customWeights} onChange={setCustomWeights} />}</div>
             <div className="field-group"><label htmlFor="history-source">历史判断来源</label><ThemedSelect id="history-source" value={sourceSessionId} options={[{ value: "", label: "不导入历史判断（默认）" }, ...sourceCandidates.map((session) => ({ value: session.id, label: `${session.title} · ${session.snapshotId === snapshot.id ? "当前快照" : `快照 ${formatDate(snapshotDates[session.snapshotId])}`} · 更新 ${formatDate(session.updatedAt)}` }))]} ariaLabel="历史判断来源" menuLabel="历史判断来源选项" onChange={changeSource} /><small className="field-help"><Term term="history-reuse">历史判断导入</Term>只在创建时复制一次；之后来源会话的变化不会影响本会话。</small>{currentPreviewBusy && <small className="field-help">正在计算可导入判断…</small>}{currentPreviewError && <small className="comparison-form-error">{currentPreviewError}</small>}{currentImportPreview && <div className="scope-preview"><span>{currentImportPreview.crossSnapshot ? "跨快照导入" : "同快照导入"}</span><strong>可导入 {currentImportPreview.importableCount} 条</strong><small>已存在根判断 {currentImportPreview.duplicateOriginalCount} · 范围外 {currentImportPreview.outOfScopeCount} · 跳过 {currentImportPreview.skippedCount} · 无效校准 {currentImportPreview.invalidCalibrationCount}{currentImportPreview.crossSnapshot ? " · 来源属于不同收藏快照，请确认旧判断仍适用" : ""}</small></div>}</div>
-            <div className="field-group"><span className="field-label">停止标准</span><small className="field-help">至少 90% 的作品相对当前 <Term term="score-bucket">{scoreLevelCount} 档分桶</Term>最多偏移一档；在当前 {selectedItems.length} 部作品中，允许最多 {allowedCrossTwoBucketCount(selectedItems.length)} 部<Term term="cross-two-buckets">跨两档</Term>。该事件的<Term term="posterior">后验概率</Term>之 <Term term="mc-lower-bound">90% MC 下界</Term>须达到 90%。</small></div>
+            <div className="field-group"><span className="field-label">停止标准</span><small className="field-help">当前{BUDGET_MODE_COPY[budgetMode].label}模式要求至少 {percent(stoppingCoverageTarget(budgetMode))} 的作品相对当前 <Term term="score-bucket">{scoreLevelCount} 档分桶</Term>最多偏移一档；在当前 {selectedItems.length} 部作品中，允许最多 {allowedCrossTwoBucketCount(selectedItems.length, stoppingCoverageTarget(budgetMode))} 部<Term term="cross-two-buckets">跨两档</Term>。该事件的<Term term="mc-lower-bound">90% MC 下界</Term>需达到 {percent(STOPPING_PROBABILITY_TARGET)}。</small></div>
           </div>
         </details>
       </article>
@@ -1425,7 +1443,7 @@ function LibraryView({ snapshot, items, sessions, legacySessionIds, onStart, onR
       return <article className="session-row" key={session.id}>
         <button className="session-open" disabled={actionBusy} onClick={() => onResume(session.id)}>
           <span className="session-type">{SUBJECT_TYPES[session.subjectType]}</span>
-          <div><span className="session-heading"><strong>{session.title}{legacySessionIds.includes(session.id) ? " · 旧导入副本" : ""}</strong><span className="session-comparison-count">已有判断 <b>{stats?.accepted ?? "…"}</b> 条</span></span><small>{BUDGET_MODE_COPY[sessionBudgetMode(session)].label}模式 · {normalizeScoreLevelCount(session.distribution.levelCount)} 档 · {usesCurrentSnapshot ? "当前收藏" : "旧收藏"} · {historyLabel} · 更新于 {formatDate(session.updatedAt)}</small><small>标签范围：{tagFilterSummary(session.tagFilter)}</small></div>
+          <div><span className="session-heading"><strong>{session.title}{legacySessionIds.includes(session.id) ? " · 旧导入副本" : ""}</strong><span className="session-comparison-count">已有判断 <b>{stats?.accepted ?? "…"}</b> 条</span></span><small>{PRIOR_MODE_COPY[sessionPriorMode(session)].label} · {BUDGET_MODE_COPY[sessionBudgetMode(session)].label}停止 · {normalizeScoreLevelCount(session.distribution.levelCount)} 档 · {usesCurrentSnapshot ? "当前收藏" : "旧收藏"} · {historyLabel} · 更新于 {formatDate(session.updatedAt)}</small><small>标签范围：{tagFilterSummary(session.tagFilter)}</small></div>
           <span className={`session-status ${session.status}`}>{session.status === "complete" ? "已稳定" : "进行中"}</span><b>→</b>
         </button>
         <div className="session-actions">
@@ -1450,9 +1468,9 @@ function LibraryView({ snapshot, items, sessions, legacySessionIds, onStart, onR
 }
 
 const INFERENCE_MODE_OPTIONS: Array<ThemedSelectOption<ComparisonBudgetMode>> = [
-  { value: "quick", label: "快速模式" },
-  { value: "standard", label: "标准模式" },
-  { value: "thorough", label: "精细模式" },
+  { value: "quick", label: "快速模式 · 80% 覆盖" },
+  { value: "standard", label: "标准模式 · 90% 覆盖" },
+  { value: "thorough", label: "精细模式 · 95% 覆盖" },
 ];
 
 function InferenceModeSelect({ id, value, busy, onChange }: {
@@ -1465,14 +1483,36 @@ function InferenceModeSelect({ id, value, busy, onChange }: {
     id={id}
     value={value}
     options={INFERENCE_MODE_OPTIONS}
-    ariaLabel={`当前推断模式：${INFERENCE_MODE_OPTIONS.find((option) => option.value === value)?.label ?? value}`}
-    menuLabel="推断模式选项"
+    ariaLabel={`当前停止严格度：${INFERENCE_MODE_OPTIONS.find((option) => option.value === value)?.label ?? value}`}
+    menuLabel="停止严格度选项"
     disabled={busy}
     compact
     alignMenu="end"
     rootClassName="inference-mode-select"
     triggerClassName="header-select"
     title={BUDGET_MODE_COPY[value].description}
+    onChange={onChange}
+  />;
+}
+
+function PriorModeSelect({ id, value, busy, onChange }: {
+  id: string;
+  value: PriorMode;
+  busy: boolean;
+  onChange: (mode: PriorMode) => Promise<void>;
+}) {
+  return <ThemedSelect
+    id={id}
+    value={value}
+    options={PRIOR_MODE_OPTIONS.map((option) => ({ ...option, label: PRIOR_MODE_COPY[option.value].label }))}
+    ariaLabel={`当前旧评分先验：${PRIOR_MODE_COPY[value].label}`}
+    menuLabel="旧评分先验选项"
+    disabled={busy}
+    compact
+    alignMenu="end"
+    rootClassName="prior-mode-select"
+    triggerClassName="header-select"
+    title={PRIOR_MODE_COPY[value].description}
     onChange={onChange}
   />;
 }
@@ -1501,6 +1541,7 @@ function SessionPicker({ purpose, sessions, currentSnapshotId, busy, onResume, o
     {hasSessions ? <div className="session-picker-list" role="list" aria-label="可进入的排序会话">
       {orderedSessions.map((session) => {
         const budgetMode = sessionBudgetMode(session);
+        const priorMode = sessionPriorMode(session);
         const statusLabel = session.status === "complete" ? "已稳定" : "进行中";
         return <div key={session.id} role="listitem">
           <button
@@ -1513,7 +1554,7 @@ function SessionPicker({ purpose, sessions, currentSnapshotId, busy, onResume, o
             <span className="session-type">{SUBJECT_TYPES[session.subjectType]}</span>
             <span className="session-picker-copy">
               <strong>{session.title}</strong>
-              <small>{BUDGET_MODE_COPY[budgetMode].label}模式 · {normalizeScoreLevelCount(session.distribution.levelCount)} 档 · {session.snapshotId === currentSnapshotId ? "当前收藏" : "旧收藏"} · {statusLabel}</small>
+              <small>{PRIOR_MODE_COPY[priorMode].label} · {BUDGET_MODE_COPY[budgetMode].label}停止 · {normalizeScoreLevelCount(session.distribution.levelCount)} 档 · {session.snapshotId === currentSnapshotId ? "当前收藏" : "旧收藏"} · {statusLabel}</small>
               <small>更新于 {formatDateTime(session.updatedAt)} · 标签范围：{tagFilterSummary(session.tagFilter)}</small>
             </span>
             <span className={`session-status ${session.status}`}>{statusLabel}</span>
@@ -1527,9 +1568,10 @@ function SessionPicker({ purpose, sessions, currentSnapshotId, busy, onResume, o
   </section>;
 }
 
-function CompareView({ state, busy, scoresVisible, onToggleScores, onMode, onAnswer, onUndo, onPause, onResults }: {
+function CompareView({ state, busy, scoresVisible, onToggleScores, onMode, onPriorMode, onAnswer, onUndo, onPause, onResults }: {
   state: CompareState; busy: boolean; scoresVisible: boolean; onToggleScores: () => void;
   onMode: (mode: ComparisonBudgetMode) => Promise<void>;
+  onPriorMode: (mode: PriorMode) => Promise<void>;
   onAnswer: (outcome: ComparisonOutcome) => void; onUndo: () => void; onPause: () => void; onResults: () => void;
 }) {
   const left = state.items.find((item) => item.subjectId === state.nextPair?.leftSubjectId);
@@ -1538,8 +1580,10 @@ function CompareView({ state, busy, scoresVisible, onToggleScores, onMode, onAns
   const importedAccepted = state.history.filter((item) => item.sessionId === state.session.id && item.active && item.outcome !== "skip" && item.importBatchId).length;
   const newlyAnswered = currentSessionAccepted - importedAccepted;
   const budgetMode = sessionBudgetMode(state.session);
+  const priorMode = sessionPriorMode(state.session);
   const scoreLevelCount = normalizeScoreLevelCount(state.session.distribution.levelCount);
   const diagnostics = state.model.diagnostics;
+  const activeStoppingCheck = diagnostics?.stoppingChecks?.find((check) => check.mode === budgetMode);
   const targetReady = diagnostics?.ready;
   const expectedViolations = expectedCrossTwoBucketCount(diagnostics);
   const toleranceCoverage = expectedViolations === undefined
@@ -1551,11 +1595,11 @@ function CompareView({ state, busy, scoresVisible, onToggleScores, onMode, onAns
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   if (!left || !right) return <div className="center-message"><h2>暂时没有可比较的条目</h2><p>你可以查看当前结果，或返回收藏调整范围。</p><button className="primary-button" onClick={onResults}>查看结果</button></div>;
   return <>
-    <header className="topbar compare-header"><div><span className="eyebrow">{SUBJECT_TYPES[state.session.subjectType]} · {BUDGET_MODE_COPY[budgetMode].label}模式 · <Term term="score-bucket">{scoreLevelCount} 档</Term> · {state.session.title}</span><h1>哪一部在你的偏好中更靠前？</h1></div><div className="header-actions"><InferenceModeSelect id="compare-budget-mode" value={budgetMode} busy={busy} onChange={onMode} /><button className="ghost-button" onClick={onToggleScores}>{scoresVisible ? "隐藏原评分" : "显示原评分"}</button></div></header>
+    <header className="topbar compare-header"><div><span className="eyebrow">{SUBJECT_TYPES[state.session.subjectType]} · {PRIOR_MODE_COPY[priorMode].label} · {BUDGET_MODE_COPY[budgetMode].label}停止 · <Term term="score-bucket">{scoreLevelCount} 档</Term> · {state.session.title}</span><h1>哪一部在你的偏好中更靠前？</h1></div><div className="header-actions"><PriorModeSelect id="compare-prior-mode" value={priorMode} busy={busy} onChange={onPriorMode} /><InferenceModeSelect id="compare-budget-mode" value={budgetMode} busy={busy} onChange={onMode} /><button className="ghost-button" onClick={onToggleScores}>{scoresVisible ? "隐藏原评分" : "显示原评分"}</button></div></header>
     <button className="mobile-diagnostics-toggle" type="button" aria-expanded={diagnosticsOpen} aria-controls="compare-diagnostics" onClick={() => setDiagnosticsOpen((value) => !value)}><span>有效证据 {currentSessionAccepted} 次 · 覆盖 {Math.round(toleranceCoverage)}%</span><span>{diagnosticsOpen ? "收起诊断" : "查看诊断"}</span></button>
     <div className="progress-row dynamic-progress" id="compare-diagnostics"><div className="progress-copy"><span>有效证据 <strong>{currentSessionAccepted}</strong> 次（新回答 {newlyAnswered} · 导入 {importedAccepted}）</span><span><Term term="adjacent-tolerance">后验期望相邻容差覆盖</Term> <strong>{Math.round(toleranceCoverage)}%</strong></span><span><Term term="maximum-displacement">最坏偏移中位数</Term> <strong>{maxBucketDisplacementValue(diagnostics)}</strong></span></div><div className="progress-track" aria-label={`后验期望相邻容差覆盖 ${Math.round(toleranceCoverage)}%`}><span style={{ width: `${toleranceCoverage}%` }} /></div><div className="forecast-row"><span><Term term="cross-two-buckets">跨两档作品分布</Term> <strong><Term term="posterior-interval">{crossTwoBucketInterval(diagnostics)}</Term></strong></span><span><Term term="maximum-displacement">最坏偏移分布</Term> <strong>{maxBucketDisplacementInterval(diagnostics)}</strong></span><span><Term term="dynamic-forecast">动态剩余预测</Term> <strong>{forecastRange(diagnostics)}</strong></span></div></div>
     {newlyAnswered > 0 && newlyAnswered % 20 === 0 && <Notice tone="warning">你已经在本会话新完成 {newlyAnswered} 次判断，建议现在下载一次 JSON 备份。</Notice>}
-    {targetReady && <Notice tone="success">当前{BUDGET_MODE_COPY[budgetMode].label}模式要求的嵌套<Term term="posterior">后验检查</Term>均已达标：在 <Term term="score-bucket">{scoreLevelCount} 档评分</Term>中，至少 90% 的作品最多偏移一档。可以导出结果，也可以继续比较。</Notice>}
+    {targetReady && <Notice tone="success">当前{BUDGET_MODE_COPY[budgetMode].label}停止条件已达标：至少 {percent(activeStoppingCheck?.target ?? stoppingCoverageTarget(budgetMode))} 的作品最多偏移一档这一<Term term="posterior">后验事件</Term>的 90% MC 下界已达到 {percent(activeStoppingCheck?.probabilityTarget ?? STOPPING_PROBABILITY_TARGET)}。可以导出结果，也可以继续比较。</Notice>}
     {!targetReady && projectionSuccesses === 0 && <Notice>本轮预测窗口内<Term term="monte-carlo">达标模拟</Term>为 {forecastProjectionProbability(forecast)}；未观察到成功不是不可达证明。再完成 {forecast?.nextCheckpoint} 次后会用新证据重估。</Notice>}
     {!targetReady && diagnostics && diagnostics.evidenceCount < diagnostics.evidenceRequired && <Notice>至少需要 {diagnostics.evidenceRequired} 次本会话有效判断；目前为 {diagnostics.evidenceCount} 次。</Notice>}
     {calibrationAvailable && <Notice><Term term="calibration-repeat">校准复问</Term> {diagnostics?.calibration.consistent}/{diagnostics?.calibration.completed} 次一致；<Term term="posterior">后验一致率</Term> {percent(diagnostics?.calibration.posteriorMean)}，<Term term="posterior-interval">80% 区间</Term> {percent(diagnostics?.calibration.credibleLow)}–{percent(diagnostics?.calibration.credibleHigh)}。该指标仅反映判断波动，不影响停止。</Notice>}
@@ -1565,7 +1609,7 @@ function CompareView({ state, busy, scoresVisible, onToggleScores, onMode, onAns
       <MediaCard item={right} side="right" showScore={scoresVisible} disabled={busy} onChoose={() => onAnswer("right")} />
     </section>
     <div className="secondary-actions"><button disabled={busy} onClick={() => onAnswer("tie")}><span>＝</span>差不多喜欢 <kbd>↑</kbd></button><button disabled={busy} onClick={() => onAnswer("skip")}><span>↷</span>这次跳过 <kbd>↓</kbd></button><button disabled={busy} onClick={onUndo} title="快捷键：Ctrl+Z（Windows / Linux）或 ⌘Z（macOS）"><span>↶</span>撤销上次 <kbd>⌘/Ctrl Z</kbd></button></div>
-    <footer className="session-footer"><span><Term term="inference-mode">{BUDGET_MODE_COPY[budgetMode].label}模式</Term>：{BUDGET_MODE_COPY[budgetMode].description}</span><div><button onClick={onResults}>查看当前结果</button><button onClick={onPause}>暂停并返回收藏</button></div></footer>
+    <footer className="session-footer"><span><Term term="prior">{PRIOR_MODE_COPY[priorMode].label}</Term> · <Term term="inference-mode">{BUDGET_MODE_COPY[budgetMode].label}停止</Term>：{BUDGET_MODE_COPY[budgetMode].description}</span><div><button onClick={onResults}>查看当前结果</button><button onClick={onPause}>暂停并返回收藏</button></div></footer>
   </>;
 }
 
@@ -2013,13 +2057,14 @@ function MobileRankingCards({ items, scoreLevelCount }: { items: RankedItem[]; s
     </li>)}</ol>;
 }
 
-function ResultsView({ state, sessions, username, busy, onBack, onMode, onDistribution, onExportCsv, onAddComparison, onDeleteComparison, onImportComparison, onResync }: {
+function ResultsView({ state, sessions, username, busy, onBack, onMode, onPriorMode, onDistribution, onExportCsv, onAddComparison, onDeleteComparison, onImportComparison, onResync }: {
   state: CompareState;
   sessions: SortingSession[];
   username: string;
   busy: boolean;
   onBack: () => void;
   onMode: (mode: ComparisonBudgetMode) => Promise<void>;
+  onPriorMode: (mode: PriorMode) => Promise<void>;
   onDistribution: (distribution: DistributionConfig) => Promise<void>;
   onExportCsv: (result: RankedItem[]) => void;
   onAddComparison: (leftSubjectId: number, rightSubjectId: number, outcome: Exclude<ComparisonOutcome, "skip">) => Promise<void>;
@@ -2031,18 +2076,15 @@ function ResultsView({ state, sessions, username, busy, onBack, onMode, onDistri
   const result = buildRankedItems(state.items, state.model, comparisons, state.session.distribution);
   const diagnostics = state.model.diagnostics;
   const budgetMode = sessionBudgetMode(state.session);
+  const priorMode = sessionPriorMode(state.session);
   const scoreLevelCount = normalizeScoreLevelCount(state.session.distribution.levelCount);
   const effectiveEvidence = state.history.filter((record) => record.active && record.outcome !== "skip");
   const importedEvidence = effectiveEvidence.filter((record) => record.importBatchId).length;
   const newEvidence = effectiveEvidence.length - importedEvidence;
-  const priorCopy = budgetMode === "quick"
-    ? "原评分作为强先验"
-    : budgetMode === "standard"
-      ? "原评分作为中等先验"
-      : "模型未采用原评分顺序先验";
+  const priorCopy = priorMode === "strong" ? "原评分作为强先验" : "仅保留弱零均值正则";
   return <>
-    <header className="page-header results-header"><div><span className="eyebrow">排序结果 · {BUDGET_MODE_COPY[budgetMode].label}模式 · <Term term="score-bucket">{scoreLevelCount} 档</Term></span><h1>你的偏好序列</h1><p>{result.length} 个{SUBJECT_TYPES[state.session.subjectType]}条目 · 当前输出 <Term term="score-bucket">{scoreLevelCount} 档评分</Term> · <Term term="prior">{priorCopy}</Term></p><p>总有效证据 {effectiveEvidence.length} 条 · 本会话新回答 {newEvidence} 条 · 导入证据 {importedEvidence} 条</p></div><div className="header-actions"><InferenceModeSelect id="result-budget-mode" value={budgetMode} busy={busy} onChange={onMode} /><button className="outline-button" onClick={onBack}>继续比较</button><button className="primary-button compact" onClick={() => onExportCsv(result)}>导出 CSV</button></div></header>
-    <section className="result-summary"><article className="panel"><div className="panel-title"><div><span className="eyebrow"><Term term="score-distribution">{scoreLevelCount === DEFAULT_SCORE_LEVELS ? "评分分布对比" : "评分分布"}</Term></span><h2>{scoreLevelCount === DEFAULT_SCORE_LEVELS ? "原评分 → 新评分" : `原评分与 ${scoreLevelCount} 档新评分`}</h2></div><div className="distribution-controls"><ScoreLevelSelect id="result-score-level-count" className="header-select" compact value={scoreLevelCount} disabled={busy} onChange={(levelCount) => void onDistribution(distributionWithLevelCount(state.session.distribution, levelCount))} /><ThemedSelect id="result-distribution-preset" value={state.session.distribution.preset} options={distributionPresetOptions(scoreLevelCount)} ariaLabel="评分分布预设" menuLabel="评分分布预设选项" compact alignMenu="end" triggerClassName="header-select" disabled={busy} onChange={(preset) => void onDistribution(distributionConfig(preset, scoreLevelCount, state.session.distribution.weights))} /></div></div>{state.session.distribution.preset === "custom" && <CustomDistributionEditor key={`${state.session.id}:${scoreLevelCount}`} weights={state.session.distribution.weights} busy={busy} onApply={(weights) => onDistribution(distributionConfig("custom", scoreLevelCount, weights))} />}{scoreLevelCount === DEFAULT_SCORE_LEVELS ? <><TenLevelComparisonHistogram items={state.items} result={result} /><div className="chart-legend"><span><i className="old" />原评分</span><span><i className="new" />新评分</span></div></> : <div className="distribution-charts"><div className="distribution-chart"><strong>原评分 · 1–10</strong><OriginalScoreHistogram items={state.items} /></div><div className="distribution-chart"><strong>新评分 · 1–{scoreLevelCount}</strong><NewScoreHistogram result={result} levelCount={scoreLevelCount} /></div></div>}</article><article className="summary-stat"><span><Term term="cross-two-buckets">预计跨两档作品</Term></span><strong>{crossTwoBucketValue(diagnostics)}</strong><small><Term term="posterior-interval">{crossTwoBucketInterval(diagnostics)}</Term></small><div className="summary-forecast"><span><Term term="dynamic-forecast">动态剩余预测</Term></span><b>{forecastRange(diagnostics)}</b><small><StoppingCriterionDetail diagnostics={diagnostics} /></small></div><hr /><span><Term term="maximum-displacement">最坏偏移</Term></span><strong>{maxBucketDisplacementValue(diagnostics)}</strong><small>{maxBucketDisplacementInterval(diagnostics)}；仅作尾部诊断，停止条件允许最多 10% 的作品<Term term="cross-two-buckets">跨两档</Term>。{diagnostics?.calibration.completed ? <><Term term="calibration-repeat">复问</Term> {diagnostics.calibration.consistent}/{diagnostics.calibration.completed} 次一致，<Term term="posterior">后验</Term> {percent(diagnostics.calibration.posteriorMean)}（仅作诊断）</> : "尚无校准复问；区间仅代表模型内近似"}</small></article></section>
+    <header className="page-header results-header"><div><span className="eyebrow">排序结果 · {PRIOR_MODE_COPY[priorMode].label} · {BUDGET_MODE_COPY[budgetMode].label}停止 · <Term term="score-bucket">{scoreLevelCount} 档</Term></span><h1>你的偏好序列</h1><p>{result.length} 个{SUBJECT_TYPES[state.session.subjectType]}条目 · 当前输出 <Term term="score-bucket">{scoreLevelCount} 档评分</Term> · <Term term="prior">{priorCopy}</Term></p><p>总有效证据 {effectiveEvidence.length} 条 · 本会话新回答 {newEvidence} 条 · 导入证据 {importedEvidence} 条</p></div><div className="header-actions"><PriorModeSelect id="result-prior-mode" value={priorMode} busy={busy} onChange={onPriorMode} /><InferenceModeSelect id="result-budget-mode" value={budgetMode} busy={busy} onChange={onMode} /><button className="outline-button" onClick={onBack}>继续比较</button><button className="primary-button compact" onClick={() => onExportCsv(result)}>导出 CSV</button></div></header>
+    <section className="result-summary"><article className="panel"><div className="panel-title"><div><span className="eyebrow"><Term term="score-distribution">{scoreLevelCount === DEFAULT_SCORE_LEVELS ? "评分分布对比" : "评分分布"}</Term></span><h2>{scoreLevelCount === DEFAULT_SCORE_LEVELS ? "原评分 → 新评分" : `原评分与 ${scoreLevelCount} 档新评分`}</h2></div><div className="distribution-controls"><ScoreLevelSelect id="result-score-level-count" className="header-select" compact value={scoreLevelCount} disabled={busy} onChange={(levelCount) => void onDistribution(distributionWithLevelCount(state.session.distribution, levelCount))} /><ThemedSelect id="result-distribution-preset" value={state.session.distribution.preset} options={distributionPresetOptions(scoreLevelCount)} ariaLabel="评分分布预设" menuLabel="评分分布预设选项" compact alignMenu="end" triggerClassName="header-select" disabled={busy} onChange={(preset) => void onDistribution(distributionConfig(preset, scoreLevelCount, state.session.distribution.weights))} /></div></div>{state.session.distribution.preset === "custom" && <CustomDistributionEditor key={`${state.session.id}:${scoreLevelCount}`} weights={state.session.distribution.weights} busy={busy} onApply={(weights) => onDistribution(distributionConfig("custom", scoreLevelCount, weights))} />}{scoreLevelCount === DEFAULT_SCORE_LEVELS ? <><TenLevelComparisonHistogram items={state.items} result={result} /><div className="chart-legend"><span><i className="old" />原评分</span><span><i className="new" />新评分</span></div></> : <div className="distribution-charts"><div className="distribution-chart"><strong>原评分 · 1–10</strong><OriginalScoreHistogram items={state.items} /></div><div className="distribution-chart"><strong>新评分 · 1–{scoreLevelCount}</strong><NewScoreHistogram result={result} levelCount={scoreLevelCount} /></div></div>}</article><article className="summary-stat"><span><Term term="cross-two-buckets">预计跨两档作品</Term></span><strong>{crossTwoBucketValue(diagnostics)}</strong><small><Term term="posterior-interval">{crossTwoBucketInterval(diagnostics)}</Term></small><div className="summary-forecast"><span><Term term="dynamic-forecast">动态剩余预测</Term></span><b>{forecastRange(diagnostics)}</b><small><StoppingCriterionDetail diagnostics={diagnostics} /></small></div><hr /><span><Term term="maximum-displacement">最坏偏移</Term></span><strong>{maxBucketDisplacementValue(diagnostics)}</strong><small>{maxBucketDisplacementInterval(diagnostics)}；仅作尾部诊断，当前模式要求 {percent(stoppingCoverageTarget(budgetMode))} 的作品保持在相邻一档，允许最多 {allowedCrossTwoBucketCount(state.items.length, stoppingCoverageTarget(budgetMode))} 部<Term term="cross-two-buckets">跨两档</Term>。{diagnostics?.calibration.completed ? <><Term term="calibration-repeat">复问</Term> {diagnostics.calibration.consistent}/{diagnostics.calibration.completed} 次一致，<Term term="posterior">后验</Term> {percent(diagnostics.calibration.posteriorMean)}（仅作诊断）</> : "尚无校准复问；区间仅代表模型内近似"}</small></article></section>
     <ComparisonManager key={state.session.id} items={result} history={state.history} session={state.session} sessions={sessions} busy={busy} onAdd={onAddComparison} onDelete={onDeleteComparison} onImport={onImportComparison} />
     <RatingWriteDangerZone
       key={`${state.session.id}:${state.model.version}:${scoreLevelCount}:${state.session.distribution.preset}:${state.session.distribution.weights.join(",")}`}
@@ -2208,10 +2250,11 @@ export default function ResorterApp() {
     distribution = session.distribution,
   ) {
     if (!workerRef.current) throw new Error("排序计算尚未就绪。");
-    const tuning = rankingTuning(sessionBudgetMode(session));
+    const priorMode = sessionPriorMode(session);
+    const tuning = rankingTuning(priorMode);
     const result = await workerRef.current.run({ type: operation, sessionId: session.id, version, randomSeed: session.randomSeed,
       items: sessionItems.map((item) => ({ subjectId: item.subjectId, rate: item.rate })),
-      history: toRankingHistory(history), distribution, budgetMode: sessionBudgetMode(session),
+      history: toRankingHistory(history), distribution, budgetMode: sessionBudgetMode(session), priorMode,
       previousModel, ...tuning });
     warmComparisonImages(sessionItems, result.nextPair);
     return result;
@@ -2236,6 +2279,7 @@ export default function ResorterApp() {
     statuses: CollectionType[],
     distribution: DistributionConfig,
     budgetMode: ComparisonBudgetMode,
+    priorMode: PriorMode,
     tagFilter?: SessionTagFilter,
     sourceSessionId?: string,
     expectedSourceVersion?: number,
@@ -2243,6 +2287,7 @@ export default function ResorterApp() {
     if (!snapshot) return;
     const session = await createSession(snapshot, type, statuses, distribution, {
       budgetMode,
+      priorMode,
       tagFilter,
       sourceSessionId,
       expectedSourceVersion,
@@ -2353,12 +2398,31 @@ export default function ResorterApp() {
       const current = compare;
       const nextVersion = current.session.modelVersion + 1;
       const nextSession = { ...current.session, budgetMode };
-      const calculated = await calculate(nextSession, current.items, current.history, current.model, "RECOMPUTE", nextVersion);
+      const reusedModel = retargetStoppingMode(current.model, budgetMode, nextVersion);
+      const calculated = reusedModel
+        ? { model: reusedModel, nextPair: current.nextPair ? { ...current.nextPair, modelVersion: nextVersion } : undefined }
+        : await calculate(nextSession, current.items, current.history, current.model, "RECOMPUTE", nextVersion);
       await commitSessionBudgetMode(current.session.id, current.session.modelVersion, budgetMode, calculated.model);
       const bundle = await getSessionBundle(current.session.id); if (!bundle) throw new Error("会话保存失败。");
       setCompare({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
       setSessions(await listSessions(current.session.profileId));
-    } catch (cause) { setGlobalError(cause instanceof Error ? cause.message : "无法更新推断模式。"); }
+    } catch (cause) { setGlobalError(cause instanceof Error ? cause.message : "无法更新停止严格度。"); }
+    finally { setBusy(false); }
+  }
+
+  async function changePriorMode(priorMode: PriorMode) {
+    if (!compare || busy || sessionPriorMode(compare.session) === priorMode) return;
+    setBusy(true); setGlobalError("");
+    try {
+      const current = compare;
+      const nextVersion = current.session.modelVersion + 1;
+      const nextSession = { ...current.session, priorMode };
+      const calculated = await calculate(nextSession, current.items, current.history, current.model, "RECOMPUTE", nextVersion);
+      await commitSessionPriorMode(current.session.id, current.session.modelVersion, priorMode, calculated.model);
+      const bundle = await getSessionBundle(current.session.id); if (!bundle) throw new Error("会话保存失败。");
+      setCompare({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
+      setSessions(await listSessions(current.session.profileId));
+    } catch (cause) { setGlobalError(cause instanceof Error ? cause.message : "无法更新先验强度。"); }
     finally { setBusy(false); }
   }
 
@@ -2496,8 +2560,8 @@ export default function ResorterApp() {
   const shellContent = (() => {
     if (!snapshot || !profile) return null;
     if (view === "library") return <LibraryView snapshot={snapshot} items={items} sessions={sessions} legacySessionIds={projects.find((entry) => entry.profile.id === profile.id)?.legacySessionIds ?? []} onStart={startSession} onResume={openSession} onUpgradeSession={upgradeSession} onDeriveSession={deriveSession} onDeleteSession={removeSession} onSyncAgain={() => setResyncOpen(true)} onSwitchAccount={() => navigate("connect")} />;
-    if (view === "compare" && compare) return <CompareView state={compare} busy={busy} scoresVisible={scoresVisible} onToggleScores={() => setScoresVisible((value) => !value)} onMode={changeBudgetMode} onAnswer={answer} onUndo={undo} onPause={() => navigate("library")} onResults={() => navigate("results")} />;
-    if (view === "results" && compare) return <ResultsView state={compare} sessions={sessions} username={snapshot.username} busy={busy} onBack={() => navigate("compare")} onMode={changeBudgetMode} onDistribution={changeDistribution} onExportCsv={exportCsv} onAddComparison={addManualComparison} onDeleteComparison={removeComparison} onImportComparison={importComparisonsIntoCurrent} onResync={() => setResyncOpen(true)} />;
+    if (view === "compare" && compare) return <CompareView state={compare} busy={busy} scoresVisible={scoresVisible} onToggleScores={() => setScoresVisible((value) => !value)} onMode={changeBudgetMode} onPriorMode={changePriorMode} onAnswer={answer} onUndo={undo} onPause={() => navigate("library")} onResults={() => navigate("results")} />;
+    if (view === "results" && compare) return <ResultsView state={compare} sessions={sessions} username={snapshot.username} busy={busy} onBack={() => navigate("compare")} onMode={changeBudgetMode} onPriorMode={changePriorMode} onDistribution={changeDistribution} onExportCsv={exportCsv} onAddComparison={addManualComparison} onDeleteComparison={removeComparison} onImportComparison={importComparisonsIntoCurrent} onResync={() => setResyncOpen(true)} />;
     if (view === "backup") return <BackupView snapshot={snapshot} items={items} profile={profile} sessions={sessions} storage={storeStatus} importHistory={importHistory} onImported={async (result) => { setLastBackupImport(result); await loadSnapshot(result.snapshot, "library"); }} />;
     if (view === "compare") return <SessionPicker purpose="compare" sessions={sessions} currentSnapshotId={snapshot.id} busy={busy} onResume={openSession} onBack={() => navigate("library")} />;
     if (view === "results") return <SessionPicker purpose="results" sessions={sessions} currentSnapshotId={snapshot.id} busy={busy} onResume={(sessionId) => openSession(sessionId, "results")} onBack={() => navigate("library")} />;

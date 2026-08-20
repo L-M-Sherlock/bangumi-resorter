@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { analyzeRanking, buildRankedItems, calibrationPosterior, chooseNextPair, fitModel, forecastStoppingTime } from "../lib/ranking/engine";
+import { analyzeRanking, buildRankedItems, calibrationPosterior, chooseNextPair, fitModel, forecastStoppingTime, updateForecastPosterior } from "../lib/ranking/engine";
 import { distributionConfig } from "../lib/distribution";
 import {
   allowedCrossTwoBucketCount,
@@ -89,9 +89,9 @@ describe("Bradley–Terry ranking engine", () => {
     expect(new Set([cooled!.leftSubjectId, cooled!.rightSubjectId])).not.toEqual(new Set([first!.leftSubjectId, first!.rightSubjectId]));
   });
 
-  it("uses a strong score prior and focuses quick questions within score buckets", () => {
+  it("uses a strong score prior with the shared question-selection policy", () => {
     const rated = [{ subjectId: 1, rate: 9 }, { subjectId: 2, rate: 9 }, { subjectId: 3, rate: 6 }];
-    const tuning = rankingTuning("quick");
+    const tuning = rankingTuning("strong");
     const fit = fitModel(rated, [], undefined, { ...tuning, randomSeed: 9 });
     expect(fit.abilities[1] - fit.abilities[3]).toBeCloseTo(2.1, 8);
     const pair = nextPairFor(rated, [], 9, 0, uniform, tuning);
@@ -205,23 +205,25 @@ describe("Bradley–Terry ranking engine", () => {
     expect(calibration?.rightSubjectId).toBe(original.leftSubjectId);
 
     const four = Array.from({ length: 4 }, (_, index) => history(`m${index}`, index + 1, index + 2, "left", index));
-    expect(nextPairFor(rated, four, 5, 4, uniform, rankingTuning("quick"))?.queryKind).toBe("adaptive");
-    expect(nextPairFor(rated, four, 5, 4, uniform, rankingTuning("thorough"))?.queryKind).toBe("exploration");
+    const strongPair = nextPairFor(rated, four, 5, 4, uniform, rankingTuning("strong"));
+    const weakPair = nextPairFor(rated, four, 5, 4, uniform, rankingTuning("weak"));
+    expect(strongPair?.queryKind).toBe("exploration");
+    expect(weakPair).toEqual(strongPair);
   });
 
-  it("uses materially separated inference-mode tuning", () => {
-    expect(rankingTuning("quick")).toMatchObject({
-      priorStrength: 1.2, priorScale: 0.7, maxRankDistance: 1,
-      boundaryWindow: 1, explorationInterval: 25, explorationRadius: 2,
+  it("separates prior strength while keeping question selection identical", () => {
+    expect(rankingTuning("strong")).toMatchObject({
+      priorStrength: 1.2, priorScale: 0.7, maxRankDistance: 10,
+      boundaryWindow: 6, explorationInterval: 5, explorationRadius: 12,
     });
-    expect(rankingTuning("standard")).toMatchObject({
-      priorStrength: 0.3, priorScale: 0.45, maxRankDistance: 4,
-      boundaryWindow: 3, explorationInterval: 10, explorationRadius: 5,
-    });
-    expect(rankingTuning("thorough")).toMatchObject({
+    expect(rankingTuning("weak")).toMatchObject({
       priorStrength: 0.05, priorScale: 0, maxRankDistance: 10,
       boundaryWindow: 6, explorationInterval: 5, explorationRadius: 12,
     });
+    const selectionOnly = (mode: "strong" | "weak") => Object.fromEntries(
+      Object.entries(rankingTuning(mode)).filter(([key]) => key !== "priorStrength" && key !== "priorScale"),
+    );
+    expect(selectionOnly("strong")).toEqual(selectionOnly("weak"));
   });
 
   it("uses global exploration to cover low-count unstable items", () => {
@@ -275,6 +277,9 @@ describe("Bradley–Terry ranking engine", () => {
     expect(marginallyStable.coverageTargetStabilityLow).toBeGreaterThan(0.9);
     expect(marginallyStable.requiredAdjacentStableItemCount).toBe(90);
     expect(marginallyStable.allowedCrossTwoBucketCount).toBe(10);
+    expect(marginallyStable.stoppingChecks?.map((check) => [check.mode, check.target, check.allowedCrossTwoBucketCount])).toEqual([
+      ["quick", 0.8, 20], ["standard", 0.9, 10], ["thorough", 0.95, 5],
+    ]);
     expect(Object.values(marginallyStable.adjacentBucketStabilityByItem)
       .every((value) => value >= 0 && value <= 1)).toBe(true);
     expect(marginallyStable.expectedCrossTwoBucketCount).toBe(2);
@@ -299,6 +304,9 @@ describe("Bradley–Terry ranking engine", () => {
     expect(overTolerance.expectedCrossTwoBucketCount).toBe(12);
     expect(overTolerance.coverageTargetStability).toBe(0);
     expect(overTolerance.ready).toBe(false);
+    expect(overTolerance.stoppingChecks?.find((check) => check.mode === "quick")?.ready).toBe(true);
+    expect(overTolerance.stoppingChecks?.find((check) => check.mode === "standard")?.ready).toBe(false);
+    expect(overTolerance.stoppingChecks?.find((check) => check.mode === "thorough")?.ready).toBe(false);
 
     const oneMisplacement = stable.slice();
     [oneMisplacement[9], oneMisplacement[10]] = [oneMisplacement[10], oneMisplacement[9]];
@@ -338,7 +346,7 @@ describe("Bradley–Terry ranking engine", () => {
     const evidenceLimitedForecast = forecastStoppingTime(rated, adjacentFit, uniform, evidence.slice(0, 9), "session", evidenceLimited, {
       projectionHorizon: 100, randomSeed: 12, forecastEfficiency: 16,
     });
-    expect(evidenceLimitedForecast.method).toBe("posterior-contraction-mc-v6");
+    expect(evidenceLimitedForecast.method).toBe("posterior-contraction-mc-v10");
     expect(evidenceLimitedForecast.medianAdditional).toBe(1);
 
     const globallyStable = analyzeRanking(rated, {
@@ -459,9 +467,48 @@ describe("Bradley–Terry ranking engine", () => {
     const forecast = forecastStoppingTime(rated, fit, uniform, entries, "session", diagnostics, {
       projectionHorizon: 100, randomSeed: 17, forecastEfficiency: 16,
     });
-    expect(forecast.method).toBe("posterior-contraction-mc-v6");
-    expect(forecast.lowerAdditional).not.toBe(1);
-    expect(forecast.medianAdditional).not.toBe(1);
+    expect(forecast.method).toBe("posterior-contraction-mc-v10");
+    expect(forecast.rolloutCount).toBe(64);
+    expect(forecast.withinProjectionSuccesses).toBeLessThanOrEqual(forecast.rolloutCount);
+  });
+
+  it("propagates a forecast answer through posterior covariance", () => {
+    const samples = Array.from({ length: 64 }, (_, index) => {
+      const direction = (Math.floor(index / 2) - 15.5) / 5;
+      const orthogonal = index % 2 === 0 ? -0.5 : 0.5;
+      return new Float64Array([
+        direction / 2,
+        -direction / 2,
+        direction * 0.75 + orthogonal,
+        orthogonal,
+      ]);
+    });
+    const before = samples.map((sample) => sample.slice());
+    const meanShifts = updateForecastPosterior(samples, 0, 1, "left");
+
+    expect(Math.abs(meanShifts[2])).toBeGreaterThan(1e-4);
+    expect(meanShifts[3]).toBeCloseTo(0, 10);
+    expect(samples.some((sample, index) => Math.abs(sample[2] - before[index][2]) > 1e-4)).toBe(true);
+    for (let index = 0; index < samples.length; index += 1) {
+      const oldDifference = before[index][0] - before[index][1];
+      const newDifference = samples[index][0] - samples[index][1];
+      const propagatedDifference = (samples[index][0] - before[index][0])
+        - (samples[index][1] - before[index][1]);
+      expect(propagatedDifference).toBeCloseTo(newDifference - oldDifference, 10);
+    }
+  });
+
+  it("does not move posterior directions uncorrelated with the compared pair", () => {
+    const samples = Array.from({ length: 64 }, (_, index) => {
+      const direction = (Math.floor(index / 2) - 15.5) / 5;
+      const orthogonal = index % 2 === 0 ? -0.5 : 0.5;
+      return new Float64Array([direction / 2, -direction / 2, orthogonal]);
+    });
+    const before = samples.map((sample) => sample.slice());
+    updateForecastPosterior(samples, 0, 1, "right");
+    for (let index = 0; index < samples.length; index += 1) {
+      expect(samples[index][2]).toBeCloseTo(before[index][2], 10);
+    }
   });
 
   it("keeps an early stopping forecast explicitly uncertain", () => {

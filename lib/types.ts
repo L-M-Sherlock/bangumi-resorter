@@ -20,6 +20,7 @@ export type ComparisonOutcome = "left" | "tie" | "right" | "skip";
 export type SessionStatus = "active" | "complete";
 export type DistributionPreset = "uniform" | "preserve" | "high-tail" | "reverse-j" | "custom";
 export type ComparisonBudgetMode = "quick" | "standard" | "thorough";
+export type PriorMode = "strong" | "weak";
 export type ComparisonReusePolicy = "session" | "snapshot" | "profile";
 /** How a session obtains comparison history. Dynamic is retained for legacy data only. */
 export type ComparisonHistoryMode = "dynamic" | "local";
@@ -94,6 +95,8 @@ export interface SortingSession {
   modelVersion: number;
   /** Missing only on backups created before comparison budgets were introduced. */
   budgetMode?: ComparisonBudgetMode;
+  /** Missing on backups created before prior strength became independent from stopping strictness. */
+  priorMode?: PriorMode;
   /** Missing on pre-0.4 sessions, which retain the legacy profile-wide behavior. */
   comparisonReusePolicy?: ComparisonReusePolicy;
   /** New sessions own a frozen local history. Dynamic is only used while migrating legacy data. */
@@ -236,16 +239,14 @@ export interface CalibrationDiagnostics {
   credibleHigh: number;
   /** Posterior probability that repeat consistency is better than chance. */
   probabilityAboveChance: number;
-  /** @deprecated Diagnostic only; it must not gate stopping or forecasting. */
+  /** Consistency diagnostic; preference evidence is incorporated separately with pair-cluster weighting. */
   acceptable: boolean;
 }
 
 export type StoppingForecastStatus = "ready" | "forecast" | "uncertain" | "limit";
 
 export interface StoppingForecast {
-  /** `posterior-contraction-mc-v6` is retained as the wire-compatible method
-   * label; v6 now denotes the sequential posterior simulator internally. */
-  method: "posterior-contraction-mc-v1" | "posterior-contraction-mc-v2" | "posterior-contraction-mc-v3" | "posterior-contraction-mc-v4" | "posterior-contraction-mc-v5" | "posterior-contraction-mc-v6";
+  method: "posterior-contraction-mc-v1" | "posterior-contraction-mc-v2" | "posterior-contraction-mc-v3" | "posterior-contraction-mc-v4" | "posterior-contraction-mc-v5" | "posterior-contraction-mc-v6" | "posterior-contraction-mc-v7" | "posterior-contraction-mc-v8" | "posterior-contraction-mc-v9" | "posterior-contraction-mc-v10" | "posterior-contraction-mc-v11";
   status: StoppingForecastStatus;
   rolloutCount: number;
   /** Integer additional accepted answers at the 10th, 50th, and 90th stopping-time percentiles. */
@@ -272,7 +273,7 @@ export interface StoppingForecast {
 }
 
 export interface RankingDiagnostics {
-  method: "laplace-mc-v1" | "laplace-mc-v2" | "laplace-mc-v3" | "laplace-mc-v4";
+  method: "laplace-mc-v1" | "laplace-mc-v2" | "laplace-mc-v3" | "laplace-mc-v4" | "laplace-mc-v5" | "laplace-mc-v6";
   sampleCount: number;
   /** Per-item probability of remaining in the exact current bucket. */
   bucketStability: Record<number, number>;
@@ -290,10 +291,10 @@ export interface RankingDiagnostics {
   /** Central 90% Monte Carlo interval for adjacentBucketStability. */
   adjacentBucketStabilityLow: number;
   adjacentBucketStabilityHigh: number;
-  /** Posterior probability that at least 90% of items remain within one bucket. */
+  /** Backward-compatible standard-mode posterior probability that at least 90% of items remain within one bucket. */
   coverageTargetStability: number;
   coverageTargetStableSamples: number;
-  /** Central 90% Monte Carlo interval for coverageTargetStability. */
+  /** Central 90% Monte Carlo interval for the standard-mode coverage event. */
   coverageTargetStabilityLow: number;
   coverageTargetStabilityHigh: number;
   /** Integer form of the 90%-of-items stopping event for this collection size. */
@@ -309,18 +310,32 @@ export interface RankingDiagnostics {
   maxBucketDisplacementHigh?: number;
   expectedBucketChangeRate: number;
   minBucketStability: number;
-  /** Conservative 90%-coverage stopping-event risk ratio; at or below 1 is acceptable. */
+  /** Conservative active coverage-event risk ratio; at or below 1 is acceptable. */
   decisionRiskRatio: number;
+  /** Correlation-adjusted effective evidence across unordered work-pair clusters. */
   evidenceCount: number;
+  /** Raw accepted judgments before repeated-pair correlation correction. */
+  rawEvidenceCount?: number;
+  uniquePairCount?: number;
+  coveredItemCount?: number;
+  repeatedPairCorrelation?: number;
+  /** Fitted Davidson tie-strength parameter shared by fit, selection, and forecast. */
+  tieStrength?: number;
   evidenceRequired: number;
   /** @deprecated Pre-0.13 diagnostics; no longer used to block comparisons. */
   fatigueLimit?: number;
   /** @deprecated Pre-0.13 diagnostics; no longer used to block comparisons. */
   fatigueReached?: boolean;
   ready: boolean;
-  /** Nested prior-robustness checks required by the selected inference mode. */
+  /** Ordered stopping checks over nested 80%, 90%, and 95% item-coverage events. */
   stoppingChecks?: Array<{
     mode: ComparisonBudgetMode;
+    /** Fraction of items that must remain within one bucket in each posterior sample. */
+    target?: number;
+    /** Wilson lower-bound threshold for the corresponding coverage event. */
+    probabilityTarget?: number;
+    requiredAdjacentStableItemCount?: number;
+    allowedCrossTwoBucketCount?: number;
     sampleCount: number;
     stableSamples: number;
     probability: number;
@@ -330,6 +345,9 @@ export interface RankingDiagnostics {
   }>;
   stoppingBottleneckMode?: ComparisonBudgetMode;
   calibration: CalibrationDiagnostics;
+  /** Forecasts for all stopping strictness levels, generated from shared paths. */
+  forecasts?: Partial<Record<ComparisonBudgetMode, StoppingForecast>>;
+  /** Active stopping-mode forecast; retained as the convenient wire-compatible alias. */
   forecast?: StoppingForecast;
 }
 
@@ -339,6 +357,8 @@ export interface ModelState {
   abilities: Record<number, number>;
   uncertainty: Record<number, number>;
   acceptedComparisons: number;
+  effectiveComparisons?: number;
+  tieStrength?: number;
   initialMeanUncertainty: number;
   currentMeanUncertainty: number;
   converged: boolean;
@@ -356,6 +376,8 @@ export interface RankingComparisonInput {
   leftSubjectId: number;
   rightSubjectId: number;
   outcome: Exclude<ComparisonOutcome, "skip">;
+  /** Optional explicit fractional-likelihood weight; normal ranking computes this by pair cluster. */
+  weight?: number;
 }
 
 export interface RankingHistoryInput {
@@ -367,6 +389,11 @@ export interface RankingHistoryInput {
   acceptedCountAtAnswer: number;
   queryKind: QueryKind;
   calibrationOfComparisonId?: string;
+  inheritedFromComparisonId?: string;
+  importBatchId?: string;
+  importedFromSessionId?: string;
+  importedFromComparisonId?: string;
+  sourceCreatedAt?: string;
   createdAt: string;
 }
 
@@ -603,4 +630,4 @@ export const DISTRIBUTIONS: Record<Exclude<DistributionPreset, "custom">, number
   "reverse-j": [50, 25, 14, 4, 2, 1, 1, 1, 1, 1],
 };
 
-export const APP_VERSION = "0.16.0";
+export const APP_VERSION = "0.17.0";

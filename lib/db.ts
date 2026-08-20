@@ -29,6 +29,7 @@ import {
   LocalProject,
   ModelState,
   Profile,
+  PriorMode,
   SessionItem,
   SessionScopePreview,
   SessionTagFilter,
@@ -38,7 +39,7 @@ import {
   SubjectType,
   ValidatedBackup,
 } from "./types";
-import { sessionBudgetMode } from "./ranking/strategy";
+import { legacyPriorMode, sessionBudgetMode, sessionPriorMode } from "./ranking/strategy";
 import { collectionTagFilter, filterScopeItems, sameTagFilter } from "./scope";
 import { normalizeDistributionConfig } from "./distribution";
 
@@ -156,6 +157,25 @@ export class ResorterDatabase extends Dexie {
       meta: "key",
     }).upgrade(async (transaction) => {
       await migrateLegacyImportedClones(transaction);
+    });
+    this.version(7).stores({
+      profiles: "id, username, updatedAt",
+      snapshots: "id, profileId, syncedAt",
+      items: "[snapshotId+subjectId], snapshotId, subjectId, subjectType, collectionType, rate",
+      sessions: "id, profileId, snapshotId, subjectType, status, updatedAt",
+      sessionItems: "id, sessionId, subjectId, [sessionId+subjectId]",
+      comparisons: "id, profileId, sessionId, subjectType, active, createdAt, importBatchId, importedFromSessionId",
+      models: "sessionId, version, updatedAt",
+      importBatches: "id, profileId, targetSessionId, sourceSessionId, createdAt, type",
+      backupImports: "id, profileId, mode, createdAt, backupDigest",
+      meta: "key",
+    }).upgrade(async (transaction) => {
+      const sessions = transaction.table<SortingSession, string>("sessions");
+      await sessions.toCollection().modify((session) => {
+        session.priorMode = legacyPriorMode(session.budgetMode);
+        session.status = "active";
+      });
+      await transaction.table<ModelState, string>("models").clear();
     });
   }
 }
@@ -937,6 +957,7 @@ export async function commitComparisonImport(
 
 interface CreateSessionOptions {
   budgetMode?: ComparisonBudgetMode;
+  priorMode?: PriorMode;
   tagFilter?: SessionTagFilter;
   sourceSessionId?: string;
   expectedSourceVersion?: number;
@@ -964,6 +985,7 @@ export async function createSession(
     }
     : budgetModeOrOptions;
   const budgetMode = options.budgetMode ?? "quick";
+  const priorMode = options.priorMode ?? "weak";
   const tagFilter = options.tagFilter;
   const all = await getSnapshotItems(snapshot.id);
   const normalizedTagFilter = collectionTagFilter(tagFilter?.tags ?? []);
@@ -974,7 +996,7 @@ export async function createSession(
     id: id(), profileId: snapshot.profileId, snapshotId: snapshot.id, subjectType, collectionTypes,
     title: `${snapshot.username} 的排序`, status: "active", distribution: normalizeDistributionConfig(distribution),
     randomSeed: crypto.getRandomValues(new Uint32Array(1))[0], modelVersion: 0,
-    budgetMode, comparisonReusePolicy: "session",
+    budgetMode, priorMode, comparisonReusePolicy: "session",
     comparisonHistoryMode: "local", tagFilter: normalizedTagFilter,
     createdAt: timestamp, updatedAt: timestamp,
   };
@@ -1150,6 +1172,7 @@ export async function upgradeSessionToSnapshot(sourceSessionId: string, targetSn
         randomSeed: crypto.getRandomValues(new Uint32Array(1))[0],
         modelVersion: 0,
         budgetMode: sessionBudgetMode(state.source),
+        priorMode: sessionPriorMode(state.source),
         comparisonReusePolicy: "session",
         comparisonHistoryMode: "local",
         upgradedFromSessionId: state.source.id,
@@ -1254,6 +1277,7 @@ export async function deriveSessionWithTagFilter(
         randomSeed: crypto.getRandomValues(new Uint32Array(1))[0],
         modelVersion: 0,
         budgetMode: sessionBudgetMode(state.source),
+        priorMode: sessionPriorMode(state.source),
         comparisonReusePolicy: "session",
         comparisonHistoryMode: "local",
         derivedFromSessionId: state.source.id,
@@ -1446,6 +1470,28 @@ export async function commitSessionBudgetMode(
   });
 }
 
+export async function commitSessionPriorMode(
+  sessionId: string,
+  expectedVersion: number,
+  priorMode: PriorMode,
+  nextModel: ModelState,
+) {
+  return db.transaction("rw", db.sessions, db.models, async () => {
+    const session = await db.sessions.get(sessionId);
+    if (!session || session.modelVersion !== expectedVersion) throw new Error("排序会话已在其他页面更新，请刷新后继续。");
+    const updated: SortingSession = {
+      ...session,
+      priorMode,
+      modelVersion: expectedVersion + 1,
+      status: modelMeetsTarget(nextModel) ? "complete" : "active",
+      updatedAt: now(),
+    };
+    await db.models.put({ ...nextModel, sessionId, version: expectedVersion + 1, updatedAt: now() });
+    await db.sessions.put(updated);
+    return updated;
+  });
+}
+
 export async function setSessionComplete(sessionId: string, complete: boolean) {
   await db.sessions.update(sessionId, { status: complete ? "complete" : "active", updatedAt: now() });
 }
@@ -1617,6 +1663,7 @@ function sessionFingerprint(project: ProjectRows, sessionId: string, normalized 
       randomSeed: target.randomSeed,
       modelVersion: target.modelVersion,
       budgetMode: target.budgetMode,
+      priorMode: target.priorMode,
       comparisonReusePolicy: target.comparisonReusePolicy,
       comparisonHistoryMode: target.comparisonHistoryMode,
       tagFilter: target.tagFilter,
@@ -1631,6 +1678,7 @@ function sessionFingerprint(project: ProjectRows, sessionId: string, normalized 
     randomSeed: stored.randomSeed,
     modelVersion: stored.modelVersion,
     budgetMode: stored.budgetMode,
+    priorMode: stored.priorMode,
     comparisonReusePolicy: stored.comparisonReusePolicy,
     comparisonHistoryMode: stored.comparisonHistoryMode,
     stoppingTarget: stored.stoppingTarget,
@@ -1895,6 +1943,12 @@ export async function previewBackupImport(
 
 function validModel(model: ModelState | undefined, session: SortingSession, links: SessionItem[]) {
   if (!model || model.version !== session.modelVersion) return false;
+  const diagnostics = model.diagnostics;
+  if (diagnostics?.method !== "laplace-mc-v5"
+    || diagnostics.forecast?.method !== "posterior-contraction-mc-v10"
+    || !(["quick", "standard", "thorough"] as const)
+      .every((mode) => diagnostics.forecasts?.[mode]?.method === "posterior-contraction-mc-v10")
+    || !session.priorMode) return false;
   const allowed = new Set(links.filter((entry) => entry.sessionId === session.id).map((entry) => String(entry.subjectId)));
   const abilities = Object.keys(model.abilities);
   const uncertainty = Object.keys(model.uncertainty);
