@@ -266,7 +266,12 @@ function AnalysisChart({
     </div>
     <div className="analysis-chart-tooltip" role="status"><strong>第 {selected.checkpoint} 条</strong>{series.map((entry) => {
       const value = entry.value(selected);
-      return <span key={entry.key}><i style={{ background: entry.color }} />{entry.label} <b>{finite(value) ? (entry.format ?? formatCount)(value) : "未计算"}</b></span>;
+      const missing = entry.key.startsWith("forecast-")
+        ? (selected.forecasts[entry.key.slice("forecast-".length) as ComparisonBudgetMode]
+          ? "窗口内未达标（右删失）"
+          : "未计算")
+        : "未计算";
+      return <span key={entry.key}><i style={{ background: entry.color }} />{entry.label} <b>{finite(value) ? (entry.format ?? formatCount)(value) : missing}</b></span>;
     })}</div>
     {footer && <p className="analysis-chart-footer">{footer}</p>}
   </article>;
