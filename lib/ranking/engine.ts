@@ -1298,15 +1298,19 @@ export function chooseNextPair(
       ? Number.POSITIVE_INFINITY
       : Math.max(128, Math.round(options.candidateLimit) * 4);
     const addCandidate = (first: number, second: number) => {
+      if (candidatePairs.size >= candidateCapacity) return;
       const key = pairKey(first, second);
-      if (candidatePairs.has(key) || candidatePairs.size < candidateCapacity) {
-        candidatePairs.set(key, [first, second]);
-      }
+      candidatePairs.set(key, [first, second]);
     };
     const maxRankDistance = Math.max(1, options.maxRankDistance ?? 3);
     const maxRateGap = Math.max(0, options.maxRateGap ?? 10);
-    for (let distance = 1; distance <= Math.min(maxRankDistance, ordered.length - 1); distance += 1) {
-      for (let index = 0; index + distance < ordered.length; index += 1) {
+    for (let distance = 1;
+      distance <= Math.min(maxRankDistance, ordered.length - 1)
+        && candidatePairs.size < candidateCapacity;
+      distance += 1) {
+      for (let index = 0;
+        index + distance < ordered.length && candidatePairs.size < candidateCapacity;
+        index += 1) {
         const first = ordered[index];
         const second = ordered[index + distance];
         if (Math.abs(first.rate - second.rate) <= maxRateGap) {
@@ -1316,7 +1320,9 @@ export function chooseNextPair(
     }
     const mapRates = mappedRates(ordered, distribution);
     const boundaryWindow = Math.max(0, Math.round(options.boundaryWindow ?? 3));
-    for (let cut = 1; cut < ordered.length; cut += 1) {
+    for (let cut = 1;
+      cut < ordered.length && candidatePairs.size < candidateCapacity;
+      cut += 1) {
       if (mapRates.get(ordered[cut - 1].subjectId) === mapRates.get(ordered[cut].subjectId)) continue;
       for (let left = Math.max(0, cut - boundaryWindow); left < cut; left += 1) {
         for (let right = cut; right < Math.min(ordered.length, cut + boundaryWindow); right += 1) {
