@@ -71,36 +71,24 @@ export function analysisSeriesIdentity(
   };
 }
 
-function arrivalOrderValue(entry: Pick<ComparisonRecord, "createdAt">) {
-  const parsed = Date.parse(entry.createdAt);
+/**
+ * The historical order is the time at which the comparison actually
+ * happened. Imported rows carry that time in sourceCreatedAt; their local
+ * createdAt is only the time they were copied into this session and must not
+ * reorder the historical reconstruction.
+ */
+function arrivalOrderValue(entry: Pick<ComparisonRecord, "createdAt" | "sourceCreatedAt">) {
+  const parsed = Date.parse(entry.sourceCreatedAt ?? entry.createdAt);
   return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
 }
 
 export function sortAnalysisRecords(records: ComparisonRecord[]) {
   const active = records.filter((entry) => entry.active && entry.outcome !== "skip");
-  const groups: ComparisonRecord[][] = [];
-  const importedBatches = new Map<string, ComparisonRecord[]>();
-  for (const entry of active) {
-    if (!entry.importBatchId) {
-      groups.push([entry]);
-      continue;
-    }
-    const batch = importedBatches.get(entry.importBatchId);
-    if (batch) batch.push(entry);
-    else importedBatches.set(entry.importBatchId, [entry]);
-  }
-  groups.push(...importedBatches.values());
-  const orderedGroups = groups.sort((left, right) => {
-    const leftFirst = [...left].sort(recordArrivalOrder)[0];
-    const rightFirst = [...right].sort(recordArrivalOrder)[0];
-    return recordArrivalOrder(leftFirst, rightFirst);
-  });
-  return orderedGroups.flatMap((group) => [...group].sort(recordArrivalOrder));
+  return [...active].sort(recordArrivalOrder);
 }
 
 function recordArrivalOrder(left: ComparisonRecord, right: ComparisonRecord) {
   return arrivalOrderValue(left) - arrivalOrderValue(right)
-    || left.createdAt.localeCompare(right.createdAt)
     || left.id.localeCompare(right.id);
 }
 
@@ -221,35 +209,13 @@ export function analysisCheckpoints(itemCount: number, evidenceCount: number, ma
   return [...new Set([...sampled, ...newest])].sort((left, right) => left - right);
 }
 
-/**
- * Historical model states follow when evidence entered this session. Imported
- * batches are atomic state transitions, so no checkpoint may split one.
- */
+/** Historical model states follow the reconstructed actual occurrence order. */
 export function analysisCheckpointsForHistory(
   itemCount: number,
   history: AnalysisHistoryEntry[],
   maximum = 60,
 ) {
-  const requested = analysisCheckpoints(itemCount, history.length, maximum);
-  const ranges = new Map<string, { first: number; last: number }>();
-  history.forEach((entry, index) => {
-    if (!entry.importBatchId) return;
-    const range = ranges.get(entry.importBatchId);
-    if (range) range.last = index;
-    else ranges.set(entry.importBatchId, { first: index, last: index });
-  });
-  if (ranges.size === 0) return requested;
-  const valid = Array.from({ length: history.length + 1 }, (_, checkpoint) => checkpoint)
-    .filter((checkpoint) => [...ranges.values()].every((range) =>
-      checkpoint <= range.first || checkpoint >= range.last + 1));
-  const closestValid = (checkpoint: number) => valid.reduce((closest, candidate) => {
-    const distance = Math.abs(candidate - checkpoint);
-    const closestDistance = Math.abs(closest - checkpoint);
-    return distance < closestDistance || (distance === closestDistance && candidate > closest)
-      ? candidate
-      : closest;
-  }, valid[0] ?? 0);
-  return [...new Set(requested.map(closestValid))].sort((left, right) => left - right);
+  return analysisCheckpoints(itemCount, history.length, maximum);
 }
 
 export function isAnalysisMilestone(itemCount: number, checkpoint: number) {

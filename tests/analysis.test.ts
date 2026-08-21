@@ -129,7 +129,7 @@ describe("session analysis checkpoints and evidence", () => {
       record("skip", 1, 3, "skip", new Date(5 * day).toISOString()),
       record("inactive", 1, 3, "right", new Date(6 * day).toISOString(), { active: false }),
     ];
-    expect(sortAnalysisRecords(records).map((entry) => entry.id)).toEqual(["ordinary-a", "ordinary-b", "imported"]);
+    expect(sortAnalysisRecords(records).map((entry) => entry.id)).toEqual(["imported", "ordinary-a", "ordinary-b"]);
     const history = toAnalysisHistory(records);
     const evidence = analysisEvidenceBreakdown(history);
     expect(evidence.rawEvidence).toBe(3);
@@ -145,7 +145,7 @@ describe("session analysis checkpoints and evidence", () => {
     expect(evidence.coveredItemCount).toBe(3);
   });
 
-  it("never places a historical checkpoint inside an imported batch", () => {
+  it("keeps fixed-step checkpoints even when records came from one import batch", () => {
     const records = Array.from({ length: 120 }, (_, index) => record(
       `record-${String(index).padStart(3, "0")}`,
       1,
@@ -155,18 +155,18 @@ describe("session analysis checkpoints and evidence", () => {
       index >= 10 && index < 110 ? { importBatchId: "atomic-batch" } : {},
     ));
     const history = toAnalysisHistory(records);
-    expect(analysisCheckpointsForHistory(284, history)).toEqual([0, 10, 110, 120]);
+    expect(analysisCheckpointsForHistory(284, history)).toEqual([0, 50, 100, 120]);
   });
 
-  it("keeps an imported batch atomic even when its synthetic row times overlap a later answer", () => {
+  it("orders imported rows by their actual source time, not copy time", () => {
     const records = [
       record("before", 1, 2, "left", new Date(99).toISOString()),
-      record("batch-a", 1, 3, "left", new Date(100).toISOString(), { importBatchId: "batch" }),
-      record("batch-b", 2, 3, "right", new Date(102).toISOString(), { importBatchId: "batch" }),
+      record("batch-a", 1, 3, "left", new Date(0).toISOString(), { importBatchId: "batch", sourceCreatedAt: new Date(100).toISOString() }),
+      record("batch-b", 2, 3, "right", new Date(1).toISOString(), { importBatchId: "batch", sourceCreatedAt: new Date(102).toISOString() }),
       record("after", 1, 2, "right", new Date(101).toISOString()),
     ];
     expect(sortAnalysisRecords(records).map((entry) => entry.id)).toEqual([
-      "before", "batch-a", "batch-b", "after",
+      "before", "batch-a", "after", "batch-b",
     ]);
   });
 });

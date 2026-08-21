@@ -419,6 +419,6 @@ export function SessionAnalysisView({
       <AnalysisChart wide title="三档停止下界" description="快速、标准、精细覆盖事件的 90% Monte Carlo 下界；当前停止模式在图例中标出。" points={points} expectedCheckpoints={expected} selected={selected} series={stoppingSeries} onSelect={selectCheckpoint} fixedDomain={[0, 1]} reference={{ value: STOPPING_PROBABILITY_TARGET, label: "90% 门槛" }} />
       <AnalysisChart wide title="三档动态剩余预测" description="共享模拟路径得到的剩余题量 P50 与 P10–P90；回溯指标只使用已经实际观察到停止的档位，区间未闭合时阴影会断开。" points={points} expectedCheckpoints={expected} selected={selected} series={forecastSeries} onSelect={selectCheckpoint} footer={forecastHitFooter} />
     </div>
-    <p className="analysis-disclaimer">64 路径条件情景区间，未经经验覆盖率校准。历史检查点按判断实际进入当前会话的时间重建，导入批次视为一次原子状态跳变；回溯只比较未被后续导入或手动选题打断的同一策略区段，停止时间只有检查点粒度，尚未停止的档位按右删失处理。同一会话的相邻回溯点共享历史且高度相关，命中比例不是独立样本的覆盖率校准。当前模型结果始终是权威端点。</p>
+    <p className="analysis-disclaimer">64 路径条件情景区间，未经经验覆盖率校准。历史检查点按判断实际发生时间重建：导入判断使用原始 sourceCreatedAt，不受复制到本会话的时间影响；检查点按固定判断步长生成，因此导入批次内部也可能出现重建点。回溯只比较未被后续导入或手动选题打断的同一策略区段，停止时间只有检查点粒度，尚未停止的档位按右删失处理。同一会话的相邻回溯点共享历史且高度相关，命中比例不是独立样本的覆盖率校准。当前模型结果始终是权威端点。</p>
   </section>;
 }
