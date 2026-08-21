@@ -1688,6 +1688,27 @@ export interface ForecastClusterPosteriorUpdate {
   tieLogMeanShift: number;
 }
 
+interface ForecastClusterPosteriorScratch {
+  differences: Float64Array;
+  abilityMeans: Float64Array;
+  gainDifference: Float64Array;
+  gainTieLog: Float64Array;
+  abilityMeanShifts: Float64Array;
+}
+
+function createForecastClusterPosteriorScratch(
+  sampleCount: number,
+  itemCount: number,
+): ForecastClusterPosteriorScratch {
+  return {
+    differences: new Float64Array(sampleCount),
+    abilityMeans: new Float64Array(itemCount),
+    gainDifference: new Float64Array(itemCount),
+    gainTieLog: new Float64Array(itemCount),
+    abilityMeanShifts: new Float64Array(itemCount),
+  };
+}
+
 /**
  * Update a joint theta/log(nu) forecast ensemble after adding one answer to an
  * unordered-pair cluster. The local Laplace target replaces the old cluster
@@ -1701,10 +1722,17 @@ export function updateForecastClusterPosterior(
   higherIndex: number,
   previousOutcomeMass: PairOutcomeMass,
   newOutcome: CanonicalPairOutcome,
+  scratch?: ForecastClusterPosteriorScratch,
 ): ForecastClusterPosteriorUpdate {
   const itemCount = posteriorSamples[0]?.length ?? 0;
-  const abilityMeanShifts = new Float64Array(itemCount);
   const sampleCount = posteriorSamples.length;
+  const buffers = scratch
+    && scratch.differences.length === sampleCount
+    && scratch.abilityMeans.length === itemCount
+    ? scratch
+    : createForecastClusterPosteriorScratch(sampleCount, itemCount);
+  const abilityMeanShifts = buffers.abilityMeanShifts;
+  abilityMeanShifts.fill(0);
   if (sampleCount === 0 || itemCount === 0) {
     return { abilityMeanShifts, tieLogMeanShift: 0 };
   }
@@ -1724,7 +1752,7 @@ export function updateForecastClusterPosterior(
   const nextOutcomeMass = { ...oldOutcomeMass };
   nextOutcomeMass[newOutcome] += 1;
 
-  const differences = new Float64Array(sampleCount);
+  const differences = buffers.differences;
   let differenceMean = 0;
   let tieLogMean = 0;
   for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex += 1) {
@@ -1862,7 +1890,8 @@ export function updateForecastClusterPosterior(
   // Regress every ability on the observed two-dimensional subspace, then
   // enforce the exact contrast and zero-global-shift invariants that finite
   // Monte Carlo covariance estimates only satisfy approximately.
-  const abilityMeans = new Float64Array(itemCount);
+  const abilityMeans = buffers.abilityMeans;
+  abilityMeans.fill(0);
   for (const sample of posteriorSamples) {
     for (let itemIndex = 0; itemIndex < itemCount; itemIndex += 1) {
       abilityMeans[itemIndex] += sample[itemIndex];
@@ -1871,8 +1900,8 @@ export function updateForecastClusterPosterior(
   for (let itemIndex = 0; itemIndex < itemCount; itemIndex += 1) {
     abilityMeans[itemIndex] /= sampleCount;
   }
-  const gainDifference = new Float64Array(itemCount);
-  const gainTieLog = new Float64Array(itemCount);
+  const gainDifference = buffers.gainDifference;
+  const gainTieLog = buffers.gainTieLog;
   const regularized00 = covariance00 + FORECAST_MIN_PAIR_VARIANCE;
   const regularized11 = covariance11 + FORECAST_MIN_PAIR_VARIANCE;
   const determinant = Math.max(
@@ -2281,6 +2310,10 @@ function simulateForecastRollout(
   const random = seededRandom(rolloutSeed);
   let posteriorSamples: Float64Array[] = input.forecastSamples.map((sample) => sample.slice());
   let tieLogSamples: Float64Array = input.forecastTieLogSamples.slice();
+  const posteriorUpdateScratch = createForecastClusterPosteriorScratch(
+    posteriorSamples.length,
+    input.items.length,
+  );
   const indexById = new Map(input.items.map((item, index) => [item.subjectId, index]));
   const history = input.history.slice();
   let acceptedComparisons = input.acceptedComparisons;
@@ -2373,6 +2406,7 @@ function simulateForecastRollout(
       higherIndex,
       previousOutcomeMass,
       canonicalOutcome,
+      posteriorUpdateScratch,
     );
     for (let itemIndex = 0; itemIndex < input.items.length; itemIndex += 1) {
       const shift = posteriorUpdate.abilityMeanShifts[itemIndex];
