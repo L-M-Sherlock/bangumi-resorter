@@ -18,6 +18,7 @@
     "benchmark:comparison:core": "vitest bench benchmarks/comparison.bench.ts --run --config vitest.benchmark.config.ts --maxWorkers=1",
     "benchmark:comparison:browser": "node benchmarks/run-comparison-browser.mjs",
     "benchmark:comparison": "npm run benchmark:comparison:core && npm run benchmark:comparison:browser",
+    "benchmark:forecast:optimization": "vitest run --config vitest.optimization.config.ts --maxWorkers=1",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"
   },
   "dependencies": {
