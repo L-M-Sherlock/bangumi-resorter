@@ -9,6 +9,7 @@ import {
 } from "../lib/analysis";
 import {
   commitBackupImport,
+  commitModelForecast,
   commitSessionBudgetMode,
   commitSessionDistribution,
   commitSessionPriorMode,
@@ -18,6 +19,7 @@ import {
   deleteSession,
   exportProject,
   getSessionBundle,
+  initializeModel,
   persistSessionAnalysisPoint,
   previewBackupImport,
   previewSnapshotDeletion,
@@ -25,8 +27,9 @@ import {
   saveSnapshot,
 } from "../lib/db";
 import { validateBackupPayload } from "../lib/export";
+import { computeRankingWithoutForecast } from "../lib/ranking/compute";
 import { sessionBudgetMode, sessionPriorMode } from "../lib/ranking/strategy";
-import type { CollectionItem, ModelState } from "../lib/types";
+import type { CollectionItem, ModelState, StoppingForecast } from "../lib/types";
 
 const distribution = { preset: "uniform" as const, levelCount: 10, weights: Array(10).fill(10) };
 
@@ -75,6 +78,68 @@ beforeEach(async () => {
 });
 
 describe("analysis cache database lifecycle", () => {
+  it("merges only a same-version background forecast and rejects stale results", async () => {
+    const { session, bundle } = await fixture();
+    const quick = computeRankingWithoutForecast({
+      type: "INIT_SESSION",
+      requestId: "quick-model",
+      sessionId: session.id,
+      version: session.modelVersion,
+      randomSeed: session.randomSeed,
+      items: bundle.items.map((entry) => ({ subjectId: entry.subjectId, rate: entry.rate })),
+      history: [],
+      distribution: session.distribution,
+      budgetMode: "standard",
+      priorMode: "weak",
+    }).model;
+    const forecast: StoppingForecast = {
+      method: "posterior-contraction-mc-v12",
+      status: "forecast",
+      rolloutCount: 64,
+      lowerAdditional: 16,
+      medianAdditional: 32,
+      upperAdditional: 48,
+      nextCheckpoint: 16,
+      probabilityWithin20: 0.25,
+      projectionHorizon: 64,
+      probabilityWithinProjection: 1,
+      within20Successes: 16,
+      withinProjectionSuccesses: 64,
+    };
+    const completed: ModelState = {
+      ...quick,
+      diagnostics: {
+        ...quick.diagnostics!,
+        forecast,
+        forecasts: { quick: forecast, standard: forecast, thorough: forecast },
+      },
+    };
+    await initializeModel(session.id, quick);
+    const before = await db.models.get(session.id);
+
+    const merged = await commitModelForecast(session.id, session.modelVersion, completed);
+    const currentSession = await db.sessions.get(session.id);
+    expect(merged?.abilities).toEqual(before?.abilities);
+    expect(merged?.uncertainty).toEqual(before?.uncertainty);
+    expect(merged?.acceptedComparisons).toBe(before?.acceptedComparisons);
+    expect(merged?.diagnostics?.stoppingChecks).toEqual(before?.diagnostics?.stoppingChecks);
+    expect(merged?.diagnostics?.forecasts).toEqual(completed.diagnostics?.forecasts);
+    expect(currentSession?.modelVersion).toBe(session.modelVersion);
+
+    expect(await commitModelForecast(session.id, session.modelVersion, {
+      ...completed,
+      abilities: { 1: 999 },
+    })).toBeUndefined();
+    expect((await db.models.get(session.id))?.abilities).toEqual(before?.abilities);
+
+    await commitSessionBudgetMode(session.id, session.modelVersion, "thorough", {
+      ...quick,
+      version: session.modelVersion + 1,
+    });
+    expect(await commitModelForecast(session.id, session.modelVersion, completed)).toBeUndefined();
+    expect((await db.models.get(session.id))?.version).toBe(session.modelVersion + 1);
+  });
+
   it("upgrades an existing v7 database without touching user rows", async () => {
     const name = `analysis-v7-${crypto.randomUUID()}`;
     const legacy = new Dexie(name);
@@ -106,8 +171,14 @@ describe("analysis cache database lifecycle", () => {
     const { session, bundle } = await fixture();
     const context = sessionAnalysisContext(bundle.session, bundle.items, bundle.history, "weak", "standard");
     const point = analysisPointFromModel(context.history, model(session.id, 0));
+    await db.analysisSeries.put({
+      ...reconcileAnalysisSeries(undefined, context.identity, context.history, context.inputDigest),
+      id: "obsolete-analysis-algorithm",
+      algorithmVersion: "obsolete",
+    });
     await persistSessionAnalysisPoint(context, point, true);
     expect(await db.analysisSeries.count()).toBe(1);
+    expect(await db.analysisSeries.get("obsolete-analysis-algorithm")).toBeUndefined();
 
     const exported = await exportProject(session.profileId) as unknown as Record<string, unknown>;
     expect(exported.analysisSeries).toBeUndefined();

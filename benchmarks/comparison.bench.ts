@@ -2,6 +2,7 @@ import { bench, describe } from "vitest";
 import {
   basePosteriorSampleCount,
   computeRanking,
+  computeRankingWithoutForecast,
   posteriorRandomSeed,
   prepareRanking,
 } from "../lib/ranking/compute";
@@ -149,7 +150,11 @@ describe("one comparison · 284 items · 1,212 existing judgments", () => {
     );
   }, MEDIUM);
 
-  bench("10 full ranking calculation · sequential 64-path fallback", () => {
+  bench("10 quick ranking calculation · posterior + next pair, no rollout", () => {
+    sink = computeRankingWithoutForecast(request);
+  }, MEDIUM);
+
+  bench("11 full ranking calculation · sequential 64-path fallback", () => {
     sink = computeRanking(request);
   }, ONE_SHOT);
 });

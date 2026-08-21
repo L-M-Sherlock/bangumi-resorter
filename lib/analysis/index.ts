@@ -71,21 +71,37 @@ export function analysisSeriesIdentity(
   };
 }
 
-function sourceOrder(entry: Pick<ComparisonRecord, "sourceCreatedAt" | "createdAt" | "id">) {
-  return entry.sourceCreatedAt ?? entry.createdAt;
-}
-
-function sourceOrderValue(entry: Pick<ComparisonRecord, "sourceCreatedAt" | "createdAt" | "id">) {
-  const parsed = Date.parse(sourceOrder(entry));
+function arrivalOrderValue(entry: Pick<ComparisonRecord, "createdAt">) {
+  const parsed = Date.parse(entry.createdAt);
   return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
 }
 
 export function sortAnalysisRecords(records: ComparisonRecord[]) {
-  return records
-    .filter((entry) => entry.active && entry.outcome !== "skip")
-    .sort((left, right) => sourceOrderValue(left) - sourceOrderValue(right)
-      || sourceOrder(left).localeCompare(sourceOrder(right))
-      || left.id.localeCompare(right.id));
+  const active = records.filter((entry) => entry.active && entry.outcome !== "skip");
+  const groups: ComparisonRecord[][] = [];
+  const importedBatches = new Map<string, ComparisonRecord[]>();
+  for (const entry of active) {
+    if (!entry.importBatchId) {
+      groups.push([entry]);
+      continue;
+    }
+    const batch = importedBatches.get(entry.importBatchId);
+    if (batch) batch.push(entry);
+    else importedBatches.set(entry.importBatchId, [entry]);
+  }
+  groups.push(...importedBatches.values());
+  const orderedGroups = groups.sort((left, right) => {
+    const leftFirst = [...left].sort(recordArrivalOrder)[0];
+    const rightFirst = [...right].sort(recordArrivalOrder)[0];
+    return recordArrivalOrder(leftFirst, rightFirst);
+  });
+  return orderedGroups.flatMap((group) => [...group].sort(recordArrivalOrder));
+}
+
+function recordArrivalOrder(left: ComparisonRecord, right: ComparisonRecord) {
+  return arrivalOrderValue(left) - arrivalOrderValue(right)
+    || left.createdAt.localeCompare(right.createdAt)
+    || left.id.localeCompare(right.id);
 }
 
 export function toAnalysisHistory(records: ComparisonRecord[]): AnalysisHistoryEntry[] {
@@ -205,6 +221,37 @@ export function analysisCheckpoints(itemCount: number, evidenceCount: number, ma
   return [...new Set([...sampled, ...newest])].sort((left, right) => left - right);
 }
 
+/**
+ * Historical model states follow when evidence entered this session. Imported
+ * batches are atomic state transitions, so no checkpoint may split one.
+ */
+export function analysisCheckpointsForHistory(
+  itemCount: number,
+  history: AnalysisHistoryEntry[],
+  maximum = 60,
+) {
+  const requested = analysisCheckpoints(itemCount, history.length, maximum);
+  const ranges = new Map<string, { first: number; last: number }>();
+  history.forEach((entry, index) => {
+    if (!entry.importBatchId) return;
+    const range = ranges.get(entry.importBatchId);
+    if (range) range.last = index;
+    else ranges.set(entry.importBatchId, { first: index, last: index });
+  });
+  if (ranges.size === 0) return requested;
+  const valid = Array.from({ length: history.length + 1 }, (_, checkpoint) => checkpoint)
+    .filter((checkpoint) => [...ranges.values()].every((range) =>
+      checkpoint <= range.first || checkpoint >= range.last + 1));
+  const closestValid = (checkpoint: number) => valid.reduce((closest, candidate) => {
+    const distance = Math.abs(candidate - checkpoint);
+    const closestDistance = Math.abs(closest - checkpoint);
+    return distance < closestDistance || (distance === closestDistance && candidate > closest)
+      ? candidate
+      : closest;
+  }, valid[0] ?? 0);
+  return [...new Set(requested.map(closestValid))].sort((left, right) => left - right);
+}
+
 export function isAnalysisMilestone(itemCount: number, checkpoint: number) {
   return checkpoint === 0 || (checkpoint > 0 && checkpoint % cleanCheckpointStep(itemCount) === 0);
 }
@@ -233,6 +280,7 @@ export interface AnalysisEvidenceBreakdown {
   repeatedPairLoss: number;
   calibrationRaw: number;
   calibrationEffective: number;
+  manualRaw: number;
   importedRaw: number;
   importedEffective: number;
 }
@@ -247,6 +295,7 @@ export function analysisEvidenceBreakdown(history: AnalysisHistoryEntry[]): Anal
   let agedEvidence = 0;
   let calibrationRaw = 0;
   let calibrationEffective = 0;
+  let manualRaw = 0;
   let importedRaw = 0;
   let importedEffective = 0;
   for (const entry of history) {
@@ -258,6 +307,7 @@ export function analysisEvidenceBreakdown(history: AnalysisHistoryEntry[]): Anal
       calibrationRaw += 1;
       calibrationEffective += contribution;
     }
+    if (entry.queryKind === "manual") manualRaw += 1;
     if (entry.imported) {
       importedRaw += 1;
       importedEffective += contribution;
@@ -273,6 +323,7 @@ export function analysisEvidenceBreakdown(history: AnalysisHistoryEntry[]): Anal
     repeatedPairLoss: Math.max(0, agedEvidence - evidence.evidenceCount),
     calibrationRaw,
     calibrationEffective,
+    manualRaw,
     importedRaw,
     importedEffective,
   };
@@ -353,7 +404,7 @@ export function reconcileAnalysisSeries(
     && series.algorithmVersion === identity.algorithmVersion
     && series.distributionSignature === identity.distributionSignature
     && series.itemCount === identity.itemCount;
-  const expected = new Set(analysisCheckpoints(identity.itemCount, history.length));
+  const expected = new Set(analysisCheckpointsForHistory(identity.itemCount, history));
   const milestones = compatible ? series.milestones.filter((point) =>
     expected.has(point.checkpoint)
     && point.checkpoint <= history.length
@@ -379,11 +430,11 @@ export function mergeAnalysisPoint(
 ) {
   if (point.checkpoint > history.length
     || point.prefixDigest !== analysisPrefixDigest(history, point.checkpoint)) return series;
-  const mergedMilestones = isAnalysisMilestone(series.itemCount, point.checkpoint)
+  const expected = new Set(analysisCheckpointsForHistory(series.itemCount, history));
+  const mergedMilestones = expected.has(point.checkpoint)
     ? [...series.milestones.filter((entry) => entry.checkpoint !== point.checkpoint), point]
       .sort((left, right) => left.checkpoint - right.checkpoint)
     : series.milestones;
-  const expected = new Set(analysisCheckpoints(series.itemCount, history.length));
   const milestones = mergedMilestones.filter((entry) => expected.has(entry.checkpoint));
   return {
     ...series,
@@ -398,4 +449,81 @@ export function analysisSeriesPoints(series: SessionAnalysisSeries | undefined, 
   for (const point of series?.milestones ?? []) byCheckpoint.set(point.checkpoint, point);
   byCheckpoint.set(live.checkpoint, live);
   return [...byCheckpoint.values()].sort((left, right) => left.checkpoint - right.checkpoint);
+}
+
+export interface AnalysisForecastBacktest {
+  mode: ComparisonBudgetMode;
+  status: "observed" | "right-censored";
+  observedStopCheckpoint?: number;
+  forecastCount: number;
+  boundedIntervalCount: number;
+  boundedIntervalHits: number;
+  interruptedForecastCount: number;
+  empiricalIntervalCoverage?: number;
+  medianAbsoluteError?: number;
+  medianBias?: number;
+}
+
+function median(values: number[]) {
+  if (values.length === 0) return undefined;
+  const ordered = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(ordered.length / 2);
+  return ordered.length % 2
+    ? ordered[middle]
+    : (ordered[middle - 1] + ordered[middle]) / 2;
+}
+
+/** Retrospective, checkpoint-resolution evaluation; incomplete modes are right-censored. */
+export function analysisForecastBacktest(
+  points: SessionAnalysisPoint[],
+  mode: ComparisonBudgetMode,
+): AnalysisForecastBacktest {
+  const ordered = [...points].sort((left, right) => left.checkpoint - right.checkpoint);
+  const stopped = ordered.find((point) => point.stoppingChecks[mode]?.ready);
+  const endpoint = stopped ?? ordered.at(-1);
+  const comparableForecast = (point: SessionAnalysisPoint) => point.importedRaw === endpoint?.importedRaw
+    && (point.manualRaw ?? 0) === (endpoint?.manualRaw ?? 0);
+  const candidateForecasts = ordered.filter((point) => point.checkpoint < (stopped?.checkpoint ?? Number.POSITIVE_INFINITY)
+    && point.forecasts[mode]?.medianAdditional !== undefined);
+  const interruptedForecastCount = candidateForecasts.filter((point) => !comparableForecast(point)).length;
+  if (!stopped) {
+    return {
+      mode,
+      status: "right-censored",
+      forecastCount: candidateForecasts.length - interruptedForecastCount,
+      boundedIntervalCount: 0,
+      boundedIntervalHits: 0,
+      interruptedForecastCount,
+    };
+  }
+  const errors: number[] = [];
+  let boundedIntervalCount = 0;
+  let boundedIntervalHits = 0;
+  for (const point of ordered) {
+    if (point.checkpoint >= stopped.checkpoint) continue;
+    const forecast = point.forecasts[mode];
+    if (forecast?.medianAdditional === undefined) continue;
+    if (!comparableForecast(point)) continue;
+    const actualAdditional = stopped.checkpoint - point.checkpoint;
+    errors.push(forecast.medianAdditional - actualAdditional);
+    if (forecast.lowerAdditional === undefined || forecast.upperAdditional === undefined) continue;
+    boundedIntervalCount += 1;
+    if (forecast.lowerAdditional <= actualAdditional && actualAdditional <= forecast.upperAdditional) {
+      boundedIntervalHits += 1;
+    }
+  }
+  return {
+    mode,
+    status: "observed",
+    observedStopCheckpoint: stopped.checkpoint,
+    forecastCount: errors.length,
+    boundedIntervalCount,
+    boundedIntervalHits,
+    interruptedForecastCount,
+    empiricalIntervalCoverage: boundedIntervalCount > 0
+      ? boundedIntervalHits / boundedIntervalCount
+      : undefined,
+    medianAbsoluteError: median(errors.map(Math.abs)),
+    medianBias: median(errors),
+  };
 }

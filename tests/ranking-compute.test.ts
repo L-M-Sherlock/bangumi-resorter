@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeRanking, needsPosteriorRefinement, posteriorRandomSeed, retargetStoppingMode } from "../lib/ranking/compute";
+import { computeRanking, computeRankingWithoutForecast, needsPosteriorRefinement, posteriorRandomSeed, retargetStoppingMode } from "../lib/ranking/compute";
 import type { RankingRequest } from "../lib/ranking/protocol";
 import { rankingTuning } from "../lib/ranking/strategy";
 import type { ComparisonBudgetMode, ModelState, PriorMode, RankingHistoryInput, StoppingForecast } from "../lib/types";
@@ -115,5 +115,18 @@ describe("ranking computation", () => {
     expect(retargeted.diagnostics?.forecast).toEqual(quickDiagnostics.forecasts?.thorough);
     expect(retargeted.diagnostics?.ready).toBe(checks[2].ready);
     expect(retargeted.version).toBe(99);
+  });
+
+  it("returns the authoritative posterior and next pair before background forecasts finish", () => {
+    const input = request("standard", 1);
+    const quick = computeRankingWithoutForecast(input);
+    const complete = computeRanking(input);
+
+    expect(quick.model.abilities).toEqual(complete.model.abilities);
+    expect(quick.model.uncertainty).toEqual(complete.model.uncertainty);
+    expect(quick.model.diagnostics?.stoppingChecks).toEqual(complete.model.diagnostics?.stoppingChecks);
+    expect(quick.model.diagnostics?.forecast).toBeUndefined();
+    expect(quick.model.diagnostics?.forecasts).toBeUndefined();
+    expect(quick.nextPair).toEqual(complete.nextPair);
   });
 });

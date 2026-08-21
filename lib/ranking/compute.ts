@@ -180,8 +180,24 @@ export function finalizeRanking(
   prepared: PreparedRanking,
   simulations: StoppingForecastSimulation[],
 ): RankingSuccess {
-  const { request, active, activeTuning } = prepared;
   if (simulations.length !== 1) throw new Error("停止预测结果数量不匹配。");
+  const diagnostics = prepareActiveDiagnostics(prepared);
+  const activeMode = prepared.request.budgetMode ?? "standard";
+  diagnostics.forecasts = simulations[0].forecasts;
+  diagnostics.forecast = simulations[0].forecasts[activeMode];
+  return rankingSuccessFromPrepared(prepared);
+}
+
+/** Return the authoritative posterior and next pair without blocking on future rollouts. */
+export function finalizeRankingWithoutForecast(prepared: PreparedRanking): RankingSuccess {
+  const diagnostics = prepareActiveDiagnostics(prepared);
+  diagnostics.forecasts = undefined;
+  diagnostics.forecast = undefined;
+  return rankingSuccessFromPrepared(prepared);
+}
+
+function prepareActiveDiagnostics(prepared: PreparedRanking) {
+  const { request, active } = prepared;
   const activeMode = request.budgetMode ?? "standard";
   const stoppingChecks = active.diagnostics.stoppingChecks;
   if (!stoppingChecks || !STOPPING_MODE_ORDER.every((mode) =>
@@ -195,8 +211,12 @@ export function finalizeRanking(
   diagnostics.ready = activeCheck.ready;
   diagnostics.decisionRiskRatio = (1 - activeCheck.low)
     / Math.max(1e-12, 1 - (activeCheck.probabilityTarget ?? STOPPING_PROBABILITY_TARGET));
-  diagnostics.forecasts = simulations[0].forecasts;
-  diagnostics.forecast = simulations[0].forecasts[activeMode];
+  return diagnostics;
+}
+
+function rankingSuccessFromPrepared(prepared: PreparedRanking): RankingSuccess {
+  const { request, active, activeTuning } = prepared;
+  const diagnostics = active.diagnostics;
   const model = toModelState(
     request.sessionId,
     request.version,
@@ -237,4 +257,8 @@ export function computeRanking(request: RankingRequest): RankingSuccess {
     options,
   )];
   return finalizeRanking(prepared, simulations);
+}
+
+export function computeRankingWithoutForecast(request: RankingRequest): RankingSuccess {
+  return finalizeRankingWithoutForecast(prepareRanking(request));
 }

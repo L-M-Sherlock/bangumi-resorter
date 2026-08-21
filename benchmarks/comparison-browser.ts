@@ -1,3 +1,4 @@
+import { RankingForecastWorkerClient } from "../lib/ranking/forecast-client";
 import { RankingWorkerClient } from "../lib/ranking/worker-client";
 import { forecastWorkerCount } from "../lib/ranking/parallel-forecast";
 import type { ModelState } from "../lib/types";
@@ -15,9 +16,17 @@ interface BrowserBenchmarkResult {
     existingHistory: number;
     historyWithNewAnswer: number;
   };
-  warmupMs?: number;
-  samplesMs?: number[];
-  medianMs?: number;
+  timing?: {
+    quickWarmupMs: number;
+    backgroundWarmupMs: number;
+    answerToForecastWarmupMs: number;
+    quickSamplesMs: number[];
+    backgroundSamplesMs: number[];
+    answerToForecastSamplesMs: number[];
+    quickMedianMs: number;
+    backgroundMedianMs: number;
+    answerToForecastMedianMs: number;
+  };
   diagnostics?: {
     posteriorSamples: number;
     effectiveEvidence: number;
@@ -44,7 +53,7 @@ function median(values: number[]) {
 }
 
 async function timedRun(
-  client: RankingWorkerClient,
+  client: Pick<RankingWorkerClient, "run">,
   request: Parameters<RankingWorkerClient["run"]>[0],
 ) {
   const startedAt = performance.now();
@@ -61,24 +70,34 @@ async function run() {
   const iterations = Number.isFinite(requestedIterations)
     ? Math.min(10, Math.max(1, Math.round(requestedIterations)))
     : 3;
-  const client = new RankingWorkerClient();
+  const quickClient = new RankingWorkerClient();
+  const forecastClient = new RankingForecastWorkerClient();
   try {
-    const warmup = await timedRun(client, request);
-    let previousModel: ModelState | undefined = warmup.result.model;
-    const samplesMs: number[] = [];
-    let lastResult = warmup.result;
+    const quickWarmup = await timedRun(quickClient, request);
+    const backgroundWarmup = await timedRun(forecastClient, request);
+    let previousModel: ModelState | undefined = backgroundWarmup.result.model;
+    const quickSamplesMs: number[] = [];
+    const backgroundSamplesMs: number[] = [];
+    const answerToForecastSamplesMs: number[] = [];
+    let lastQuickResult = quickWarmup.result;
+    let lastForecastResult = backgroundWarmup.result;
     for (let index = 0; index < iterations; index += 1) {
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-      const sample = await timedRun(client, {
+      const sampleRequest = {
         ...request,
         version: request.version + index + 1,
         previousModel,
-      });
-      samplesMs.push(sample.elapsed);
-      previousModel = sample.result.model;
-      lastResult = sample.result;
+      };
+      const quickSample = await timedRun(quickClient, sampleRequest);
+      const backgroundSample = await timedRun(forecastClient, sampleRequest);
+      quickSamplesMs.push(quickSample.elapsed);
+      backgroundSamplesMs.push(backgroundSample.elapsed);
+      answerToForecastSamplesMs.push(quickSample.elapsed + backgroundSample.elapsed);
+      previousModel = backgroundSample.result.model;
+      lastQuickResult = quickSample.result;
+      lastForecastResult = backgroundSample.result;
     }
-    const forecast = lastResult.model.diagnostics?.forecast;
+    const forecast = lastForecastResult.model.diagnostics?.forecast;
     window.comparisonBenchmarkResult = {
       status: "complete",
       environment: {
@@ -96,13 +115,21 @@ async function run() {
         existingHistory: scenario.existingHistory.length,
         historyWithNewAnswer: request.history.length,
       },
-      warmupMs: warmup.elapsed,
-      samplesMs,
-      medianMs: median(samplesMs),
+      timing: {
+        quickWarmupMs: quickWarmup.elapsed,
+        backgroundWarmupMs: backgroundWarmup.elapsed,
+        answerToForecastWarmupMs: quickWarmup.elapsed + backgroundWarmup.elapsed,
+        quickSamplesMs,
+        backgroundSamplesMs,
+        answerToForecastSamplesMs,
+        quickMedianMs: median(quickSamplesMs),
+        backgroundMedianMs: median(backgroundSamplesMs),
+        answerToForecastMedianMs: median(answerToForecastSamplesMs),
+      },
       diagnostics: {
-        posteriorSamples: lastResult.model.diagnostics?.sampleCount ?? 0,
-        effectiveEvidence: lastResult.model.effectiveComparisons ?? 0,
-        rawEvidence: lastResult.model.acceptedComparisons,
+        posteriorSamples: lastQuickResult.model.diagnostics?.sampleCount ?? 0,
+        effectiveEvidence: lastQuickResult.model.effectiveComparisons ?? 0,
+        rawEvidence: lastQuickResult.model.acceptedComparisons,
         forecastRollouts: forecast?.rolloutCount ?? 0,
         forecastHorizon: forecast?.projectionHorizon ?? 0,
         forecastStatus: forecast?.status ?? "missing",
@@ -116,7 +143,8 @@ async function run() {
     };
     if (output) output.textContent = window.comparisonBenchmarkResult.error ?? "Unknown error";
   } finally {
-    client.terminate();
+    quickClient.terminate();
+    forecastClient.terminate();
   }
 }
 

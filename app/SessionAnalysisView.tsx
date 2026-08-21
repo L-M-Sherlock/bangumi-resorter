@@ -8,7 +8,8 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import {
-  analysisCheckpoints,
+  analysisCheckpointsForHistory,
+  analysisForecastBacktest,
   analysisPointFromModel,
   analysisSeriesPoints,
   sessionAnalysisContext,
@@ -310,7 +311,7 @@ export function SessionAnalysisView({
 
   const compatibleSeries = series?.id === context.identity.id ? series : undefined;
   const points = useMemo(() => analysisSeriesPoints(compatibleSeries, live), [compatibleSeries, live]);
-  const expected = useMemo(() => analysisCheckpoints(items.length, context.history.length), [items.length, context.history.length]);
+  const expected = useMemo(() => analysisCheckpointsForHistory(items.length, context.history), [items.length, context.history]);
   const selected = points.find((point) => point.checkpoint === selectedCheckpoint) ?? live;
   const selectedIndex = Math.max(0, points.findIndex((point) => point.checkpoint === selected.checkpoint));
   const presentMilestones = new Set(compatibleSeries?.milestones.map((point) => point.checkpoint) ?? []);
@@ -322,11 +323,29 @@ export function SessionAnalysisView({
     const forecast = selected.forecasts[mode];
     return forecast?.status === "ready" && forecast.lowerAdditional === 0 && forecast.upperAdditional === 0;
   });
-  const forecastHitFooter = STOPPING_MODE_ORDER.map((mode) => {
+  const forecastBacktests = STOPPING_MODE_ORDER.map((mode) => analysisForecastBacktest(points, mode));
+  const forecastHitFooter = STOPPING_MODE_ORDER.map((mode, index) => {
     const forecast = selected.forecasts[mode];
-    if (!forecast) return `${BUDGET_MODE_COPY[mode].label}：未计算`;
+    const backtest = forecastBacktests[index];
+    if (!forecast) return `${BUDGET_MODE_COPY[mode].label}：当前点未计算`;
     const successes = forecast.withinProjectionSuccesses;
-    return `${BUDGET_MODE_COPY[mode].label}：${successes === undefined ? formatPercent(forecast.probabilityWithinProjection) : `${successes}/${forecast.rolloutCount}`} 窗口命中`;
+    const simulated = `${successes === undefined ? formatPercent(forecast.probabilityWithinProjection) : `${successes}/${forecast.rolloutCount}`} 条模拟路径在窗口内达标`;
+    const interrupted = backtest.interruptedForecastCount > 0
+      ? `；另有 ${backtest.interruptedForecastCount} 点被后续导入或手动判断截断`
+      : "";
+    if (backtest.status === "right-censored") {
+      return `${BUDGET_MODE_COPY[mode].label}：${simulated}；尚未观察到实际停止（右删失）${interrupted}`;
+    }
+    if (backtest.forecastCount === 0) {
+      return `${BUDGET_MODE_COPY[mode].label}：${simulated}；第 ${backtest.observedStopCheckpoint} 条检查点首次观察到停止，之前无可检验预测${interrupted}`;
+    }
+    const interval = backtest.boundedIntervalCount > 0
+      ? `P10–P90 ${backtest.boundedIntervalHits}/${backtest.boundedIntervalCount}`
+      : "P10–P90 未闭合";
+    const bias = backtest.medianBias === undefined
+      ? "—"
+      : `${backtest.medianBias > 0 ? "+" : ""}${formatCount(backtest.medianBias)}`;
+    return `${BUDGET_MODE_COPY[mode].label}：${simulated}；回溯 ${backtest.forecastCount} 点，${interval}，P50 中位绝对误差 ${backtest.medianAbsoluteError === undefined ? "—" : formatCount(backtest.medianAbsoluteError)}，中位偏差 ${bias}${interrupted}`;
   }).join(" · ");
   const evidenceBreakdownFooter = `时间折损 ${formatCount(selected.sourceAgeLoss)} · 同作品对相关性折损 ${formatCount(selected.repeatedPairLoss)} · 校准复问 ${selected.calibrationRaw}→${formatCount(selected.calibrationEffective)} · 导入判断 ${selected.importedRaw}→${formatCount(selected.importedEffective)}`;
 
@@ -398,8 +417,8 @@ export function SessionAnalysisView({
       <AnalysisChart title="后验不确定性与平局强度" description="平均后验标准差与模型拟合的 Davidson 共享平局参数。" points={points} expectedCheckpoints={expected} selected={selected} series={uncertaintySeries} onSelect={selectCheckpoint} />
       <AnalysisChart title="跨两档作品数" description="作品跨越两档或以上的后验期望，以及中央 80% 后验区间。" points={points} expectedCheckpoints={expected} selected={selected} series={crossSeries} onSelect={selectCheckpoint} />
       <AnalysisChart wide title="三档停止下界" description="快速、标准、精细覆盖事件的 90% Monte Carlo 下界；当前停止模式在图例中标出。" points={points} expectedCheckpoints={expected} selected={selected} series={stoppingSeries} onSelect={selectCheckpoint} fixedDomain={[0, 1]} reference={{ value: STOPPING_PROBABILITY_TARGET, label: "90% 门槛" }} />
-      <AnalysisChart wide title="三档动态剩余预测" description="共享模拟路径得到的剩余题量 P50 与 P10–P90；区间未闭合时阴影会断开。" points={points} expectedCheckpoints={expected} selected={selected} series={forecastSeries} onSelect={selectCheckpoint} footer={forecastHitFooter} />
+      <AnalysisChart wide title="三档动态剩余预测" description="共享模拟路径得到的剩余题量 P50 与 P10–P90；回溯指标只使用已经实际观察到停止的档位，区间未闭合时阴影会断开。" points={points} expectedCheckpoints={expected} selected={selected} series={forecastSeries} onSelect={selectCheckpoint} footer={forecastHitFooter} />
     </div>
-    <p className="analysis-disclaimer">64 路径条件情景区间，未经经验覆盖率校准。历史检查点是使用当前生产配置重建的派生缓存；当前模型结果始终是权威端点。</p>
+    <p className="analysis-disclaimer">64 路径条件情景区间，未经经验覆盖率校准。历史检查点按判断实际进入当前会话的时间重建，导入批次视为一次原子状态跳变；回溯只比较未被后续导入或手动选题打断的同一策略区段，停止时间只有检查点粒度，尚未停止的档位按右删失处理。同一会话的相邻回溯点共享历史且高度相关，命中比例不是独立样本的覆盖率校准。当前模型结果始终是权威端点。</p>
   </section>;
 }

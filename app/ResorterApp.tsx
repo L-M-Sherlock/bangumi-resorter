@@ -22,6 +22,7 @@ import {
   commitBackupImport,
   commitComparisonImport,
   commitComparisonDeletion,
+  commitModelForecast,
   commitSnapshotDeletion,
   commitSessionBudgetMode,
   commitSessionPriorMode,
@@ -69,6 +70,8 @@ import { LOCAL_PROJECT_MARKER_KEY, PRINCIPLES_RETURN_PENDING_KEY, PRINCIPLES_RET
 import type { TermKey } from "@/lib/terminology";
 import { buildRankedItems } from "@/lib/ranking/engine";
 import { retargetStoppingMode } from "@/lib/ranking/compute";
+import { RankingForecastWorkerClient } from "@/lib/ranking/forecast-client";
+import type { RankingRequest } from "@/lib/ranking/protocol";
 import {
   BUDGET_MODE_COPY,
   PRIOR_MODE_COPY,
@@ -133,6 +136,8 @@ interface CompareState {
   model: ModelState;
   nextPair?: NextPair;
 }
+
+type ForecastRequest = Omit<RankingRequest, "requestId">;
 
 const subjectEntries = Object.entries(SUBJECT_TYPES).map(([id, label]) => [Number(id) as SubjectType, label] as const);
 const collectionEntries = Object.entries(COLLECTION_TYPES).map(([id, label]) => [Number(id) as CollectionType, label] as const);
@@ -1858,7 +1863,7 @@ function ComparisonManager({ items, history, session, sessions, busy, onAdd, onD
 
   return <section className="panel comparison-manager" aria-labelledby="comparison-manager-title">
     <div className="panel-title"><div><span className="eyebrow">判断管理</span><h2 id="comparison-manager-title">手动添加或删除比较</h2></div><span className="record-count">总计 {currentRecords.length} 条 · 本地新增 {localCount} · 导入 {importedCount}</span></div>
-    <p>搜索并选择当前会话中的两个条目；可按中文标题、原名、当前排名或 Bangumi ID 查找。保存后，排名、可信度与<Term term="dynamic-forecast">动态剩余预测</Term>都会立即重算。</p>
+    <p>搜索并选择当前会话中的两个条目；可按中文标题、原名、当前排名或 Bangumi ID 查找。保存后，排名与可信度会立即重算，<Term term="dynamic-forecast">动态剩余预测</Term>随后在后台更新。</p>
     <form className="manual-comparison-form" onSubmit={(event) => { event.preventDefault(); if (leftSubjectId !== rightSubjectId) void onAdd(leftSubjectId, rightSubjectId, outcome); }}>
       <SearchableItemPicker id="manual-left-item" label="左侧条目" items={items} value={leftSubjectId} excludeSubjectId={rightSubjectId} disabled={busy} onChange={setLeftSubjectId} />
       <div className="manual-comparison-field"><label htmlFor="manual-comparison-outcome"><span>判断</span></label><ThemedSelect id="manual-comparison-outcome" value={outcome} options={MANUAL_OUTCOME_OPTIONS} ariaLabel="手动比较结果" menuLabel="手动比较结果选项" disabled={busy} onChange={setOutcome} /></div>
@@ -2194,8 +2199,12 @@ export default function ResorterApp() {
   const [analysisTask, setAnalysisTask] = useState<AnalysisTaskState>({ status: "idle", completed: 0, total: 0 });
   const [analysisCacheRevision, setAnalysisCacheRevision] = useState(0);
   const [analysisStorageWarning, setAnalysisStorageWarning] = useState("");
+  const [forecastWarning, setForecastWarning] = useState("");
   const workerRef = useRef<RankingWorkerClient | null>(null);
+  const forecastWorkerRef = useRef<RankingForecastWorkerClient | null>(null);
   const analysisWorkerRef = useRef<AnalysisWorkerClient | null>(null);
+  const forecastGenerationRef = useRef(0);
+  const compareRef = useRef<CompareState | undefined>(undefined);
 
   const navigate = useCallback((target: View) => {
     setGlobalError("");
@@ -2213,21 +2222,30 @@ export default function ResorterApp() {
       : current);
   }, []);
 
+  const cancelForecast = useCallback((message = "动态剩余预测已取消。") => {
+    forecastGenerationRef.current += 1;
+    forecastWorkerRef.current?.cancel(message);
+    setForecastWarning("");
+  }, []);
+
   const loadSnapshot = useCallback(async (nextSnapshot: Snapshot, target: View = "library") => {
     cancelAnalysisTask("项目或收藏快照已经切换，历史分析已取消。");
+    cancelForecast("项目或收藏快照已经切换，动态剩余预测已取消。");
     const [nextItems, nextSessions, nextProfile, nextProjects, nextHistory] = await Promise.all([
       getSnapshotItems(nextSnapshot.id), listSessions(nextSnapshot.profileId), db.profiles.get(nextSnapshot.profileId),
       listLocalProjects(), listBackupImportHistory(nextSnapshot.profileId),
     ]);
     await setActiveSnapshot(nextSnapshot.id);
     try { window.localStorage.setItem(LOCAL_PROJECT_MARKER_KEY, "1"); } catch { /* IndexedDB remains the source of truth. */ }
+    compareRef.current = undefined;
     setSnapshot(nextSnapshot); setItems(nextItems); setSessions(nextSessions); setProfile(nextProfile); setProjects(nextProjects); setImportHistory(nextHistory); setCompare(undefined); setAnalysisStorageWarning(""); setStoreStatus(await storageStatus()); navigate(target);
-  }, [cancelAnalysisTask, navigate]);
+  }, [cancelAnalysisTask, cancelForecast, navigate]);
 
   useEffect(() => {
     let active = true;
     let readyFrame = 0;
     workerRef.current = new RankingWorkerClient();
+    forecastWorkerRef.current = new RankingForecastWorkerClient();
     analysisWorkerRef.current = new AnalysisWorkerClient();
     const clearPrinciplesReturn = () => {
       try {
@@ -2278,6 +2296,7 @@ export default function ResorterApp() {
       window.removeEventListener("pageshow", pageshow);
       delete document.documentElement.dataset.resorterReady;
       workerRef.current?.terminate();
+      forecastWorkerRef.current?.terminate();
       analysisWorkerRef.current?.terminate();
     };
   }, [loadSnapshot, navigate]);
@@ -2305,15 +2324,17 @@ export default function ResorterApp() {
     if (!workerRef.current) throw new Error("排序计算尚未就绪。");
     const priorMode = sessionPriorMode(session);
     const tuning = rankingTuning(priorMode);
-    const result = await workerRef.current.run({ type: operation, sessionId: session.id, version, randomSeed: session.randomSeed,
+    const forecastRequest: ForecastRequest = { type: operation, sessionId: session.id, version, randomSeed: session.randomSeed,
       items: sessionItems.map((item) => ({ subjectId: item.subjectId, rate: item.rate })),
       history: toRankingHistory(history), distribution, budgetMode: sessionBudgetMode(session), priorMode,
-      previousModel, ...tuning });
+      previousModel, ...tuning };
+    const result = await workerRef.current.run(forecastRequest);
     warmComparisonImages(sessionItems, result.nextPair);
-    return result;
+    return { ...result, forecastRequest };
   }
 
   async function adoptCompareState(next: CompareState) {
+    compareRef.current = next;
     setCompare(next);
     const context = sessionAnalysisContext(
       next.session,
@@ -2329,6 +2350,28 @@ export default function ResorterApp() {
     } catch (cause) {
       setAnalysisStorageWarning(cause instanceof Error ? cause.message : "无法保存当前分析端点。");
     }
+  }
+
+  function scheduleForecast(request: ForecastRequest) {
+    const client = forecastWorkerRef.current;
+    if (!client) return;
+    const generation = forecastGenerationRef.current + 1;
+    forecastGenerationRef.current = generation;
+    client.cancel("动态剩余预测已由更新的模型替换。");
+    setForecastWarning("");
+    void client.run(request).then(async (result) => {
+      if (forecastGenerationRef.current !== generation) return;
+      const merged = await commitModelForecast(request.sessionId, request.version, result.model);
+      if (!merged || forecastGenerationRef.current !== generation) return;
+      const current = compareRef.current;
+      if (!current
+        || current.session.id !== request.sessionId
+        || current.session.modelVersion !== request.version) return;
+      await adoptCompareState({ ...current, model: merged });
+    }).catch((cause) => {
+      if (forecastGenerationRef.current !== generation) return;
+      setForecastWarning(cause instanceof Error ? cause.message : "动态剩余预测暂时不可用。");
+    });
   }
 
   async function buildAnalysisHistory(context: SessionAnalysisContext, checkpoints: number[]) {
@@ -2381,14 +2424,15 @@ export default function ResorterApp() {
     setBusy(true); setGlobalError("");
     try {
       const bundle = await getSessionBundle(sessionId); if (!bundle) throw new Error("会话不存在。");
-      const reusableAnalysisModel = target === "analysis"
-        && bundle.model?.version === bundle.session.modelVersion
+      cancelForecast("正在打开会话，旧的动态剩余预测已取消。");
+      const reusableForecastModel = bundle.model?.version === bundle.session.modelVersion
         && bundle.model.diagnostics?.method === "laplace-mc-v6"
         && bundle.model.diagnostics.forecast?.method === "posterior-contraction-mc-v12"
         && STOPPING_MODE_ORDER.every((mode) => bundle.model?.diagnostics?.forecasts?.[mode]?.method === "posterior-contraction-mc-v12")
         && STOPPING_MODE_ORDER.every((mode) => bundle.model?.diagnostics?.stoppingChecks?.some((check) => check.mode === mode))
         && Object.keys(bundle.model.abilities).length === bundle.items.length
         && Object.keys(bundle.model.uncertainty).length === bundle.items.length;
+      const reusableAnalysisModel = target === "analysis" && reusableForecastModel;
       if (reusableAnalysisModel) {
         await adoptCompareState({
           session: bundle.session,
@@ -2398,10 +2442,22 @@ export default function ResorterApp() {
         });
         navigate("analysis");
       }
-      const calculated = await calculate(bundle.session, bundle.items, bundle.history, bundle.model, bundle.model ? "RECOMPUTE" : "INIT_SESSION");
+      const quick = await calculate(bundle.session, bundle.items, bundle.history, bundle.model, bundle.model ? "RECOMPUTE" : "INIT_SESSION");
+      const calculated = reusableForecastModel ? {
+        ...quick,
+        model: {
+          ...quick.model,
+          diagnostics: {
+            ...quick.model.diagnostics!,
+            forecasts: bundle.model!.diagnostics!.forecasts,
+            forecast: bundle.model!.diagnostics!.forecasts?.[sessionBudgetMode(bundle.session)],
+          },
+        },
+      } : quick;
       await initializeModel(sessionId, calculated.model);
       const refreshed = await getSessionBundle(sessionId); if (!refreshed) throw new Error("会话不存在。");
       await adoptCompareState({ session: refreshed.session, items: refreshed.items, history: refreshed.history, model: calculated.model, nextPair: calculated.nextPair });
+      if (!reusableForecastModel) scheduleForecast(calculated.forecastRequest);
       setSessions(await listSessions(refreshed.session.profileId));
       if (!reusableAnalysisModel) navigate(target);
     } catch (cause) { setGlobalError(cause instanceof Error ? cause.message : "无法打开会话。"); }
@@ -2451,6 +2507,7 @@ export default function ResorterApp() {
       const current = compare;
       const pair = current.nextPair;
       if (!pair) return;
+      cancelForecast("会话新增了回答，旧的动态剩余预测已取消。");
       const provisional: ComparisonRecord = {
         id: crypto.randomUUID(),
         profileId: current.session.profileId,
@@ -2470,6 +2527,7 @@ export default function ResorterApp() {
       await commitResponse(current.session.id, current.session.modelVersion, { ...pair, recordId: provisional.id }, outcome, calculated.model);
       const bundle = await getSessionBundle(current.session.id); if (!bundle) throw new Error("会话保存失败。");
       await adoptCompareState({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
+      scheduleForecast(calculated.forecastRequest);
       setSessions(await listSessions(current.session.profileId));
     } catch (cause) { setGlobalError(cause instanceof Error ? cause.message : "无法保存这次比较。"); }
     finally { setBusy(false); }
@@ -2480,6 +2538,7 @@ export default function ResorterApp() {
     cancelAnalysisTask("会话撤销了回答，历史分析已取消。");
     try {
       const record = await lastActiveResponse(compare.session.id); if (!record) throw new Error("还没有可撤销的回答。");
+      cancelForecast("会话撤销了回答，旧的动态剩余预测已取消。");
       const nextHistory = compare.history.filter((item) => item.id !== record.id);
       const calculated = await calculate(compare.session, compare.items, nextHistory, compare.model, "UNDO", compare.session.modelVersion + 1);
       await commitUndo(compare.session.id, compare.session.modelVersion, record.id, calculated.model);
@@ -2494,6 +2553,7 @@ export default function ResorterApp() {
         calibrationOfComparisonId: record.calibrationOfComparisonId,
       };
       await adoptCompareState({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: retryPair });
+      scheduleForecast(calculated.forecastRequest);
     } catch (cause) { setGlobalError(cause instanceof Error ? cause.message : "无法撤销。"); }
     finally { setBusy(false); }
   }
@@ -2518,11 +2578,13 @@ export default function ResorterApp() {
     cancelAnalysisTask("评分分布已经修改，历史分析已取消。");
     try {
       const current = compare;
+      cancelForecast("评分分布已经修改，旧的动态剩余预测已取消。");
       const nextVersion = current.session.modelVersion + 1;
       const calculated = await calculate(current.session, current.items, current.history, current.model, "RECOMPUTE", nextVersion, distribution);
       await commitSessionDistribution(current.session.id, current.session.modelVersion, distribution, calculated.model);
       const bundle = await getSessionBundle(current.session.id); if (!bundle) throw new Error("会话保存失败。");
       await adoptCompareState({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
+      scheduleForecast(calculated.forecastRequest);
       setSessions(await listSessions(current.session.profileId));
     } catch (cause) { setGlobalError(cause instanceof Error ? cause.message : "无法更新评分分布。"); }
     finally { setBusy(false); }
@@ -2533,15 +2595,17 @@ export default function ResorterApp() {
     setBusy(true); setGlobalError("");
     try {
       const current = compare;
+      cancelForecast("停止严格度已经修改，旧的动态剩余预测已取消。");
       const nextVersion = current.session.modelVersion + 1;
       const nextSession = { ...current.session, budgetMode };
       const reusedModel = retargetStoppingMode(current.model, budgetMode, nextVersion);
       const calculated = reusedModel
-        ? { model: reusedModel, nextPair: current.nextPair ? { ...current.nextPair, modelVersion: nextVersion } : undefined }
+        ? { model: reusedModel, nextPair: current.nextPair ? { ...current.nextPair, modelVersion: nextVersion } : undefined, forecastRequest: undefined }
         : await calculate(nextSession, current.items, current.history, current.model, "RECOMPUTE", nextVersion);
       await commitSessionBudgetMode(current.session.id, current.session.modelVersion, budgetMode, calculated.model);
       const bundle = await getSessionBundle(current.session.id); if (!bundle) throw new Error("会话保存失败。");
       await adoptCompareState({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
+      if (calculated.forecastRequest) scheduleForecast(calculated.forecastRequest);
       setSessions(await listSessions(current.session.profileId));
     } catch (cause) { setGlobalError(cause instanceof Error ? cause.message : "无法更新停止严格度。"); }
     finally { setBusy(false); }
@@ -2553,12 +2617,14 @@ export default function ResorterApp() {
     cancelAnalysisTask("先验强度已经修改，历史分析已取消。");
     try {
       const current = compare;
+      cancelForecast("先验强度已经修改，旧的动态剩余预测已取消。");
       const nextVersion = current.session.modelVersion + 1;
       const nextSession = { ...current.session, priorMode };
       const calculated = await calculate(nextSession, current.items, current.history, current.model, "RECOMPUTE", nextVersion);
       await commitSessionPriorMode(current.session.id, current.session.modelVersion, priorMode, calculated.model);
       const bundle = await getSessionBundle(current.session.id); if (!bundle) throw new Error("会话保存失败。");
       await adoptCompareState({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
+      scheduleForecast(calculated.forecastRequest);
       setSessions(await listSessions(current.session.profileId));
     } catch (cause) { setGlobalError(cause instanceof Error ? cause.message : "无法更新先验强度。"); }
     finally { setBusy(false); }
@@ -2577,6 +2643,7 @@ export default function ResorterApp() {
       const allowed = new Set(current.items.map((item) => item.subjectId));
       if (leftSubjectId === rightSubjectId) throw new Error("左右两侧不能选择同一个条目。");
       if (!allowed.has(leftSubjectId) || !allowed.has(rightSubjectId)) throw new Error("只能添加当前会话范围内的比较。");
+      cancelForecast("会话新增了手动判断，旧的动态剩余预测已取消。");
       const provisional: ComparisonRecord = {
         id: crypto.randomUUID(),
         profileId: current.session.profileId,
@@ -2597,6 +2664,7 @@ export default function ResorterApp() {
       }, outcome, calculated.model);
       const bundle = await getSessionBundle(current.session.id); if (!bundle) throw new Error("会话保存失败。");
       await adoptCompareState({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
+      scheduleForecast(calculated.forecastRequest);
       setSessions(await listSessions(current.session.profileId));
     } catch (cause) { setGlobalError(cause instanceof Error ? cause.message : "无法添加这次比较。"); }
     finally { setBusy(false); }
@@ -2614,6 +2682,7 @@ export default function ResorterApp() {
     cancelAnalysisTask("会话导入了判断，历史分析已取消。");
     try {
       const current = compare;
+      cancelForecast("会话导入了判断，旧的动态剩余预测已取消。");
       const nextHistory = [...current.history, ...preview.plannedRecords];
       const calculated = await calculate(
         current.session,
@@ -2634,6 +2703,7 @@ export default function ResorterApp() {
       const bundle = await getSessionBundle(current.session.id);
       if (!bundle) throw new Error("会话保存失败。");
       await adoptCompareState({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
+      scheduleForecast(calculated.forecastRequest);
       setSessions(await listSessions(current.session.profileId));
     } catch (cause) {
       throw cause instanceof Error ? cause : new Error("无法导入其他会话的判断。");
@@ -2650,11 +2720,13 @@ export default function ResorterApp() {
       const current = compare;
       const record = current.history.find((entry) => entry.id === recordId && entry.active && entry.sessionId === current.session.id);
       if (!record) throw new Error("这条判断记录不存在，或不属于当前会话。");
+      cancelForecast("会话删除了历史判断，旧的动态剩余预测已取消。");
       const nextHistory = current.history.filter((entry) => entry.id !== recordId);
       const calculated = await calculate(current.session, current.items, nextHistory, current.model, "RECOMPUTE", current.session.modelVersion + 1);
       await commitComparisonDeletion(current.session.id, current.session.modelVersion, recordId, calculated.model);
       const bundle = await getSessionBundle(current.session.id); if (!bundle) throw new Error("会话保存失败。");
       await adoptCompareState({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
+      scheduleForecast(calculated.forecastRequest);
       setSessions(await listSessions(current.session.profileId));
     } catch (cause) { setGlobalError(cause instanceof Error ? cause.message : "无法删除这条判断。"); }
     finally { setBusy(false); }
@@ -2662,8 +2734,10 @@ export default function ResorterApp() {
 
   async function removeSession(sessionId: string) {
     if (analysisTask.sessionId === sessionId) cancelAnalysisTask("分析会话已经删除。");
+    cancelForecast("会话列表已经改变，动态剩余预测已取消。");
     await deleteSession(sessionId);
     // Any deleted session may have supplied reusable comparisons to the cached result.
+    compareRef.current = undefined;
     setCompare(undefined);
     if (profile) setSessions(await listSessions(profile.id));
   }
@@ -2679,9 +2753,11 @@ export default function ResorterApp() {
 
   async function finishSnapshotDeletion(result: SnapshotDeletionResult) {
     cancelAnalysisTask("项目数据已经删除，历史分析已取消。");
+    cancelForecast("项目数据已经删除，动态剩余预测已取消。");
     setSnapshotDeletionPreview(undefined);
     setLastSnapshotDeletion(result);
     setLastBackupImport(undefined);
+    compareRef.current = undefined;
     setCompare(undefined);
     if (result.activeSnapshot) {
       await loadSnapshot(result.activeSnapshot, "library");
@@ -2714,5 +2790,5 @@ export default function ResorterApp() {
   })();
 
   if (view === "connect" || !snapshot || !profile) return <><RestoreSplash /><ConnectView onConnected={(saved) => loadSnapshot(saved, "library")} onImported={async (result) => { setLastBackupImport(result); await loadSnapshot(result.snapshot, "library"); }} onCancel={snapshot && profile ? () => navigate("library") : undefined} currentUsername={snapshot && profile ? snapshot.username : undefined} /></>;
-  return <Shell view={view} onNavigate={navigate} profile={profile} snapshot={snapshot} projects={projects} onSwitchSnapshot={async (snapshotId) => { const selected = await setActiveSnapshot(snapshotId); await loadSnapshot(selected, "library"); }} onDeleteSnapshot={(snapshotId) => void openSnapshotDeletion(snapshotId)}>{globalError && <Notice tone="error">{globalError}</Notice>}{lastBackupImport && view === "library" && <Notice tone="success"><div className="import-result-notice"><span>{lastBackupImport.audit.mode === "replace" ? "覆盖恢复" : lastBackupImport.audit.mode === "merge" ? "选择性合并" : "项目创建"}完成：导入 {lastBackupImport.audit.importedSessionIds.length} 个会话、复用 {lastBackupImport.audit.reusedSessionCount} 个，冲突 {lastBackupImport.audit.conflictSessionCount} 个。</span><span><button type="button" onClick={() => navigate("backup")}>查看导入历史</button><button type="button" aria-label="关闭导入结果" onClick={() => setLastBackupImport(undefined)}>关闭</button></span></div></Notice>}{lastSnapshotDeletion && view === "library" && <Notice tone="success"><div className="import-result-notice"><span>{lastSnapshotDeletion.audit.mode === "legacy-clone-deletion" ? "已删除旧导入副本" : "已删除当前快照"}，以及关联的 {lastSnapshotDeletion.deletedSessionIds.length} 个会话和 {lastSnapshotDeletion.deletedComparisonIds.length} 条判断。</span><span><button type="button" onClick={() => navigate("backup")}>查看清理历史</button><button type="button" aria-label="关闭删除结果" onClick={() => setLastSnapshotDeletion(undefined)}>关闭</button></span></div></Notice>}{busy && view !== "compare" && <div className="loading-line">正在准备排序模型…</div>}{shellContent}{resyncOpen && <ResyncDialog snapshot={snapshot} onCancel={() => setResyncOpen(false)} onConnected={async (saved) => { setResyncOpen(false); await loadSnapshot(saved, "library"); }} />}{snapshotDeletionPreview && <SnapshotDeletionDialog preview={snapshotDeletionPreview} onCancel={() => setSnapshotDeletionPreview(undefined)} onDeleted={finishSnapshotDeletion} />}</Shell>;
+  return <Shell view={view} onNavigate={navigate} profile={profile} snapshot={snapshot} projects={projects} onSwitchSnapshot={async (snapshotId) => { const selected = await setActiveSnapshot(snapshotId); await loadSnapshot(selected, "library"); }} onDeleteSnapshot={(snapshotId) => void openSnapshotDeletion(snapshotId)}>{globalError && <Notice tone="error">{globalError}</Notice>}{forecastWarning && compare && <Notice tone="warning">排名和下一题已经更新；动态剩余预测暂时不可用：{forecastWarning}</Notice>}{lastBackupImport && view === "library" && <Notice tone="success"><div className="import-result-notice"><span>{lastBackupImport.audit.mode === "replace" ? "覆盖恢复" : lastBackupImport.audit.mode === "merge" ? "选择性合并" : "项目创建"}完成：导入 {lastBackupImport.audit.importedSessionIds.length} 个会话、复用 {lastBackupImport.audit.reusedSessionCount} 个本地会话，冲突 {lastBackupImport.audit.conflictSessionCount} 个。</span><span><button type="button" onClick={() => navigate("backup")}>查看导入历史</button><button type="button" aria-label="关闭导入结果" onClick={() => setLastBackupImport(undefined)}>关闭</button></span></div></Notice>}{lastSnapshotDeletion && view === "library" && <Notice tone="success"><div className="import-result-notice"><span>{lastSnapshotDeletion.audit.mode === "legacy-clone-deletion" ? "已删除旧导入副本" : "已删除当前快照"}，以及关联的 {lastSnapshotDeletion.deletedSessionIds.length} 个会话和 {lastSnapshotDeletion.deletedComparisonIds.length} 条判断。</span><span><button type="button" onClick={() => navigate("backup")}>查看清理历史</button><button type="button" aria-label="关闭删除结果" onClick={() => setLastSnapshotDeletion(undefined)}>关闭</button></span></div></Notice>}{busy && view !== "compare" && <div className="loading-line">正在准备排序模型…</div>}{shellContent}{resyncOpen && <ResyncDialog snapshot={snapshot} onCancel={() => setResyncOpen(false)} onConnected={async (saved) => { setResyncOpen(false); await loadSnapshot(saved, "library"); }} />}{snapshotDeletionPreview && <SnapshotDeletionDialog preview={snapshotDeletionPreview} onCancel={() => setSnapshotDeletionPreview(undefined)} onDeleted={finishSnapshotDeletion} />}</Shell>;
 }

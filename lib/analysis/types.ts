@@ -6,7 +6,7 @@ import type {
   StoppingForecastStatus,
 } from "../types";
 
-export const ANALYSIS_ALGORITHM_VERSION = "session-analysis-v1-laplace6-forecast12";
+export const ANALYSIS_ALGORITHM_VERSION = "session-analysis-v2-arrival-atomic-intervention-backtest-laplace6-forecast12";
 export const ANALYSIS_ROLLOUT_COUNT = 64;
 
 export interface AnalysisHistoryEntry extends RankingHistoryInput {
@@ -51,6 +51,7 @@ export interface SessionAnalysisPoint {
   repeatedPairLoss: number;
   calibrationRaw: number;
   calibrationEffective: number;
+  manualRaw?: number;
   importedRaw: number;
   importedEffective: number;
   meanUncertainty: number;

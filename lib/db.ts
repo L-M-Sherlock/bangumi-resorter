@@ -43,7 +43,7 @@ import { legacyPriorMode, sessionBudgetMode, sessionPriorMode } from "./ranking/
 import { collectionTagFilter, filterScopeItems, sameTagFilter } from "./scope";
 import { normalizeDistributionConfig } from "./distribution";
 import {
-  analysisCheckpoints,
+  analysisCheckpointsForHistory,
   analysisPrefixDigest,
   analysisPointFromModel,
   mergeAnalysisPoint,
@@ -263,7 +263,11 @@ export async function persistSessionAnalysisPoint(
       }
       const siblingSeries = await db.analysisSeries.where("sessionId").equals(current.sessionId).toArray();
       for (const sibling of siblingSeries) {
-        const expectedCheckpoints = new Set(analysisCheckpoints(sibling.itemCount, current.history.length));
+        if (sibling.algorithmVersion !== current.identity.algorithmVersion) {
+          await db.analysisSeries.delete(sibling.id);
+          continue;
+        }
+        const expectedCheckpoints = new Set(analysisCheckpointsForHistory(sibling.itemCount, current.history));
         const milestones = sibling.milestones.filter((entry) => expectedCheckpoints.has(entry.checkpoint)
           && entry.checkpoint <= current.history.length
           && entry.prefixDigest === analysisPrefixDigest(current.history, entry.checkpoint));
@@ -1472,6 +1476,51 @@ export async function initializeModel(sessionId: string, model: ModelState) {
     if (!session) throw new Error("会话不存在。");
     await db.models.put({ ...model, sessionId, version: session.modelVersion, updatedAt: now() });
     await db.sessions.update(sessionId, { status: modelMeetsTarget(model) ? "complete" : "active" });
+  });
+}
+
+/** Attach a derived forecast without advancing the authoritative session version. */
+function modelWithoutDerivedForecast(model: ModelState) {
+  return Object.fromEntries(Object.entries(model)
+    .filter(([key]) => key !== "updatedAt")
+    .map(([key, value]) => [key, key === "diagnostics" && value
+      ? Object.fromEntries(Object.entries(value)
+        .filter(([diagnosticKey]) => diagnosticKey !== "forecast" && diagnosticKey !== "forecasts"))
+      : value]));
+}
+
+export async function commitModelForecast(
+  sessionId: string,
+  expectedVersion: number,
+  forecastModel: ModelState,
+): Promise<ModelState | undefined> {
+  return db.transaction("rw", db.sessions, db.models, async () => {
+    const [session, stored] = await Promise.all([
+      db.sessions.get(sessionId),
+      db.models.get(sessionId),
+    ]);
+    if (!session || !stored
+      || session.modelVersion !== expectedVersion
+      || stored.version !== expectedVersion) return undefined;
+    if (forecastModel.sessionId !== sessionId || forecastModel.version !== expectedVersion) {
+      throw new Error("动态剩余预测与当前模型版本不匹配。");
+    }
+    if (!stored.diagnostics || !forecastModel.diagnostics?.forecast || !forecastModel.diagnostics.forecasts) {
+      throw new Error("动态剩余预测结果不完整。");
+    }
+    if (stableJson(modelWithoutDerivedForecast(stored))
+      !== stableJson(modelWithoutDerivedForecast(forecastModel))) return undefined;
+    const merged: ModelState = {
+      ...stored,
+      diagnostics: {
+        ...stored.diagnostics,
+        forecasts: forecastModel.diagnostics.forecasts,
+        forecast: forecastModel.diagnostics.forecast,
+      },
+      updatedAt: now(),
+    };
+    await db.models.put(merged);
+    return merged;
   });
 }
 

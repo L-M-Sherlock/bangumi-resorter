@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   analysisCheckpoints,
+  analysisCheckpointsForHistory,
   analysisEvidenceBreakdown,
+  analysisForecastBacktest,
   analysisInputDigest,
   analysisPointFromModel,
   analysisPrefixDigest,
@@ -57,6 +59,7 @@ function point(history: AnalysisHistoryEntry[], checkpoint: number): SessionAnal
     repeatedPairLoss: 0,
     calibrationRaw: 0,
     calibrationEffective: 0,
+    manualRaw: 0,
     importedRaw: 0,
     importedEffective: 0,
     meanUncertainty: 1,
@@ -116,7 +119,7 @@ describe("session analysis checkpoints and evidence", () => {
     expect(capped.at(-1)).toBe(10_000);
   });
 
-  it("sorts by source time then ID, excludes skip/inactive, and splits both decay losses", () => {
+  it("sorts by arrival time, excludes skip/inactive, and splits both decay losses", () => {
     const epoch = new Date(0).toISOString();
     const oneYear = new Date(365 * day).toISOString();
     const records = [
@@ -126,7 +129,7 @@ describe("session analysis checkpoints and evidence", () => {
       record("skip", 1, 3, "skip", new Date(5 * day).toISOString()),
       record("inactive", 1, 3, "right", new Date(6 * day).toISOString(), { active: false }),
     ];
-    expect(sortAnalysisRecords(records).map((entry) => entry.id)).toEqual(["imported", "ordinary-a", "ordinary-b"]);
+    expect(sortAnalysisRecords(records).map((entry) => entry.id)).toEqual(["ordinary-a", "ordinary-b", "imported"]);
     const history = toAnalysisHistory(records);
     const evidence = analysisEvidenceBreakdown(history);
     expect(evidence.rawEvidence).toBe(3);
@@ -140,6 +143,31 @@ describe("session analysis checkpoints and evidence", () => {
     expect(evidence.importedEffective).toBeCloseTo(0.5, 8);
     expect(evidence.uniquePairCount).toBe(2);
     expect(evidence.coveredItemCount).toBe(3);
+  });
+
+  it("never places a historical checkpoint inside an imported batch", () => {
+    const records = Array.from({ length: 120 }, (_, index) => record(
+      `record-${String(index).padStart(3, "0")}`,
+      1,
+      2,
+      "left",
+      new Date(index).toISOString(),
+      index >= 10 && index < 110 ? { importBatchId: "atomic-batch" } : {},
+    ));
+    const history = toAnalysisHistory(records);
+    expect(analysisCheckpointsForHistory(284, history)).toEqual([0, 10, 110, 120]);
+  });
+
+  it("keeps an imported batch atomic even when its synthetic row times overlap a later answer", () => {
+    const records = [
+      record("before", 1, 2, "left", new Date(99).toISOString()),
+      record("batch-a", 1, 3, "left", new Date(100).toISOString(), { importBatchId: "batch" }),
+      record("batch-b", 2, 3, "right", new Date(102).toISOString(), { importBatchId: "batch" }),
+      record("after", 1, 2, "right", new Date(101).toISOString()),
+    ];
+    expect(sortAnalysisRecords(records).map((entry) => entry.id)).toEqual([
+      "before", "batch-a", "batch-b", "after",
+    ]);
   });
 });
 
@@ -180,6 +208,79 @@ describe("session analysis mapping and cache identity", () => {
     expect(mapped.forecasts.thorough?.medianAdditional).toBe(15);
     expect(mapped.forecasts.quick!.medianAdditional!).toBeLessThanOrEqual(mapped.forecasts.standard!.medianAdditional!);
     expect(mapped.forecasts.standard!.medianAdditional!).toBeLessThanOrEqual(mapped.forecasts.thorough!.medianAdditional!);
+  });
+
+  it("backtests only an observed stopping event and reports right censoring otherwise", () => {
+    const mode = "standard" as const;
+    const makePoint = (
+      checkpoint: number,
+      ready: boolean,
+      forecast?: { lowerAdditional: number; medianAdditional: number; upperAdditional: number },
+    ) => ({
+      ...point([], 0),
+      checkpoint,
+      stoppingChecks: {
+        [mode]: { mode, sampleCount: 128, stableSamples: ready ? 128 : 0, probability: Number(ready), low: Number(ready), high: 1, ready },
+      },
+      forecasts: forecast ? {
+        [mode]: {
+          mode, status: "forecast" as const, rolloutCount: 64,
+          ...forecast, projectionHorizon: 497, probabilityWithinProjection: 1,
+        },
+      } : {},
+    });
+    const points = [
+      makePoint(0, false, { lowerAdditional: 90, medianAdditional: 110, upperAdditional: 130 }),
+      makePoint(50, false, { lowerAdditional: 50, medianAdditional: 70, upperAdditional: 90 }),
+      makePoint(100, true),
+    ];
+    expect(analysisForecastBacktest(points, mode)).toMatchObject({
+      status: "observed",
+      observedStopCheckpoint: 100,
+      forecastCount: 2,
+      boundedIntervalCount: 2,
+      boundedIntervalHits: 2,
+      empiricalIntervalCoverage: 1,
+      medianAbsoluteError: 15,
+      medianBias: 15,
+    });
+    expect(analysisForecastBacktest(points.slice(0, 2), mode)).toMatchObject({
+      status: "right-censored",
+      forecastCount: 2,
+    });
+  });
+
+  it("does not score forecasts whose future path was interrupted by imported or manual evidence", () => {
+    const mode = "standard" as const;
+    const makePoint = (checkpoint: number, importedRaw: number, manualRaw: number, ready: boolean) => ({
+      ...point([], 0),
+      checkpoint,
+      importedRaw,
+      manualRaw,
+      stoppingChecks: {
+        [mode]: { mode, sampleCount: 128, stableSamples: ready ? 128 : 0, probability: Number(ready), low: Number(ready), high: 1, ready },
+      },
+      forecasts: ready ? {} : {
+        [mode]: {
+          mode, status: "forecast" as const, rolloutCount: 64,
+          lowerAdditional: 40, medianAdditional: 50, upperAdditional: 60,
+          projectionHorizon: 497, probabilityWithinProjection: 1,
+        },
+      },
+    });
+    const result = analysisForecastBacktest([
+      makePoint(0, 0, 0, false),
+      makePoint(50, 1, 0, false),
+      makePoint(100, 1, 1, false),
+      makePoint(150, 1, 1, true),
+    ], mode);
+    expect(result).toMatchObject({
+      status: "observed",
+      forecastCount: 1,
+      interruptedForecastCount: 2,
+      medianAbsoluteError: 0,
+      empiricalIntervalCoverage: 1,
+    });
   });
 
   it("reuses valid prefixes, rejects changed prefixes, separates priors/distributions, and ignores stop mode", () => {

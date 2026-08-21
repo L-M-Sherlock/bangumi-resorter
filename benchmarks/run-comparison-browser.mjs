@@ -38,12 +38,16 @@ try {
     throw new Error(result?.error ?? pageErrors.join("\n") ?? "Browser benchmark returned no result.");
   }
   const milliseconds = (value) => `${value.toFixed(1)} ms`;
+  const timing = result.timing;
   console.log("Browser Worker benchmark · production Worker topology");
   console.log(`  fixture: ${result.fixture.items} items, ${result.fixture.existingHistory} existing judgments + 1 answer`);
   console.log(`  browser hardwareConcurrency / forecast Workers: ${result.environment.hardwareConcurrency} / ${result.environment.forecastWorkers}`);
-  console.log(`  warm-up calculation: ${milliseconds(result.warmupMs)}`);
-  console.log(`  steady-state samples: ${result.samplesMs.map(milliseconds).join(", ")}`);
-  console.log(`  steady-state median: ${milliseconds(result.medianMs)}`);
+  console.log(`  warm-up quick / background: ${milliseconds(timing.quickWarmupMs)} / ${milliseconds(timing.backgroundWarmupMs)}`);
+  console.log(`  quick update samples: ${timing.quickSamplesMs.map(milliseconds).join(", ")}`);
+  console.log(`  quick update median (ranking + next pair visible): ${milliseconds(timing.quickMedianMs)}`);
+  console.log(`  background forecast samples: ${timing.backgroundSamplesMs.map(milliseconds).join(", ")}`);
+  console.log(`  background forecast median: ${milliseconds(timing.backgroundMedianMs)}`);
+  console.log(`  answer-to-forecast median: ${milliseconds(timing.answerToForecastMedianMs)}`);
   console.log(`  posterior / rollout: ${result.diagnostics.posteriorSamples} samples / ${result.diagnostics.forecastRollouts} paths`);
   console.log(`  forecast horizon / status: ${result.diagnostics.forecastHorizon} / ${result.diagnostics.forecastStatus}`);
   console.log(`  raw / effective evidence: ${result.diagnostics.rawEvidence} / ${result.diagnostics.effectiveEvidence.toFixed(1)}`);
