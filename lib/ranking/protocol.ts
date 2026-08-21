@@ -1,4 +1,4 @@
-import { ComparisonBudgetMode, DistributionConfig, ModelState, NextPair, RankingHistoryInput, RankingItemInput } from "../types";
+import { ComparisonBudgetMode, DistributionConfig, ModelState, NextPair, PriorMode, RankingHistoryInput, RankingItemInput } from "../types";
 
 export type RankingOperation = "INIT_SESSION" | "APPLY_RESPONSE" | "UNDO" | "RECOMPUTE";
 
@@ -12,6 +12,7 @@ export interface RankingRequest {
   history: RankingHistoryInput[];
   distribution: DistributionConfig;
   budgetMode?: ComparisonBudgetMode;
+  priorMode?: PriorMode;
   previousModel?: ModelState;
   priorStrength?: number;
   priorScale?: number;

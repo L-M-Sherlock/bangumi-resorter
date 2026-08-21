@@ -1,7 +1,9 @@
 import { normalizeDistributionConfig } from "./distribution";
 import { collectionTagFilter } from "./scope";
+import { legacyPriorMode } from "./ranking/strategy";
 import {
   COLLECTION_TYPES,
+  ComparisonBudgetMode,
   ExportV1,
   RankedItem,
   SUBJECT_TYPES,
@@ -134,11 +136,28 @@ function validateBooleanFields(record: Record<string, unknown>, path: string, fi
   for (const field of fields) optionalBoolean(record[field], `${path}.${field}`);
 }
 
+function validateStoppingForecast(value: unknown, path: string) {
+  const forecast = requiredObject(value, path);
+  if (forecast.method !== undefined) {
+    enumString(forecast.method, `${path}.method`, [
+      "posterior-contraction-mc-v1", "posterior-contraction-mc-v2", "posterior-contraction-mc-v3", "posterior-contraction-mc-v4", "posterior-contraction-mc-v5", "posterior-contraction-mc-v6", "posterior-contraction-mc-v7", "posterior-contraction-mc-v8", "posterior-contraction-mc-v9", "posterior-contraction-mc-v10", "posterior-contraction-mc-v11", "posterior-contraction-mc-v12", "posterior-contraction-mc-v13", "posterior-contraction-mc-v14", "posterior-contraction-mc-v15",
+    ]);
+  }
+  if (forecast.status !== undefined) enumString(forecast.status, `${path}.status`, ["ready", "forecast", "uncertain", "limit"]);
+  validateNumericFields(forecast, path, [
+    "rolloutCount", "lowerAdditional", "medianAdditional", "upperAdditional", "nextCheckpoint", "probabilityWithin20", "projectionHorizon",
+    "probabilityWithinProjection", "within20Successes", "probabilityWithin20Low", "probabilityWithin20High", "withinProjectionSuccesses",
+    "probabilityWithinProjectionLow", "probabilityWithinProjectionHigh", "probabilityBeforeLimit", "beforeLimitSuccesses",
+    "probabilityBeforeLimitLow", "probabilityBeforeLimitHigh", "remainingCapacity",
+  ]);
+  return forecast;
+}
+
 function validateModelDiagnostics(value: unknown, path: string) {
   if (value === undefined) return undefined;
   const diagnostics = requiredObject(value, path);
   if (diagnostics.method !== undefined) {
-    enumString(diagnostics.method, `${path}.method`, ["laplace-mc-v1", "laplace-mc-v2", "laplace-mc-v3", "laplace-mc-v4"]);
+    enumString(diagnostics.method, `${path}.method`, ["laplace-mc-v1", "laplace-mc-v2", "laplace-mc-v3", "laplace-mc-v4", "laplace-mc-v5", "laplace-mc-v6"]);
   }
   validateNumericFields(diagnostics, path, [
     "sampleCount", "jointBucketStability", "jointBucketStableSamples", "jointBucketStabilityLow", "jointBucketStabilityHigh",
@@ -146,9 +165,14 @@ function validateModelDiagnostics(value: unknown, path: string) {
     "coverageTargetStability", "coverageTargetStableSamples", "coverageTargetStabilityLow", "coverageTargetStabilityHigh",
     "requiredAdjacentStableItemCount", "allowedCrossTwoBucketCount", "expectedCrossTwoBucketCount", "crossTwoBucketCountMedian",
     "crossTwoBucketCountLow", "crossTwoBucketCountHigh", "maxBucketDisplacementMedian", "maxBucketDisplacementHigh",
-    "expectedBucketChangeRate", "minBucketStability", "decisionRiskRatio", "evidenceCount", "evidenceRequired", "fatigueLimit",
+    "expectedBucketChangeRate", "minBucketStability", "decisionRiskRatio", "evidenceCount", "rawEvidenceCount", "evidenceRequired",
+    "uniquePairCount", "uniquePairRequired", "coveredItemCount", "itemCoverageWeightRequired", "repeatedPairCorrelation",
+    "sourceAgeHalfLifeDays", "tieStrength", "fatigueLimit",
   ]);
-  validateBooleanFields(diagnostics, path, ["fatigueReached", "ready"]);
+  validateBooleanFields(diagnostics, path, ["optimizerConverged", "fatigueReached", "ready"]);
+  if (diagnostics.optimizationStatus !== undefined) {
+    enumString(diagnostics.optimizationStatus, `${path}.optimizationStatus`, ["converged", "iteration-limit", "line-search-failed", "non-finite"]);
+  }
   for (const field of ["bucketStability", "adjacentBucketStabilityByItem"] as const) {
     if (diagnostics[field] !== undefined) numericRecord(diagnostics[field], `${path}.${field}`);
   }
@@ -159,8 +183,14 @@ function validateModelDiagnostics(value: unknown, path: string) {
     requiredArray(diagnostics.stoppingChecks, `${path}.stoppingChecks`).forEach((value, index) => {
       const check = requiredObject(value, `${path}.stoppingChecks[${index}]`);
       enumString(check.mode, `${path}.stoppingChecks[${index}].mode`, ["quick", "standard", "thorough"]);
-      validateNumericFields(check, `${path}.stoppingChecks[${index}]`, ["sampleCount", "stableSamples", "probability", "low", "high"]);
-      optionalBoolean(check.ready, `${path}.stoppingChecks[${index}].ready`);
+      validateNumericFields(check, `${path}.stoppingChecks[${index}]`, [
+        "target", "probabilityTarget", "requiredAdjacentStableItemCount", "allowedCrossTwoBucketCount",
+        "uniquePairRequired", "coveredItemRequired",
+        "sampleCount", "stableSamples", "probability", "low", "high",
+      ]);
+      for (const field of ["evidenceSatisfied", "uniquePairsSatisfied", "itemCoverageSatisfied", "optimizerSatisfied", "ready"] as const) {
+        optionalBoolean(check[field], `${path}.stoppingChecks[${index}].${field}`);
+      }
     });
   }
   if (diagnostics.calibration !== undefined) {
@@ -171,19 +201,14 @@ function validateModelDiagnostics(value: unknown, path: string) {
     optionalBoolean(calibration.acceptable, `${path}.calibration.acceptable`);
   }
   if (diagnostics.forecast !== undefined) {
-    const forecast = requiredObject(diagnostics.forecast, `${path}.forecast`);
-    if (forecast.method !== undefined) {
-      enumString(forecast.method, `${path}.forecast.method`, [
-        "posterior-contraction-mc-v1", "posterior-contraction-mc-v2", "posterior-contraction-mc-v3", "posterior-contraction-mc-v4", "posterior-contraction-mc-v5", "posterior-contraction-mc-v6",
-      ]);
+    validateStoppingForecast(diagnostics.forecast, `${path}.forecast`);
+  }
+  if (diagnostics.forecasts !== undefined) {
+    const forecasts = requiredObject(diagnostics.forecasts, `${path}.forecasts`);
+    for (const [mode, forecast] of Object.entries(forecasts)) {
+      enumString(mode, `${path}.forecasts.${mode}`, ["quick", "standard", "thorough"]);
+      validateStoppingForecast(forecast, `${path}.forecasts.${mode}`);
     }
-    if (forecast.status !== undefined) enumString(forecast.status, `${path}.forecast.status`, ["ready", "forecast", "uncertain", "limit"]);
-    validateNumericFields(forecast, `${path}.forecast`, [
-      "rolloutCount", "lowerAdditional", "medianAdditional", "upperAdditional", "nextCheckpoint", "probabilityWithin20", "projectionHorizon",
-      "probabilityWithinProjection", "within20Successes", "probabilityWithin20Low", "probabilityWithin20High", "withinProjectionSuccesses",
-      "probabilityWithinProjectionLow", "probabilityWithinProjectionHigh", "probabilityBeforeLimit", "beforeLimitSuccesses",
-      "probabilityBeforeLimitLow", "probabilityBeforeLimitHigh", "remainingCapacity",
-    ]);
   }
   return diagnostics;
 }
@@ -289,7 +314,10 @@ export function validateBackupPayload(input: unknown): Pick<ValidatedBackup, "pa
       if (tagFilter.source !== "collection" || tagFilter.match !== "all") throw new Error(`会话 ${id} 的标签筛选规则不受支持。`);
       stringArray(tagFilter.tags, `sessions[${index}].tagFilter.tags`);
     }
-    const budgetMode = entry.budgetMode === undefined ? undefined : enumString(entry.budgetMode, `sessions[${index}].budgetMode`, ["quick", "standard", "thorough"]);
+    const budgetMode = entry.budgetMode === undefined ? undefined : enumString(entry.budgetMode, `sessions[${index}].budgetMode`, ["quick", "standard", "thorough"]) as ComparisonBudgetMode;
+    const priorMode = entry.priorMode === undefined
+      ? legacyPriorMode(budgetMode)
+      : enumString(entry.priorMode, `sessions[${index}].priorMode`, ["strong", "weak"]);
     const comparisonReusePolicy = entry.comparisonReusePolicy === undefined ? undefined : enumString(entry.comparisonReusePolicy, `sessions[${index}].comparisonReusePolicy`, ["session", "snapshot", "profile"]);
     const comparisonHistoryMode = entry.comparisonHistoryMode === undefined ? undefined : enumString(entry.comparisonHistoryMode, `sessions[${index}].comparisonHistoryMode`, ["dynamic", "local"]);
     const stoppingTarget = entry.stoppingTarget === undefined ? undefined : enumString(entry.stoppingTarget, `sessions[${index}].stoppingTarget`, ["top-tail", "all-buckets"]);
@@ -309,7 +337,7 @@ export function validateBackupPayload(input: unknown): Pick<ValidatedBackup, "pa
       || rawTags.length !== normalizedTags.length
       || rawTags.some((tag, tagIndex) => tag !== normalizedTags[tagIndex]);
     if (comparisonHistoryMode !== "local" || stoppingTarget !== undefined || maxComparisons !== undefined
-      || distributionChanged || tagFilterChanged) {
+      || entry.priorMode === undefined || distributionChanged || tagFilterChanged) {
       compatibilitySessionIds.add(id);
     }
     return {
@@ -326,6 +354,7 @@ export function validateBackupPayload(input: unknown): Pick<ValidatedBackup, "pa
       randomSeed: requiredNumber(entry.randomSeed, `sessions[${index}].randomSeed`),
       modelVersion: requiredNumber(entry.modelVersion, `sessions[${index}].modelVersion`),
       budgetMode,
+      priorMode,
       comparisonReusePolicy,
       comparisonHistoryMode,
       stoppingTarget,
@@ -438,10 +467,15 @@ export function validateBackupPayload(input: unknown): Pick<ValidatedBackup, "pa
       abilities: numericRecord(entry.abilities, `models[${index}].abilities`),
       uncertainty: numericRecord(entry.uncertainty, `models[${index}].uncertainty`),
       acceptedComparisons: requiredNumber(entry.acceptedComparisons, `models[${index}].acceptedComparisons`),
+      effectiveComparisons: optionalNumber(entry.effectiveComparisons, `models[${index}].effectiveComparisons`),
+      tieStrength: optionalNumber(entry.tieStrength, `models[${index}].tieStrength`),
       initialMeanUncertainty: requiredNumber(entry.initialMeanUncertainty, `models[${index}].initialMeanUncertainty`),
       currentMeanUncertainty: requiredNumber(entry.currentMeanUncertainty, `models[${index}].currentMeanUncertainty`),
       converged: requiredBoolean(entry.converged, `models[${index}].converged`),
       iterations: requiredNumber(entry.iterations, `models[${index}].iterations`),
+      optimizationStatus: entry.optimizationStatus === undefined
+        ? undefined
+        : enumString(entry.optimizationStatus, `models[${index}].optimizationStatus`, ["converged", "iteration-limit", "line-search-failed", "non-finite"]),
       diagnostics: validateModelDiagnostics(entry.diagnostics, `models[${index}].diagnostics`),
       updatedAt: requiredString(entry.updatedAt, `models[${index}].updatedAt`),
     };

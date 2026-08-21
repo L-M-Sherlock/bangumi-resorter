@@ -101,7 +101,7 @@ test.describe("移动端 UI/UX", () => {
     await expect(page.locator("select")).toHaveCount(0);
     await openNewSessionSettings(page);
 
-    for (const id of ["comparison-budget", "score-level-count", "distribution-preset", "history-source"]) {
+    for (const id of ["prior-mode", "comparison-budget", "score-level-count", "distribution-preset", "history-source"]) {
       await page.locator(`#${id}`).click();
       await expect(page.locator(`[data-themed-select="${id}"]`).getByRole("listbox")).toBeVisible();
       expectReadableThemedMenu(await themedSelectAppearance(page, id));
@@ -112,14 +112,14 @@ test.describe("移动端 UI/UX", () => {
 
     const trigger = page.locator("#compare-budget-mode");
     await trigger.click();
-    const menu = page.getByRole("listbox", { name: "推断模式选项" });
+    const menu = page.getByRole("listbox", { name: "停止严格度选项" });
     await expect(menu).toBeVisible();
-    await expect(menu.getByRole("option")).toHaveText(["快速模式✓", "标准模式", "精细模式"]);
+    await expect(menu.getByRole("option")).toHaveText(["快速模式 · 80% 覆盖✓", "标准模式 · 90% 覆盖", "精细模式 · 95% 覆盖"]);
 
     expectReadableThemedMenu(await themedSelectAppearance(page, "compare-budget-mode"));
 
-    const quickOption = menu.getByRole("option", { name: "快速模式", exact: true });
-    const standardOption = menu.getByRole("option", { name: "标准模式", exact: true });
+    const quickOption = menu.getByRole("option", { name: "快速模式 · 80% 覆盖", exact: true });
+    const standardOption = menu.getByRole("option", { name: "标准模式 · 90% 覆盖", exact: true });
     await expect(quickOption).toBeFocused();
     await quickOption.press("ArrowDown");
     await expect(standardOption).toBeFocused();
@@ -127,6 +127,13 @@ test.describe("移动端 UI/UX", () => {
     await expect(trigger).toHaveAttribute("data-value", "standard");
     await expect(menu).toBeHidden();
     await expect(page.getByRole("button", { name: /有效证据 0 次/ })).toBeVisible();
+
+    const priorTrigger = page.locator("#compare-prior-mode");
+    await priorTrigger.click();
+    const priorMenu = page.getByRole("listbox", { name: "旧评分先验选项" });
+    await expect(priorMenu.getByRole("option")).toHaveText(["弱先验✓", "强先验"]);
+    expectReadableThemedMenu(await themedSelectAppearance(page, "compare-prior-mode"));
+    await page.keyboard.press("Escape");
 
     await page.getByRole("button", { name: /更喜欢这部/ }).first().click();
     await page.getByRole("button", { name: "查看当前结果" }).click();
@@ -184,6 +191,13 @@ test.describe("移动端 UI/UX", () => {
     await page.getByRole("button", { name: "返回收藏概览" }).click();
     await expect(page.getByRole("heading", { name: /demo 的已评分收藏/ })).toBeVisible();
 
+    await page.getByRole("button", { name: "会话分析", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "还没有排序会话" })).toBeVisible();
+    await expect(page.getByText("暂无可恢复的会话")).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+    await page.getByRole("button", { name: "返回收藏概览" }).click();
+    await expect(page.getByRole("heading", { name: /demo 的已评分收藏/ })).toBeVisible();
+
     await page.getByRole("button", { name: "排序结果", exact: true }).click();
     await expect(page.getByRole("heading", { name: "还没有排序会话" })).toBeVisible();
     await expect(page.getByText("暂无可恢复的会话")).toBeVisible();
@@ -199,7 +213,7 @@ test.describe("移动端 UI/UX", () => {
         const rect = element.getBoundingClientRect();
         return { width: rect.width, height: rect.height, right: rect.right };
       }));
-      expect(navMetrics).toHaveLength(5);
+      expect(navMetrics).toHaveLength(6);
       for (const metric of navMetrics) {
         expect(metric.height).toBeGreaterThanOrEqual(44);
         expect(metric.right).toBeLessThanOrEqual(viewport.width);

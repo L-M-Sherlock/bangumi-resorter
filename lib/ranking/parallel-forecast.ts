@@ -1,8 +1,9 @@
 import {
   forecastStoppingTimeSimulation,
-  forecastStoppingTimeRollouts,
+  forecastStoppingTimeRolloutsByMode,
   prepareStoppingForecastRollouts,
-  summarizeStoppingTimeRollouts,
+  summarizeStoppingTimeRolloutsByMode,
+  type StoppingTimesByMode,
   type StoppingForecastRolloutInput,
 } from "./engine";
 import type { PreparedRanking } from "./compute";
@@ -24,7 +25,7 @@ export interface ForecastWorkerTask {
 
 export interface ForecastWorkerResponse {
   taskId: string;
-  stoppingTimes?: number[];
+  stoppingTimesByMode?: StoppingTimesByMode;
   error?: string;
 }
 
@@ -46,7 +47,7 @@ export class ForecastWorkerPool {
     private readonly createWorker: () => ForecastWorkerLike,
   ) {}
 
-  async run(tasks: ForecastWorkerTask[], stoppingTimes: number[][]) {
+  async run(tasks: ForecastWorkerTask[], stoppingTimesByForecast: StoppingTimesByMode[]) {
     if (!this.usable) throw new Error("停止预测 Worker 池不可用。");
     if (this.active) throw new Error("停止预测 Worker 池正在处理其他任务。");
     if (tasks.length === 0) return;
@@ -67,15 +68,18 @@ export class ForecastWorkerPool {
               reject(new Error("停止预测 Worker 返回了错位结果。"));
               return;
             }
-            if (response.error || !response.stoppingTimes) {
+            if (response.error || !response.stoppingTimesByMode) {
               reject(new Error(response.error ?? "停止预测 Worker 返回了空结果。"));
               return;
             }
-            stoppingTimes[task.forecastIndex].splice(
-              task.rolloutStart,
-              response.stoppingTimes.length,
-              ...response.stoppingTimes,
-            );
+            for (const mode of ["quick", "standard", "thorough"] as const) {
+              const values = response.stoppingTimesByMode[mode];
+              stoppingTimesByForecast[task.forecastIndex][mode].splice(
+                task.rolloutStart,
+                values.length,
+                ...values,
+              );
+            }
             completed += 1;
             if (completed === tasks.length) resolve();
             else dispatch(worker);
@@ -111,7 +115,10 @@ export function forecastWorkerCount(
   mobile = false,
 ) {
   if ((hardwareConcurrency ?? 1) < 2 || itemCount < 80 || rolloutCount < 32) return 0;
-  return Math.min(mobile ? 2 : 4, Math.max(2, Math.floor(hardwareConcurrency ?? 2)));
+  return Math.min(
+    mobile ? 2 : 8,
+    Math.max(2, Math.floor((hardwareConcurrency ?? 2) / 2)),
+  );
 }
 
 export async function computePreparedForecasts(
@@ -136,7 +143,11 @@ export async function computePreparedForecasts(
       { ...forecastOptions, rolloutCount },
     ));
   const parallelForecastIndexes = prepared.forecasts
-    .map((forecast, index) => !forecast.diagnostics.ready && forecast.fit.posteriorSamples.length > 0 ? index : -1)
+    .map((forecast, index) => forecast.fit.posteriorSamples.length > 0
+      && (forecast.diagnostics.evidenceCount < forecast.diagnostics.evidenceRequired
+        || !forecast.diagnostics.stoppingChecks?.find((check) => check.mode === "thorough")?.ready)
+      ? index
+      : -1)
     .filter((index) => index >= 0);
   if (parallelForecastIndexes.length === 0 || workerCount === 0 || (!options.workerPool && !options.createWorker)) {
     return sequential();
@@ -169,10 +180,14 @@ export async function computePreparedForecasts(
     }
   }
 
-  const stoppingTimes = inputs.map(() => Array<number>(rolloutCount));
+  const stoppingTimesByForecast = inputs.map(() => ({
+    quick: Array<number>(rolloutCount),
+    standard: Array<number>(rolloutCount),
+    thorough: Array<number>(rolloutCount),
+  }));
   let parallelFailed = false;
   try {
-    await pool.run(tasks, stoppingTimes);
+    await pool.run(tasks, stoppingTimesByForecast);
   } catch (error) {
     console.warn("并行停止预测不可用，已回退单 Worker。", error);
     parallelFailed = true;
@@ -182,12 +197,22 @@ export async function computePreparedForecasts(
   if (parallelFailed) return sequential();
 
   return inputs.map((input, index) => input
-    ? summarizeStoppingTimeRollouts(
-      stoppingTimes[index],
-      input.projectionHorizon,
-      prepared.forecasts[index].diagnostics,
-      true,
-    )
+    ? (() => {
+      const stoppingTimesByMode = stoppingTimesByForecast[index];
+      const forecasts = summarizeStoppingTimeRolloutsByMode(
+        stoppingTimesByMode,
+        input.projectionHorizon,
+        prepared.forecasts[index].diagnostics,
+        true,
+      );
+      const activeMode = prepared.request.budgetMode ?? "standard";
+      return {
+        forecast: forecasts[activeMode],
+        stoppingTimes: stoppingTimesByMode[activeMode],
+        forecasts,
+        stoppingTimesByMode,
+      };
+    })()
     : forecastStoppingTimeSimulation(
       prepared.request.items,
       prepared.forecasts[index].fit,
@@ -203,6 +228,6 @@ export async function computePreparedForecasts(
 export function runForecastWorkerTask(task: ForecastWorkerTask): ForecastWorkerResponse {
   return {
     taskId: task.taskId,
-    stoppingTimes: forecastStoppingTimeRollouts(task.input, task.rolloutStart, task.rolloutCount),
+    stoppingTimesByMode: forecastStoppingTimeRolloutsByMode(task.input, task.rolloutStart, task.rolloutCount),
   };
 }

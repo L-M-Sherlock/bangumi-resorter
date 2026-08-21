@@ -2,9 +2,11 @@ import "fake-indexeddb/auto";
 import Dexie from "dexie";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createDemoItems } from "../lib/demo";
+import { computeRanking } from "../lib/ranking/compute";
 import { fitModel, toModelState } from "../lib/ranking/engine";
+import { rankingTuning, sessionBudgetMode, sessionPriorMode } from "../lib/ranking/strategy";
 import {
-  commitBackupImport, commitComparisonDeletion, commitComparisonImport, commitLegacyCloneDeletion, commitResponse, commitSessionBudgetMode, commitSessionDistribution, commitSnapshotDeletion, createSession, db, deleteSession, deriveSessionWithTagFilter, exportProject, getActiveSnapshot, getSessionBundle,
+  commitBackupImport, commitComparisonDeletion, commitComparisonImport, commitLegacyCloneDeletion, commitResponse, commitSessionBudgetMode, commitSessionPriorMode, commitSessionDistribution, commitSnapshotDeletion, createSession, db, deleteSession, deriveSessionWithTagFilter, exportProject, getActiveSnapshot, getSessionBundle,
   initializeModel, lastActiveResponse, listBackupImportHistory, listLocalProjects, previewBackupImport, previewComparisonImport, previewLegacyCloneDeletion, previewSessionTagDerivation, previewSessionUpgrade, previewSnapshotDeletion, saveSnapshot, setActiveSnapshot, upgradeSessionToSnapshot,
   ResorterDatabase,
 } from "../lib/db";
@@ -156,6 +158,28 @@ describe("ExportV1 validation", () => {
     expect(validated.payload.comparisons[0].inheritedFromComparisonId).toBe("deleted-comparison");
   });
 
+  it("maps legacy stopping modes to prior strength while keeping ExportV1 schema 1", () => {
+    const legacy = exportFixturePayload("legacy-prior");
+    legacy.sessions[1].budgetMode = "standard";
+    legacy.sessions[2].budgetMode = "thorough";
+    const migrated = validateBackupPayload(legacy);
+    expect(migrated.payload.sessions.map((session) => session.priorMode)).toEqual(["strong", "weak", "weak"]);
+    expect(migrated.compatibilitySessionIds).toEqual(expect.arrayContaining(legacy.sessions.map((session) => session.id)));
+    expect(migrated.payload.schemaVersion).toBe(1);
+
+    const current = structuredClone(legacy);
+    current.appVersion = "0.17.0";
+    current.sessions.forEach((session) => {
+      session.priorMode = "weak";
+      session.comparisonHistoryMode = "local";
+      session.comparisonReusePolicy = "session";
+    });
+    const validated = validateBackupPayload(current);
+    expect(validated.payload.sessions.every((session) => session.priorMode === "weak")).toBe(true);
+    expect(validated.compatibilitySessionIds).toHaveLength(0);
+    expect(validated.payload.schemaVersion).toBe(1);
+  });
+
   it("normalizes null legacy metadata fields without weakening relation validation", () => {
     const payload = exportFixturePayload("nullable-metadata");
     const legacy = payload as unknown as {
@@ -226,6 +250,7 @@ describe("IndexedDB project persistence", () => {
     const snapshot = await saveSnapshot({ username: "demo", nickname: "Demo" }, snapshotId, items);
     const session = await createSession(snapshot, 2, [2], { preset: "uniform", levelCount: 10, weights: Array(10).fill(10) });
     expect(session.budgetMode).toBe("quick");
+    expect(session.priorMode).toBe("weak");
     expect(session.comparisonReusePolicy).toBe("session");
     expect(session.comparisonHistoryMode).toBe("local");
     expect(session.stoppingTarget).toBeUndefined();
@@ -516,21 +541,35 @@ describe("IndexedDB project persistence", () => {
     payload.sessions.forEach((entry) => {
       entry.comparisonHistoryMode = "local";
       entry.comparisonReusePolicy = "session";
+      entry.priorMode = "strong";
     });
     const sourceSession = payload.sessions[0];
     const allowedIds = payload.sessionItems.filter((entry) => entry.sessionId === sourceSession.id).map((entry) => entry.subjectId);
-    payload.models = [{
+    const sourceHistory = payload.comparisons.filter((entry) => entry.sessionId === sourceSession.id).map((entry) => ({
+      recordId: entry.id,
+      sessionId: entry.sessionId,
+      leftSubjectId: entry.leftSubjectId,
+      rightSubjectId: entry.rightSubjectId,
+      outcome: entry.outcome,
+      acceptedCountAtAnswer: entry.acceptedCountAtAnswer,
+      queryKind: entry.queryKind ?? "adaptive",
+      calibrationOfComparisonId: entry.calibrationOfComparisonId,
+      createdAt: entry.createdAt,
+    }));
+    payload.models = [computeRanking({
+      type: "RECOMPUTE",
+      requestId: "models-valid",
       sessionId: sourceSession.id,
       version: sourceSession.modelVersion,
-      abilities: Object.fromEntries(allowedIds.map((subjectId, index) => [subjectId, index])),
-      uncertainty: Object.fromEntries(allowedIds.map((subjectId) => [subjectId, 1])),
-      acceptedComparisons: 1,
-      initialMeanUncertainty: 1,
-      currentMeanUncertainty: 1,
-      converged: true,
-      iterations: 1,
-      updatedAt: sourceSession.updatedAt,
-    }];
+      randomSeed: sourceSession.randomSeed,
+      items: payload.items.filter((entry) => entry.snapshotId === sourceSession.snapshotId && allowedIds.includes(entry.subjectId))
+        .map((entry) => ({ subjectId: entry.subjectId, rate: entry.rate })),
+      history: sourceHistory,
+      distribution: sourceSession.distribution,
+      budgetMode: sessionBudgetMode(sourceSession),
+      priorMode: sessionPriorMode(sourceSession),
+      ...rankingTuning(sessionPriorMode(sourceSession)),
+    }).model];
     const backup = validatedBackup(payload, "models-valid");
     const created = await commitBackupImport(backup, { mode: "create" });
     expect(await db.models.get(created.audit.importedSessionIds[0])).toBeDefined();
@@ -588,11 +627,19 @@ describe("IndexedDB project persistence", () => {
     const demoItems = createDemoItems(demoId).slice(0, 2);
     const demoSnapshot = await saveSnapshot({ username: "demo", nickname: "Local" }, demoId, demoItems);
     const localSession = await createSession(demoSnapshot, 2, [2], { preset: "uniform", levelCount: 10, weights: Array(10).fill(10) });
-    const restoredModel = toModelState(
-      localSession.id,
-      localSession.modelVersion,
-      fitModel(demoItems.map(({ subjectId, rate }) => ({ subjectId, rate })), []),
-    );
+    const restoredModel = computeRanking({
+      type: "RECOMPUTE",
+      requestId: "replace-current-model",
+      sessionId: localSession.id,
+      version: localSession.modelVersion,
+      randomSeed: localSession.randomSeed,
+      items: demoItems.map(({ subjectId, rate }) => ({ subjectId, rate })),
+      history: [],
+      distribution: localSession.distribution,
+      budgetMode: sessionBudgetMode(localSession),
+      priorMode: sessionPriorMode(localSession),
+      ...rankingTuning(sessionPriorMode(localSession)),
+    }).model;
     await initializeModel(localSession.id, restoredModel);
     const preservedUpdatedAt = new Date(1234).toISOString();
     await db.sessions.update(localSession.id, { status: "complete", updatedAt: preservedUpdatedAt });
@@ -1007,6 +1054,47 @@ describe("IndexedDB project persistence", () => {
       await migrated.open();
       expect(await migrated.profiles.count()).toBe(0);
       expect(await migrated.backupImports.count()).toBe(0);
+    } finally {
+      migrated.close();
+      await migrated.delete();
+    }
+  });
+
+  it("upgrades v6 sessions to independent prior modes and invalidates old model caches", async () => {
+    const databaseName = `bangumi-resorter-v6-priors-${crypto.randomUUID()}`;
+    const legacy = new Dexie(databaseName);
+    legacy.version(6).stores({
+      profiles: "id, username, updatedAt",
+      snapshots: "id, profileId, syncedAt",
+      items: "[snapshotId+subjectId], snapshotId, subjectId, subjectType, collectionType, rate",
+      sessions: "id, profileId, snapshotId, subjectType, status, updatedAt",
+      sessionItems: "id, sessionId, subjectId, [sessionId+subjectId]",
+      comparisons: "id, profileId, sessionId, subjectType, active, createdAt, importBatchId, importedFromSessionId",
+      models: "sessionId, version, updatedAt",
+      importBatches: "id, profileId, targetSessionId, sourceSessionId, createdAt, type",
+      backupImports: "id, profileId, mode, createdAt, backupDigest",
+      meta: "key",
+    });
+    await legacy.open();
+    const fixture = legacyProjectFixture("v6-priors");
+    const sessions = fixture.sessions.map((session, index) => ({
+      ...session,
+      budgetMode: (["quick", "standard", "thorough"] as const)[index],
+      comparisonHistoryMode: "local" as const,
+    }));
+    await legacy.table("sessions").bulkAdd(sessions);
+    await legacy.table("models").bulkAdd(fixture.models);
+    legacy.close();
+
+    const migrated = new ResorterDatabase(databaseName);
+    try {
+      await migrated.open();
+      const byMode = Object.fromEntries((await migrated.sessions.toArray())
+        .map((session) => [session.budgetMode, session]));
+      expect(byMode.quick).toMatchObject({ priorMode: "strong", status: "active" });
+      expect(byMode.standard).toMatchObject({ priorMode: "weak", status: "active" });
+      expect(byMode.thorough).toMatchObject({ priorMode: "weak", status: "active" });
+      expect(await migrated.models.count()).toBe(0);
     } finally {
       migrated.close();
       await migrated.delete();
@@ -1704,7 +1792,7 @@ describe("IndexedDB project persistence", () => {
     expect(bundle?.model?.version).toBe(2);
   });
 
-  it("atomically changes inference mode without replacing session history", async () => {
+  it("atomically changes stopping strictness and prior strength without replacing session history", async () => {
     const snapshotId = crypto.randomUUID();
     const items = createDemoItems(snapshotId).slice(0, 2);
     const snapshot = await saveSnapshot({ username: "demo", nickname: "Demo" }, snapshotId, items);
@@ -1716,12 +1804,16 @@ describe("IndexedDB project persistence", () => {
 
     await commitSessionBudgetMode(session.id, 0, "thorough", next);
     await expect(commitSessionBudgetMode(session.id, 0, "standard", next)).rejects.toThrow(/其他页面更新/);
+    const priorModel = toModelState(session.id, 2, fit, initial.initialMeanUncertainty);
+    await commitSessionPriorMode(session.id, 1, "strong", priorModel);
+    await expect(commitSessionPriorMode(session.id, 1, "weak", priorModel)).rejects.toThrow(/其他页面更新/);
 
     const bundle = await getSessionBundle(session.id);
     expect(bundle?.session.id).toBe(session.id);
     expect(bundle?.session.budgetMode).toBe("thorough");
-    expect(bundle?.session.modelVersion).toBe(1);
+    expect(bundle?.session.priorMode).toBe("strong");
+    expect(bundle?.session.modelVersion).toBe(2);
     expect(bundle?.history).toHaveLength(0);
-    expect(bundle?.model?.version).toBe(1);
+    expect(bundle?.model?.version).toBe(2);
   });
 });

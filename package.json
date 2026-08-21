@@ -1,6 +1,6 @@
 {
   "name": "bangumi-resorter",
-  "version": "0.16.0",
+  "version": "0.17.0",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
@@ -15,6 +15,11 @@
     "test:e2e": "playwright test",
     "test": "npm run typecheck && npm run test:unit && npm run build && npm run test:html",
     "test:all": "npm test && npm run test:e2e",
+    "benchmark:comparison:core": "vitest bench benchmarks/comparison.bench.ts --run --config vitest.benchmark.config.ts --maxWorkers=1",
+    "benchmark:comparison:browser": "node benchmarks/run-comparison-browser.mjs",
+    "benchmark:comparison": "npm run benchmark:comparison:core && npm run benchmark:comparison:browser",
+    "benchmark:forecast:optimization": "vitest run --config vitest.optimization.config.ts --maxWorkers=1",
+    "benchmark:forecast:tradeoff": "node benchmarks/run-forecast-tradeoff.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"
   },
   "dependencies": {

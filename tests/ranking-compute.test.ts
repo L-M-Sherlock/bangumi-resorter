@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { computeRanking, needsPosteriorRefinement, posteriorRandomSeed } from "../lib/ranking/compute";
+import { computeRanking, computeRankingWithoutForecast, needsPosteriorRefinement, posteriorRandomSeed, retargetStoppingMode } from "../lib/ranking/compute";
 import type { RankingRequest } from "../lib/ranking/protocol";
 import { rankingTuning } from "../lib/ranking/strategy";
-import type { ComparisonBudgetMode, ModelState, RankingHistoryInput } from "../lib/types";
+import type { ComparisonBudgetMode, ModelState, PriorMode, RankingHistoryInput, StoppingForecast } from "../lib/types";
 
 const items = Array.from({ length: 8 }, (_, index) => ({
   subjectId: index + 1,
@@ -22,7 +22,12 @@ const history: RankingHistoryInput[] = Array.from({ length: 20 }, (_, index) => 
   };
 });
 
-function request(mode: ComparisonBudgetMode, version: number, previousModel?: ModelState): RankingRequest {
+function request(
+  mode: ComparisonBudgetMode,
+  version: number,
+  previousModel?: ModelState,
+  priorMode: PriorMode = "weak",
+): RankingRequest {
   return {
     type: "RECOMPUTE",
     requestId: `${mode}-${version}`,
@@ -33,9 +38,14 @@ function request(mode: ComparisonBudgetMode, version: number, previousModel?: Mo
     history,
     distribution: { preset: "uniform", levelCount: 10, weights: Array(10).fill(10) },
     budgetMode: mode,
+    priorMode,
     previousModel,
-    ...rankingTuning(mode),
+    ...rankingTuning(priorMode),
   };
+}
+
+function forecastValue(forecast: StoppingForecast | undefined, field: "lowerAdditional" | "medianAdditional" | "upperAdditional") {
+  return forecast?.[field] ?? Number.POSITIVE_INFINITY;
 }
 
 describe("ranking computation", () => {
@@ -59,19 +69,19 @@ describe("ranking computation", () => {
     })).toBe(false);
   });
 
-  it("returns identical quick diagnostics after switching through other modes", () => {
-    const firstQuick = computeRanking(request("quick", 1));
-    const standard = computeRanking(request("standard", 2, firstQuick.model));
-    const thorough = computeRanking(request("thorough", 3, standard.model));
-    const restoredQuick = computeRanking(request("quick", 4, thorough.model));
+  it("restores the same posterior and forecasts after switching prior strength away and back", () => {
+    const firstStrong = computeRanking(request("standard", 1, undefined, "strong"));
+    const weak = computeRanking(request("standard", 2, firstStrong.model, "weak"));
+    const restoredStrong = computeRanking(request("standard", 3, weak.model, "strong"));
 
-    expect(restoredQuick.model.abilities).toEqual(firstQuick.model.abilities);
-    expect(restoredQuick.model.uncertainty).toEqual(firstQuick.model.uncertainty);
-    expect(restoredQuick.model.currentMeanUncertainty).toBe(firstQuick.model.currentMeanUncertainty);
-    expect(restoredQuick.model.diagnostics).toEqual(firstQuick.model.diagnostics);
+    expect(weak.model.abilities).not.toEqual(firstStrong.model.abilities);
+    expect(restoredStrong.model.abilities).toEqual(firstStrong.model.abilities);
+    expect(restoredStrong.model.uncertainty).toEqual(firstStrong.model.uncertainty);
+    expect(restoredStrong.model.currentMeanUncertainty).toBe(firstStrong.model.currentMeanUncertainty);
+    expect(restoredStrong.model.diagnostics).toEqual(firstStrong.model.diagnostics);
   });
 
-  it("nests stopping checks and remaining forecasts by mode", () => {
+  it("shares one posterior and ordered forecasts across all stopping strictness levels", () => {
     const quick = computeRanking(request("quick", 1));
     const standard = computeRanking(request("standard", 2));
     const thorough = computeRanking(request("thorough", 3));
@@ -79,15 +89,44 @@ describe("ranking computation", () => {
     const standardDiagnostics = standard.model.diagnostics!;
     const thoroughDiagnostics = thorough.model.diagnostics!;
 
-    expect(quickDiagnostics.stoppingChecks?.map((check) => check.mode)).toEqual(["quick"]);
-    expect(standardDiagnostics.stoppingChecks?.map((check) => check.mode)).toEqual(["quick", "standard"]);
+    expect(quick.model.abilities).toEqual(standard.model.abilities);
+    expect(standard.model.abilities).toEqual(thorough.model.abilities);
+    expect(quick.model.uncertainty).toEqual(standard.model.uncertainty);
+    expect(quick.nextPair && new Set([quick.nextPair.leftSubjectId, quick.nextPair.rightSubjectId]))
+      .toEqual(standard.nextPair && new Set([standard.nextPair.leftSubjectId, standard.nextPair.rightSubjectId]));
+    expect(quickDiagnostics.stoppingChecks?.map((check) => [check.mode, check.target])).toEqual([
+      ["quick", 0.8], ["standard", 0.9], ["thorough", 0.95],
+    ]);
+    expect(standardDiagnostics.stoppingChecks).toEqual(quickDiagnostics.stoppingChecks);
     expect(thoroughDiagnostics.stoppingChecks?.map((check) => check.mode)).toEqual(["quick", "standard", "thorough"]);
-    expect(standardDiagnostics.ready).toBe(standardDiagnostics.stoppingChecks?.every((check) => check.ready));
-    expect(thoroughDiagnostics.ready).toBe(thoroughDiagnostics.stoppingChecks?.every((check) => check.ready));
+    const checks = quickDiagnostics.stoppingChecks!;
+    expect(Number(checks[0].ready)).toBeGreaterThanOrEqual(Number(checks[1].ready));
+    expect(Number(checks[1].ready)).toBeGreaterThanOrEqual(Number(checks[2].ready));
+    for (const field of ["lowerAdditional", "medianAdditional", "upperAdditional"] as const) {
+      expect(forecastValue(quickDiagnostics.forecasts?.standard, field))
+        .toBeGreaterThanOrEqual(forecastValue(quickDiagnostics.forecasts?.quick, field));
+      expect(forecastValue(quickDiagnostics.forecasts?.thorough, field))
+        .toBeGreaterThanOrEqual(forecastValue(quickDiagnostics.forecasts?.standard, field));
+    }
 
-    const remaining = (diagnostics: typeof quickDiagnostics) =>
-      diagnostics.forecast?.medianAdditional ?? Number.POSITIVE_INFINITY;
-    expect(remaining(standardDiagnostics)).toBeGreaterThanOrEqual(remaining(quickDiagnostics));
-    expect(remaining(thoroughDiagnostics)).toBeGreaterThanOrEqual(remaining(standardDiagnostics));
+    const retargeted = retargetStoppingMode(quick.model, "thorough", 99)!;
+    expect(retargeted.abilities).toEqual(quick.model.abilities);
+    expect(retargeted.uncertainty).toEqual(quick.model.uncertainty);
+    expect(retargeted.diagnostics?.forecast).toEqual(quickDiagnostics.forecasts?.thorough);
+    expect(retargeted.diagnostics?.ready).toBe(checks[2].ready);
+    expect(retargeted.version).toBe(99);
+  });
+
+  it("returns the authoritative posterior and next pair before background forecasts finish", () => {
+    const input = request("standard", 1);
+    const quick = computeRankingWithoutForecast(input);
+    const complete = computeRanking(input);
+
+    expect(quick.model.abilities).toEqual(complete.model.abilities);
+    expect(quick.model.uncertainty).toEqual(complete.model.uncertainty);
+    expect(quick.model.diagnostics?.stoppingChecks).toEqual(complete.model.diagnostics?.stoppingChecks);
+    expect(quick.model.diagnostics?.forecast).toBeUndefined();
+    expect(quick.model.diagnostics?.forecasts).toBeUndefined();
+    expect(quick.nextPair).toEqual(complete.nextPair);
   });
 });

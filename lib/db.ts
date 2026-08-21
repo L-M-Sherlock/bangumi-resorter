@@ -29,6 +29,7 @@ import {
   LocalProject,
   ModelState,
   Profile,
+  PriorMode,
   SessionItem,
   SessionScopePreview,
   SessionTagFilter,
@@ -38,9 +39,19 @@ import {
   SubjectType,
   ValidatedBackup,
 } from "./types";
-import { sessionBudgetMode } from "./ranking/strategy";
+import { legacyPriorMode, sessionBudgetMode, sessionPriorMode } from "./ranking/strategy";
 import { collectionTagFilter, filterScopeItems, sameTagFilter } from "./scope";
 import { normalizeDistributionConfig } from "./distribution";
+import {
+  analysisCheckpointsForHistory,
+  analysisPrefixDigest,
+  analysisPointFromModel,
+  mergeAnalysisPoint,
+  reconcileAnalysisSeries,
+  sessionAnalysisContext,
+  type SessionAnalysisContext,
+} from "./analysis";
+import type { SessionAnalysisPoint, SessionAnalysisSeries } from "./analysis/types";
 
 interface MetaRecord { key: string; value: string; }
 
@@ -54,6 +65,7 @@ export class ResorterDatabase extends Dexie {
   models!: EntityTable<ModelState, "sessionId">;
   importBatches!: EntityTable<ComparisonImportBatch, "id">;
   backupImports!: EntityTable<BackupImportAudit, "id">;
+  analysisSeries!: EntityTable<SessionAnalysisSeries, "id">;
   meta!: EntityTable<MetaRecord, "key">;
 
   constructor(databaseName = "bangumi-resorter") {
@@ -157,10 +169,140 @@ export class ResorterDatabase extends Dexie {
     }).upgrade(async (transaction) => {
       await migrateLegacyImportedClones(transaction);
     });
+    this.version(7).stores({
+      profiles: "id, username, updatedAt",
+      snapshots: "id, profileId, syncedAt",
+      items: "[snapshotId+subjectId], snapshotId, subjectId, subjectType, collectionType, rate",
+      sessions: "id, profileId, snapshotId, subjectType, status, updatedAt",
+      sessionItems: "id, sessionId, subjectId, [sessionId+subjectId]",
+      comparisons: "id, profileId, sessionId, subjectType, active, createdAt, importBatchId, importedFromSessionId",
+      models: "sessionId, version, updatedAt",
+      importBatches: "id, profileId, targetSessionId, sourceSessionId, createdAt, type",
+      backupImports: "id, profileId, mode, createdAt, backupDigest",
+      meta: "key",
+    }).upgrade(async (transaction) => {
+      const sessions = transaction.table<SortingSession, string>("sessions");
+      await sessions.toCollection().modify((session) => {
+        session.priorMode = legacyPriorMode(session.budgetMode);
+        session.status = "active";
+      });
+      await transaction.table<ModelState, string>("models").clear();
+    });
+    this.version(8).stores({
+      profiles: "id, username, updatedAt",
+      snapshots: "id, profileId, syncedAt",
+      items: "[snapshotId+subjectId], snapshotId, subjectId, subjectType, collectionType, rate",
+      sessions: "id, profileId, snapshotId, subjectType, status, updatedAt",
+      sessionItems: "id, sessionId, subjectId, [sessionId+subjectId]",
+      comparisons: "id, profileId, sessionId, subjectType, active, createdAt, importBatchId, importedFromSessionId",
+      models: "sessionId, version, updatedAt",
+      importBatches: "id, profileId, targetSessionId, sourceSessionId, createdAt, type",
+      backupImports: "id, profileId, mode, createdAt, backupDigest",
+      analysisSeries: "id, sessionId, updatedAt, [sessionId+priorMode]",
+      meta: "key",
+    });
   }
 }
 
 export const db = new ResorterDatabase();
+
+export async function getSessionAnalysisSeries(seriesId: string) {
+  return db.analysisSeries.get(seriesId);
+}
+
+export async function putSessionAnalysisSeries(series: SessionAnalysisSeries) {
+  await db.analysisSeries.put(series);
+  return series;
+}
+
+export async function deleteSessionAnalysisSeries(sessionId: string) {
+  await db.analysisSeries.where("sessionId").equals(sessionId).delete();
+}
+
+export async function readReconciledSessionAnalysis(context: SessionAnalysisContext) {
+  const stored = await db.analysisSeries.get(context.identity.id);
+  return reconcileAnalysisSeries(stored, context.identity, context.history, context.inputDigest);
+}
+
+async function transactionalAnalysisContext(sessionId: string) {
+  const session = await db.sessions.get(sessionId);
+  if (!session) throw new Error("分析会话已不存在。");
+  const links = await db.sessionItems.where("sessionId").equals(sessionId).toArray();
+  const allowed = new Set(links.map((entry) => entry.subjectId));
+  const [snapshotItems, comparisons] = await Promise.all([
+    db.items.where("snapshotId").equals(session.snapshotId).toArray(),
+    db.comparisons.where("sessionId").equals(sessionId).toArray(),
+  ]);
+  const items = snapshotItems.filter((entry) => allowed.has(entry.subjectId));
+  const history = comparisons.filter((entry) => entry.subjectType === session.subjectType
+    && entry.active
+    && allowed.has(entry.leftSubjectId)
+    && allowed.has(entry.rightSubjectId));
+  return sessionAnalysisContext(
+    session,
+    items,
+    history,
+    sessionPriorMode(session),
+    sessionBudgetMode(session),
+  );
+}
+
+/** Revalidates every model input in the same transaction immediately before cache write. */
+export async function persistSessionAnalysisPoint(
+  expected: SessionAnalysisContext,
+  point: SessionAnalysisPoint,
+  latest = false,
+) {
+  return db.transaction(
+    "rw",
+    [db.sessions, db.sessionItems, db.items, db.comparisons, db.analysisSeries],
+    async () => {
+      const current = await transactionalAnalysisContext(expected.sessionId);
+      if (current.identity.id !== expected.identity.id || current.inputDigest !== expected.inputDigest) {
+        throw new Error("分析输入已经变化，已拒绝陈旧检查点。");
+      }
+      const siblingSeries = await db.analysisSeries.where("sessionId").equals(current.sessionId).toArray();
+      for (const sibling of siblingSeries) {
+        if (sibling.algorithmVersion !== current.identity.algorithmVersion) {
+          await db.analysisSeries.delete(sibling.id);
+          continue;
+        }
+        const expectedCheckpoints = new Set(analysisCheckpointsForHistory(sibling.itemCount, current.history));
+        const milestones = sibling.milestones.filter((entry) => expectedCheckpoints.has(entry.checkpoint)
+          && entry.checkpoint <= current.history.length
+          && entry.prefixDigest === analysisPrefixDigest(current.history, entry.checkpoint));
+        const siblingLatest = sibling.latest?.checkpoint === current.history.length
+          && sibling.latest.prefixDigest === analysisPrefixDigest(current.history)
+          ? sibling.latest
+          : undefined;
+        if (milestones.length !== sibling.milestones.length || siblingLatest !== sibling.latest) {
+          await db.analysisSeries.put({ ...sibling, milestones, latest: siblingLatest, updatedAt: now() });
+        }
+      }
+      const stored = await db.analysisSeries.get(current.identity.id);
+      const reconciled = reconcileAnalysisSeries(
+        stored,
+        current.identity,
+        current.history,
+        current.inputDigest,
+      );
+      const merged = mergeAnalysisPoint(reconciled, point, current.history, latest);
+      await db.analysisSeries.put(merged);
+      return merged;
+    },
+  );
+}
+
+export async function persistSessionAnalysisEndpoint(
+  context: SessionAnalysisContext,
+  model: ModelState,
+) {
+  return persistSessionAnalysisPoint(
+    context,
+    analysisPointFromModel(context.history, model),
+    true,
+  );
+}
 
 function now() { return new Date().toISOString(); }
 function id() { return crypto.randomUUID(); }
@@ -751,7 +893,7 @@ async function materializeLegacyHistory() {
     }
   }
 
-  await db.transaction("rw", [db.sessions, db.comparisons, db.importBatches, db.models], async () => {
+  await db.transaction("rw", [db.sessions, db.comparisons, db.importBatches, db.models, db.analysisSeries], async () => {
     // Recheck the marker inside the transaction so concurrent app tabs cannot
     // materialize the same dynamic histories twice.
     const stillLegacy = new Set((await db.sessions.toArray())
@@ -769,6 +911,7 @@ async function materializeLegacyHistory() {
         status: "active" as const,
       });
       await db.models.delete(sessionId);
+      await db.analysisSeries.where("sessionId").equals(sessionId).delete();
     }
   });
 }
@@ -937,6 +1080,7 @@ export async function commitComparisonImport(
 
 interface CreateSessionOptions {
   budgetMode?: ComparisonBudgetMode;
+  priorMode?: PriorMode;
   tagFilter?: SessionTagFilter;
   sourceSessionId?: string;
   expectedSourceVersion?: number;
@@ -964,6 +1108,7 @@ export async function createSession(
     }
     : budgetModeOrOptions;
   const budgetMode = options.budgetMode ?? "quick";
+  const priorMode = options.priorMode ?? "weak";
   const tagFilter = options.tagFilter;
   const all = await getSnapshotItems(snapshot.id);
   const normalizedTagFilter = collectionTagFilter(tagFilter?.tags ?? []);
@@ -974,7 +1119,7 @@ export async function createSession(
     id: id(), profileId: snapshot.profileId, snapshotId: snapshot.id, subjectType, collectionTypes,
     title: `${snapshot.username} 的排序`, status: "active", distribution: normalizeDistributionConfig(distribution),
     randomSeed: crypto.getRandomValues(new Uint32Array(1))[0], modelVersion: 0,
-    budgetMode, comparisonReusePolicy: "session",
+    budgetMode, priorMode, comparisonReusePolicy: "session",
     comparisonHistoryMode: "local", tagFilter: normalizedTagFilter,
     createdAt: timestamp, updatedAt: timestamp,
   };
@@ -1150,6 +1295,7 @@ export async function upgradeSessionToSnapshot(sourceSessionId: string, targetSn
         randomSeed: crypto.getRandomValues(new Uint32Array(1))[0],
         modelVersion: 0,
         budgetMode: sessionBudgetMode(state.source),
+        priorMode: sessionPriorMode(state.source),
         comparisonReusePolicy: "session",
         comparisonHistoryMode: "local",
         upgradedFromSessionId: state.source.id,
@@ -1254,6 +1400,7 @@ export async function deriveSessionWithTagFilter(
         randomSeed: crypto.getRandomValues(new Uint32Array(1))[0],
         modelVersion: 0,
         budgetMode: sessionBudgetMode(state.source),
+        priorMode: sessionPriorMode(state.source),
         comparisonReusePolicy: "session",
         comparisonHistoryMode: "local",
         derivedFromSessionId: state.source.id,
@@ -1332,6 +1479,51 @@ export async function initializeModel(sessionId: string, model: ModelState) {
   });
 }
 
+/** Attach a derived forecast without advancing the authoritative session version. */
+function modelWithoutDerivedForecast(model: ModelState) {
+  return Object.fromEntries(Object.entries(model)
+    .filter(([key]) => key !== "updatedAt")
+    .map(([key, value]) => [key, key === "diagnostics" && value
+      ? Object.fromEntries(Object.entries(value)
+        .filter(([diagnosticKey]) => diagnosticKey !== "forecast" && diagnosticKey !== "forecasts"))
+      : value]));
+}
+
+export async function commitModelForecast(
+  sessionId: string,
+  expectedVersion: number,
+  forecastModel: ModelState,
+): Promise<ModelState | undefined> {
+  return db.transaction("rw", db.sessions, db.models, async () => {
+    const [session, stored] = await Promise.all([
+      db.sessions.get(sessionId),
+      db.models.get(sessionId),
+    ]);
+    if (!session || !stored
+      || session.modelVersion !== expectedVersion
+      || stored.version !== expectedVersion) return undefined;
+    if (forecastModel.sessionId !== sessionId || forecastModel.version !== expectedVersion) {
+      throw new Error("动态剩余预测与当前模型版本不匹配。");
+    }
+    if (!stored.diagnostics || !forecastModel.diagnostics?.forecast || !forecastModel.diagnostics.forecasts) {
+      throw new Error("动态剩余预测结果不完整。");
+    }
+    if (stableJson(modelWithoutDerivedForecast(stored))
+      !== stableJson(modelWithoutDerivedForecast(forecastModel))) return undefined;
+    const merged: ModelState = {
+      ...stored,
+      diagnostics: {
+        ...stored.diagnostics,
+        forecasts: forecastModel.diagnostics.forecasts,
+        forecast: forecastModel.diagnostics.forecast,
+      },
+      updatedAt: now(),
+    };
+    await db.models.put(merged);
+    return merged;
+  });
+}
+
 export async function lastActiveResponse(sessionId: string) {
   const active = await db.comparisons.where("sessionId").equals(sessionId)
     .filter((item) => item.active && !item.importBatchId && !item.inheritedFromComparisonId)
@@ -1386,12 +1578,13 @@ export async function commitComparisonDeletion(
 }
 
 export async function deleteSession(sessionId: string): Promise<SortingSession> {
-  return db.transaction("rw", [db.sessions, db.sessionItems, db.comparisons, db.models, db.importBatches], async () => {
+  return db.transaction("rw", [db.sessions, db.sessionItems, db.comparisons, db.models, db.importBatches, db.analysisSeries], async () => {
     const session = await db.sessions.get(sessionId);
     if (!session) throw new Error("会话不存在，可能已经被删除。");
     await db.sessionItems.where("sessionId").equals(sessionId).delete();
     await db.comparisons.where("sessionId").equals(sessionId).delete();
     await db.models.delete(sessionId);
+    await db.analysisSeries.where("sessionId").equals(sessionId).delete();
     await db.importBatches.where("targetSessionId").equals(sessionId).delete();
     await db.sessions.delete(sessionId);
     return session;
@@ -1408,7 +1601,7 @@ export async function commitSessionDistribution(
   distribution: DistributionConfig,
   nextModel: ModelState,
 ) {
-  return db.transaction("rw", db.sessions, db.models, async () => {
+  return db.transaction("rw", db.sessions, db.models, db.analysisSeries, async () => {
     const session = await db.sessions.get(sessionId);
     if (!session || session.modelVersion !== expectedVersion) throw new Error("排序会话已在其他页面更新，请刷新后继续。");
     const updated: SortingSession = {
@@ -1419,6 +1612,7 @@ export async function commitSessionDistribution(
       updatedAt: now(),
     };
     await db.models.put({ ...nextModel, sessionId, version: expectedVersion + 1, updatedAt: now() });
+    await db.analysisSeries.where("sessionId").equals(sessionId).delete();
     await db.sessions.put(updated);
     return updated;
   });
@@ -1436,6 +1630,28 @@ export async function commitSessionBudgetMode(
     const updated: SortingSession = {
       ...session,
       budgetMode,
+      modelVersion: expectedVersion + 1,
+      status: modelMeetsTarget(nextModel) ? "complete" : "active",
+      updatedAt: now(),
+    };
+    await db.models.put({ ...nextModel, sessionId, version: expectedVersion + 1, updatedAt: now() });
+    await db.sessions.put(updated);
+    return updated;
+  });
+}
+
+export async function commitSessionPriorMode(
+  sessionId: string,
+  expectedVersion: number,
+  priorMode: PriorMode,
+  nextModel: ModelState,
+) {
+  return db.transaction("rw", db.sessions, db.models, async () => {
+    const session = await db.sessions.get(sessionId);
+    if (!session || session.modelVersion !== expectedVersion) throw new Error("排序会话已在其他页面更新，请刷新后继续。");
+    const updated: SortingSession = {
+      ...session,
+      priorMode,
       modelVersion: expectedVersion + 1,
       status: modelMeetsTarget(nextModel) ? "complete" : "active",
       updatedAt: now(),
@@ -1617,6 +1833,7 @@ function sessionFingerprint(project: ProjectRows, sessionId: string, normalized 
       randomSeed: target.randomSeed,
       modelVersion: target.modelVersion,
       budgetMode: target.budgetMode,
+      priorMode: target.priorMode,
       comparisonReusePolicy: target.comparisonReusePolicy,
       comparisonHistoryMode: target.comparisonHistoryMode,
       tagFilter: target.tagFilter,
@@ -1631,6 +1848,7 @@ function sessionFingerprint(project: ProjectRows, sessionId: string, normalized 
     randomSeed: stored.randomSeed,
     modelVersion: stored.modelVersion,
     budgetMode: stored.budgetMode,
+    priorMode: stored.priorMode,
     comparisonReusePolicy: stored.comparisonReusePolicy,
     comparisonHistoryMode: stored.comparisonHistoryMode,
     stoppingTarget: stored.stoppingTarget,
@@ -1895,6 +2113,12 @@ export async function previewBackupImport(
 
 function validModel(model: ModelState | undefined, session: SortingSession, links: SessionItem[]) {
   if (!model || model.version !== session.modelVersion) return false;
+  const diagnostics = model.diagnostics;
+  if (diagnostics?.method !== "laplace-mc-v6"
+    || diagnostics.forecast?.method !== "posterior-contraction-mc-v15"
+    || !(["quick", "standard", "thorough"] as const)
+      .every((mode) => diagnostics.forecasts?.[mode]?.method === "posterior-contraction-mc-v15")
+    || !session.priorMode) return false;
   const allowed = new Set(links.filter((entry) => entry.sessionId === session.id).map((entry) => String(entry.subjectId)));
   const abilities = Object.keys(model.abilities);
   const uncertainty = Object.keys(model.uncertainty);
@@ -1922,6 +2146,7 @@ async function removeProjectRows(project: ProjectRows) {
   if (sessionIds.length > 0) {
     await db.sessionItems.where("sessionId").anyOf(sessionIds).delete();
     await db.models.where("sessionId").anyOf(sessionIds).delete();
+    await db.analysisSeries.where("sessionId").anyOf(sessionIds).delete();
   }
   await db.importBatches.where("profileId").equals(project.profile.id).delete();
   await db.comparisons.where("profileId").equals(project.profile.id).delete();
@@ -1945,7 +2170,7 @@ export async function commitBackupImport(
   }
   const tables = [
     db.profiles, db.snapshots, db.items, db.sessions, db.sessionItems, db.comparisons,
-    db.importBatches, db.models, db.backupImports, db.meta,
+    db.importBatches, db.models, db.backupImports, db.analysisSeries, db.meta,
   ];
   return db.transaction("rw", tables, async () => {
     const targetProfile = await findTargetProfile(source.profile.username);
@@ -2352,7 +2577,7 @@ export async function commitSnapshotDeletion(
   await ensureLocalHistory();
   const tables = [
     db.profiles, db.snapshots, db.items, db.sessions, db.sessionItems, db.comparisons,
-    db.importBatches, db.models, db.backupImports, db.meta,
+    db.importBatches, db.models, db.backupImports, db.analysisSeries, db.meta,
   ];
   return db.transaction("rw", tables, async () => {
     const snapshot = await db.snapshots.get(request.snapshotId);
@@ -2402,6 +2627,7 @@ export async function commitSnapshotDeletion(
       await db.comparisons.where("sessionId").anyOf(preview.sessionIds).delete();
       await db.importBatches.where("targetSessionId").anyOf(preview.sessionIds).delete();
       await db.models.where("sessionId").anyOf(preview.sessionIds).delete();
+      await db.analysisSeries.where("sessionId").anyOf(preview.sessionIds).delete();
       await db.sessions.where("id").anyOf(preview.sessionIds).delete();
     }
     await db.items.where("snapshotId").equals(snapshot.id).delete();
