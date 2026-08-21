@@ -10,9 +10,11 @@ import {
 import {
   analysisCheckpointsForHistory,
   analysisForecastBacktest,
+  analysisForecastReliability,
   analysisHistoryOrderDiffers,
   analysisPointFromModel,
   analysisSeriesPoints,
+  cleanCheckpointStep,
   sessionAnalysisContext,
   type SessionAnalysisContext,
 } from "@/lib/analysis";
@@ -232,7 +234,7 @@ function AnalysisChart({
           if (!entry.low || !entry.high || segment.length < 2) return null;
           const upper = segment.map((point) => `${x(point.checkpoint)},${y(entry.high!(point)!)}`).join(" L ");
           const lower = [...segment].reverse().map((point) => `${x(point.checkpoint)},${y(entry.low!(point)!)}`).join(" L ");
-          return <path key={`${entry.key}-area-${index}`} d={`M ${upper} L ${lower} Z`} fill={entry.color} className="analysis-band" />;
+          return <path key={`${entry.key}-area-${index}`} data-series={entry.key} d={`M ${upper} L ${lower} Z`} fill={entry.color} className="analysis-band" />;
         }))}
         {series.map((entry) => segmentsFor(points, expectedIndex, (point) => finite(entry.value(point))).map((segment, index) => {
           const path = segment.map((point, pointIndex) => `${pointIndex ? "L" : "M"} ${x(point.checkpoint)} ${y(entry.value(point)!)}`).join(" ");
@@ -326,9 +328,13 @@ export function SessionAnalysisView({
     return forecast?.status === "ready" && forecast.lowerAdditional === 0 && forecast.upperAdditional === 0;
   });
   const forecastBacktests = STOPPING_MODE_ORDER.map((mode) => analysisForecastBacktest(points, mode));
+  const checkpointStep = cleanCheckpointStep(items.length);
+  const forecastReliabilities = forecastBacktests.map((backtest) =>
+    analysisForecastReliability(backtest, checkpointStep));
   const forecastHitFooter = STOPPING_MODE_ORDER.map((mode, index) => {
     const forecast = selected.forecasts[mode];
     const backtest = forecastBacktests[index];
+    const reliability = forecastReliabilities[index];
     if (!forecast) return `${BUDGET_MODE_COPY[mode].label}：当前点未计算`;
     const successes = forecast.withinProjectionSuccesses;
     const simulated = `${successes === undefined ? formatPercent(forecast.probabilityWithinProjection) : `${successes}/${forecast.rolloutCount}`} 条模拟路径在窗口内达标`;
@@ -344,7 +350,9 @@ export function SessionAnalysisView({
     if (backtest.forecastCount === 0) {
       return `${BUDGET_MODE_COPY[mode].label}：${simulated}；${stopWindow}首次观察到停止，之前无可检验预测${interrupted}`;
     }
-    const interval = backtest.boundedIntervalCount > 0
+    const interval = reliability.suppressInterval
+      ? "P10–P90 已因同方向历史失准而抑制"
+      : backtest.boundedIntervalCount > 0
       ? `P10–P90 ${backtest.boundedIntervalHits}/${backtest.boundedIntervalCount}`
       : "P10–P90 未闭合";
     const bias = backtest.medianBias === undefined
@@ -379,14 +387,18 @@ export function SessionAnalysisView({
     value: (point) => point.stoppingChecks[mode]?.low,
     format: formatPercent,
   }));
-  const forecastSeries = STOPPING_MODE_ORDER.map<ChartSeries>((mode) => ({
+  const forecastSeries = STOPPING_MODE_ORDER.map<ChartSeries>((mode, index) => ({
     key: `forecast-${mode}`,
     label: `${BUDGET_MODE_COPY[mode].label}${mode === budgetMode ? "（当前）" : ""}`,
     ...MODE_STYLE[mode],
     emphasized: mode === budgetMode,
     value: (point) => point.forecasts[mode]?.medianAdditional,
-    low: (point) => point.forecasts[mode]?.lowerAdditional,
-    high: (point) => point.forecasts[mode]?.upperAdditional,
+    low: forecastReliabilities[index].suppressInterval
+      ? () => undefined
+      : (point) => point.forecasts[mode]?.lowerAdditional,
+    high: forecastReliabilities[index].suppressInterval
+      ? () => undefined
+      : (point) => point.forecasts[mode]?.upperAdditional,
   }));
 
   return <section className="analysis-page" aria-labelledby="analysis-title">
@@ -403,6 +415,14 @@ export function SessionAnalysisView({
     {(cacheWarning || storageWarning) && <div className="notice notice-warning" role="status">当前端点仍可查看；历史缓存不可用：{cacheWarning || storageWarning}</div>}
     {activeTask && task.status === "error" && <div className="notice notice-error" role="alert">历史补算中断：{task.message}<button type="button" className="text-button" disabled={!canBuild} onClick={() => void onBuildHistory(context, missing)}>重试缺失点</button></div>}
     {availabilityReordered && <div className="notice notice-info">历史诊断按判断实际发生时间重建；动态剩余与回溯改按证据进入当前会话的时间计算，避免把后来导入的判断当成当时选题器已经掌握的证据。</div>}
+    {STOPPING_MODE_ORDER.flatMap((mode, index) => {
+      const reliability = forecastReliabilities[index];
+      const backtest = forecastBacktests[index];
+      if (!reliability.suppressInterval) return [];
+      const direction = reliability.status === "systematic-underprediction" ? "低估" : "高估";
+      const bias = backtest.medianBias ?? 0;
+      return [<div className="notice notice-warning" role="status" key={`forecast-reliability-${mode}`}>{BUDGET_MODE_COPY[mode].label}档可用时间回溯显示系统性{direction}剩余题量：{reliability.directionalMissCount}/{backtest.boundedIntervalCount} 个 P10–P90 区间同方向错过停止窗口，P50 中位偏差 {bias > 0 ? "+" : ""}{formatCount(bias)}。历史 P10–P90 阴影已抑制；P50 仅作模型内情景参考。</div>];
+    })}
     {anyReadyZero && <div className="notice notice-info">预测的 0–0 表示对应停止规则已经满足；它不表示后验分布或模型不确定性消失。</div>}
 
     <section className="analysis-control-panel" aria-label="历史检查点控制">

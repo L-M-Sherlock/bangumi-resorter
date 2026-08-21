@@ -4,6 +4,7 @@ import {
   analysisCheckpointsForHistory,
   analysisEvidenceBreakdown,
   analysisForecastBacktest,
+  analysisForecastReliability,
   analysisHistoryOrderDiffers,
   analysisInputDigest,
   analysisPointFromModel,
@@ -309,6 +310,60 @@ describe("session analysis mapping and cache identity", () => {
       forecastCount: 2,
       boundedIntervalHits: 2,
       medianAbsoluteError: 0,
+    });
+    expect(analysisForecastReliability(result, 50)).toMatchObject({
+      status: "insufficient",
+      suppressInterval: false,
+    });
+  });
+
+  it("suppresses intervals only after material same-direction backtest misses", () => {
+    const base = {
+      mode: "quick" as const,
+      status: "observed" as const,
+      observedStopWindowStart: 451,
+      observedStopCheckpoint: 500,
+      forecastCount: 4,
+      boundedIntervalCount: 4,
+      boundedIntervalHits: 0,
+      belowIntervalCount: 4,
+      aboveIntervalCount: 0,
+      interruptedForecastCount: 0,
+      empiricalIntervalCoverage: 0,
+      medianAbsoluteError: 75,
+      medianBias: -75,
+    };
+    expect(analysisForecastReliability(base, 50)).toMatchObject({
+      status: "systematic-underprediction",
+      suppressInterval: true,
+      directionalMissCount: 4,
+      requiredDirectionalMissCount: 4,
+    });
+    expect(analysisForecastReliability({
+      ...base,
+      belowIntervalCount: 0,
+      aboveIntervalCount: 4,
+      medianBias: 75,
+    }, 50)).toMatchObject({
+      status: "systematic-overprediction",
+      suppressInterval: true,
+    });
+    expect(analysisForecastReliability({
+      ...base,
+      boundedIntervalHits: 1,
+      belowIntervalCount: 3,
+    }, 50)).toMatchObject({
+      status: "compatible",
+      suppressInterval: false,
+    });
+    expect(analysisForecastReliability({
+      ...base,
+      forecastCount: 2,
+      boundedIntervalCount: 2,
+      belowIntervalCount: 2,
+    }, 50)).toMatchObject({
+      status: "insufficient",
+      suppressInterval: false,
     });
   });
 

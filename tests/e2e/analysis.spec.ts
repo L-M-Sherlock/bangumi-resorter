@@ -97,3 +97,80 @@ test("current session analysis exposes six linked charts and resumable history c
   await expect(page.locator(".analysis-chart-card")).toHaveCount(6);
   await expectNoHorizontalOverflow(page);
 });
+
+test("analysis suppresses a historically one-sided forecast interval", async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.goto("/");
+  await page.locator("html[data-resorter-ready='true']").waitFor();
+  await page.getByRole("button", { name: "先用演示数据体验" }).click();
+  await page.getByRole("button", { name: /开始快速比较/ }).click();
+  for (let index = 0; index < 20; index += 1) {
+    await page.getByRole("button", { name: /更喜欢这部/ }).first().click();
+  }
+  await page.getByRole("button", { name: "查看当前结果" }).click();
+  await page.locator(".results-header").getByRole("button", { name: "会话分析", exact: true }).click();
+  const buildHistory = page.getByRole("button", { name: /补算历史检查点|历史检查点已齐全/ });
+  if (await buildHistory.isEnabled()) await buildHistory.click();
+  await expect(page.getByRole("button", { name: "历史检查点已齐全" })).toBeDisabled({ timeout: 30_000 });
+
+  await page.evaluate(async () => {
+    const database = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("bangumi-resorter");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction("analysisSeries", "readwrite");
+      const store = transaction.objectStore("analysisSeries");
+      const read = store.getAll();
+      read.onsuccess = () => {
+        const series = read.result.find((entry) => entry.milestones?.some((point: { checkpoint: number }) => point.checkpoint === 15));
+        if (!series) {
+          reject(new Error("analysis series was not created"));
+          return;
+        }
+        series.milestones = series.milestones.map((point: Record<string, unknown> & {
+          checkpoint: number;
+          forecasts: Record<string, unknown>;
+          stoppingChecks: Record<string, Record<string, unknown>>;
+          backtestStoppingChecks?: Record<string, Record<string, unknown>>;
+        }) => {
+          const quickCheck = {
+            ...(point.backtestStoppingChecks?.quick ?? point.stoppingChecks.quick),
+            ready: point.checkpoint === 15,
+            probability: point.checkpoint === 15 ? 1 : 0,
+            low: point.checkpoint === 15 ? 1 : 0,
+          };
+          return {
+            ...point,
+            backtestStoppingChecks: { ...point.backtestStoppingChecks, quick: quickCheck },
+            forecastImportedRaw: 0,
+            forecastManualRaw: 0,
+            forecasts: point.checkpoint < 15 ? {
+              ...point.forecasts,
+              quick: {
+                mode: "quick", status: "forecast", rolloutCount: 64,
+                lowerAdditional: 0, medianAdditional: 0, upperAdditional: 0,
+                projectionHorizon: 100, probabilityWithinProjection: 1,
+                withinProjectionSuccesses: 64,
+              },
+            } : point.forecasts,
+          };
+        });
+        store.put(series);
+      };
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+    });
+    database.close();
+  });
+
+  await page.getByRole("button", { name: "返回结果" }).click();
+  await page.locator(".results-header").getByRole("button", { name: "会话分析", exact: true }).click();
+  await expect(page.getByText(/快速档可用时间回溯显示系统性低估剩余题量/)).toBeVisible();
+  await expect(page.getByText(/历史 P10–P90 阴影已抑制/)).toBeVisible();
+  const forecastChart = page.locator(".analysis-chart-card").filter({ hasText: "三档动态剩余预测" });
+  await expect(forecastChart.locator("path.analysis-band[data-series='forecast-quick']")).toHaveCount(0);
+  await expect(forecastChart).toContainText("P10–P90 已因同方向历史失准而抑制");
+});

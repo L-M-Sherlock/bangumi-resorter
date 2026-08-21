@@ -464,6 +464,10 @@ export interface AnalysisForecastBacktest {
   forecastCount: number;
   boundedIntervalCount: number;
   boundedIntervalHits: number;
+  /** Forecast interval ended before the checkpoint-resolution stop window. */
+  belowIntervalCount: number;
+  /** Forecast interval started after the checkpoint-resolution stop window. */
+  aboveIntervalCount: number;
   interruptedForecastCount: number;
   empiricalIntervalCoverage?: number;
   medianAbsoluteError?: number;
@@ -512,12 +516,16 @@ export function analysisForecastBacktest(
       forecastCount: candidateForecasts.length - interruptedForecastCount,
       boundedIntervalCount: 0,
       boundedIntervalHits: 0,
+      belowIntervalCount: 0,
+      aboveIntervalCount: 0,
       interruptedForecastCount,
     };
   }
   const errors: number[] = [];
   let boundedIntervalCount = 0;
   let boundedIntervalHits = 0;
+  let belowIntervalCount = 0;
+  let aboveIntervalCount = 0;
   for (const point of ordered) {
     if (point.checkpoint >= stopped.checkpoint) continue;
     const forecast = point.forecasts[mode];
@@ -536,6 +544,10 @@ export function analysisForecastBacktest(
     if (forecast.lowerAdditional <= actualAdditionalHigh
       && forecast.upperAdditional >= actualAdditionalLow) {
       boundedIntervalHits += 1;
+    } else if (forecast.upperAdditional < actualAdditionalLow) {
+      belowIntervalCount += 1;
+    } else if (forecast.lowerAdditional > actualAdditionalHigh) {
+      aboveIntervalCount += 1;
     }
   }
   return {
@@ -546,11 +558,72 @@ export function analysisForecastBacktest(
     forecastCount: errors.length,
     boundedIntervalCount,
     boundedIntervalHits,
+    belowIntervalCount,
+    aboveIntervalCount,
     interruptedForecastCount,
     empiricalIntervalCoverage: boundedIntervalCount > 0
       ? boundedIntervalHits / boundedIntervalCount
       : undefined,
     medianAbsoluteError: median(errors.map(Math.abs)),
     medianBias: median(errors),
+  };
+}
+
+export interface AnalysisForecastReliability {
+  status: "insufficient" | "compatible" | "systematic-underprediction" | "systematic-overprediction";
+  suppressInterval: boolean;
+  directionalMissCount: number;
+  requiredDirectionalMissCount: number;
+}
+
+/**
+ * Conservative within-session guard. Correlated checkpoints are not treated
+ * as independent calibration samples: protection requires at least three
+ * bounded forecasts, 80% same-direction misses, and one full checkpoint step
+ * of median bias.
+ */
+export function analysisForecastReliability(
+  backtest: AnalysisForecastBacktest,
+  checkpointStep: number,
+): AnalysisForecastReliability {
+  const requiredDirectionalMissCount = Math.max(
+    3,
+    Math.ceil(backtest.boundedIntervalCount * 0.8),
+  );
+  if (backtest.status !== "observed"
+    || backtest.forecastCount < 3
+    || backtest.boundedIntervalCount < 3
+    || backtest.medianBias === undefined) {
+    return {
+      status: "insufficient",
+      suppressInterval: false,
+      directionalMissCount: 0,
+      requiredDirectionalMissCount,
+    };
+  }
+  const materialBias = Math.max(1, checkpointStep);
+  if (backtest.belowIntervalCount >= requiredDirectionalMissCount
+    && backtest.medianBias <= -materialBias) {
+    return {
+      status: "systematic-underprediction",
+      suppressInterval: true,
+      directionalMissCount: backtest.belowIntervalCount,
+      requiredDirectionalMissCount,
+    };
+  }
+  if (backtest.aboveIntervalCount >= requiredDirectionalMissCount
+    && backtest.medianBias >= materialBias) {
+    return {
+      status: "systematic-overprediction",
+      suppressInterval: true,
+      directionalMissCount: backtest.aboveIntervalCount,
+      requiredDirectionalMissCount,
+    };
+  }
+  return {
+    status: "compatible",
+    suppressInterval: false,
+    directionalMissCount: Math.max(backtest.belowIntervalCount, backtest.aboveIntervalCount),
+    requiredDirectionalMissCount,
   };
 }
