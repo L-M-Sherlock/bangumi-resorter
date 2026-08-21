@@ -63,7 +63,19 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await page.setViewportSize({ width: 1280, height: 800 });
   await expect(page.locator(".choice-button kbd").first()).toBeVisible();
   await expect(page.locator(".secondary-actions kbd").first()).toBeVisible();
-  await expect(page.getByRole("button", { name: "显示评分" })).toBeVisible();
+  const scoreVisibilityButton = page.getByRole("button", { name: "显示评分" });
+  await expect(scoreVisibilityButton).toBeVisible();
+  await page.setViewportSize({ width: 883, height: 802 });
+  const scoreButtonLayout = await scoreVisibilityButton.evaluate((button) => {
+    const textRange = document.createRange();
+    textRange.selectNodeContents(button);
+    return {
+      whiteSpace: getComputedStyle(button).whiteSpace,
+      textLineCount: textRange.getClientRects().length,
+    };
+  });
+  expect(scoreButtonLayout).toEqual({ whiteSpace: "nowrap", textLineCount: 1 });
+  await page.setViewportSize({ width: 1280, height: 800 });
   await expect(page.locator(".comparison-scores")).toHaveCount(0);
   await page.getByRole("button", { name: "显示评分" }).click();
   await expect(page.getByRole("button", { name: "隐藏评分" })).toBeVisible();

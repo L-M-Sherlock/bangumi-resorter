@@ -232,7 +232,7 @@ input:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgba(45,102,98,.0
 .inference-mode-select .themed-select-menu { width: max(100%, 180px); }
 .inference-mode-select .themed-select-option > span:first-child { white-space: nowrap; }
 .prior-mode-select .themed-select-menu { width: max(100%, 138px); }
-.ghost-button { padding: 9px 13px; color: var(--muted); border: 1px solid var(--line); border-radius: 7px; background: transparent; font-size: 12px; }
+.ghost-button { padding: 9px 13px; color: var(--muted); border: 1px solid var(--line); border-radius: 7px; background: transparent; font-size: 12px; white-space: nowrap; }
 .ghost-button:hover { color: var(--ink); background: var(--panel); }
 .notice { margin-bottom: 16px; padding: 12px 14px; border: 1px solid; border-radius: 8px; font-size: 12px; line-height: 1.5; }
 .notice-info { color: var(--teal); border-color: var(--info-border); background: var(--teal-bg); }
