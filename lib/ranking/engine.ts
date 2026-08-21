@@ -61,6 +61,8 @@ export interface FitResult {
   tieStrength?: number;
   optimizationStatus?: OptimizationStatus;
   posteriorSamples: Float64Array[];
+  /** Joint Laplace draws of log(nu), aligned with posteriorSamples. */
+  tieLogSamples?: Float64Array;
 }
 
 export interface FitOptions {
@@ -88,8 +90,9 @@ export interface PairSelectionOptions {
 }
 
 interface PairSelectionCache {
-  pairCounts: Map<string, number>;
-  itemCounts: Map<number, number>;
+  pairMass: Map<string, number>;
+  pairEffectiveWeight: Map<string, number>;
+  itemEffectiveWeight: Map<number, number>;
   cooled: Set<string>;
   nonCalibrationCount: number;
 }
@@ -140,6 +143,10 @@ export function davidsonProbabilities(
     tie: tieWeight / denominator,
     right: rightWeight / denominator,
   };
+}
+
+function tieStrengthFromLog(logStrength: number) {
+  return Math.exp(Math.max(-80, Math.min(80, logStrength)));
 }
 
 function categoricalEntropy(probabilities: DavidsonProbabilities) {
@@ -325,6 +332,7 @@ function sampleLaplacePosterior(
   seed: number,
 ) {
   const samples: Float64Array[] = [];
+  const tieLogSamples = new Float64Array(sampleCount);
   const random = seededRandom(seed);
   const normal = normalGenerator(random);
   const priorNoiseScale = Math.sqrt(priorStrength);
@@ -361,9 +369,11 @@ function sampleLaplacePosterior(
     const sample = new Float64Array(tieIndex);
     for (let i = 0; i < tieIndex; i += 1) sample[i] = parameters[i] + delta[i];
     samples.push(sample);
+    tieLogSamples[sampleIndex] = parameters[tieIndex] + delta[tieIndex];
   }
   recenterSamples(samples, parameters.subarray(0, tieIndex));
-  return samples;
+  recenterScalarSamples(tieLogSamples, parameters[tieIndex]);
+  return { samples, tieLogSamples };
 }
 
 /** Shift only the ensemble mean, preserving every centered sample and covariance. */
@@ -379,6 +389,16 @@ export function recenterSamples(samples: Float64Array[], target: Float64Array) {
   return samples;
 }
 
+/** Shift a scalar ensemble mean while preserving its variance and covariances. */
+function recenterScalarSamples(samples: Float64Array, target: number) {
+  if (samples.length === 0) return samples;
+  let mean = 0;
+  for (const sample of samples) mean += sample;
+  const shift = target - mean / samples.length;
+  for (let index = 0; index < samples.length; index += 1) samples[index] += shift;
+  return samples;
+}
+
 export function fitModel(
   items: RankingItemInput[],
   comparisonsInput: RankingComparisonInput[],
@@ -390,6 +410,7 @@ export function fitModel(
       abilities: {}, uncertainty: {}, meanUncertainty: 0, converged: true,
       iterations: 0, acceptedComparisons: 0, effectiveComparisons: 0,
       tieStrength: DEFAULT_TIE_STRENGTH, optimizationStatus: "converged", posteriorSamples: [],
+      tieLogSamples: new Float64Array(),
     };
   }
   const indexById = new Map(items.map((item, index) => [item.subjectId, index]));
@@ -470,7 +491,7 @@ export function fitModel(
     optimizationStatus = "non-finite";
   }
   const sampleCount = Math.max(8, Math.round(options.posteriorSampleCount ?? DEFAULT_POSTERIOR_SAMPLES));
-  const posteriorSamples = sampleLaplacePosterior(
+  const posterior = sampleLaplacePosterior(
     parameters,
     comparisons,
     finalEvaluation,
@@ -478,6 +499,7 @@ export function fitModel(
     sampleCount,
     options.randomSeed ?? 0x5eed1234,
   );
+  const posteriorSamples = posterior.samples;
   const abilities: Record<number, number> = {};
   const uncertainty: Record<number, number> = {};
   let meanUncertainty = 0;
@@ -507,10 +529,29 @@ export function fitModel(
     tieStrength,
     optimizationStatus,
     posteriorSamples,
+    tieLogSamples: posterior.tieLogSamples,
   };
 }
 
 function pairKey(a: number, b: number) { return a < b ? `${a}:${b}` : `${b}:${a}`; }
+
+export interface PairOutcomeMass {
+  lowerWin: number;
+  tie: number;
+  higherWin: number;
+}
+
+export type CanonicalPairOutcome = keyof PairOutcomeMass;
+
+function canonicalPairOutcome(
+  leftSubjectId: number,
+  rightSubjectId: number,
+  outcome: "left" | "tie" | "right",
+): CanonicalPairOutcome {
+  if (outcome === "tie") return "tie";
+  const winner = outcome === "left" ? leftSubjectId : rightSubjectId;
+  return winner === Math.min(leftSubjectId, rightSubjectId) ? "lowerWin" : "higherWin";
+}
 
 export interface RankingEvidenceSummary {
   comparisons: RankingComparisonInput[];
@@ -520,6 +561,8 @@ export interface RankingEvidenceSummary {
   coveredItemCount: number;
   /** Sum of source-age-decayed observations before the pair design effect. */
   pairMass: Record<string, number>;
+  /** Source-age-decayed outcome masses in canonical subject-ID orientation. */
+  pairOutcomeMass: Record<string, PairOutcomeMass>;
   pairEffectiveWeight: Record<string, number>;
   itemEffectiveWeight: Record<number, number>;
 }
@@ -554,6 +597,7 @@ export function summarizeRankingEvidence(
 
   const comparisons: RankingComparisonInput[] = [];
   const pairMass: Record<string, number> = {};
+  const pairOutcomeMass: Record<string, PairOutcomeMass> = {};
   const pairEffectiveWeight: Record<string, number> = {};
   const itemEffectiveWeight: Record<number, number> = {};
   let evidenceCount = 0;
@@ -563,6 +607,16 @@ export function summarizeRankingEvidence(
     const effectiveWeight = repeatedPairEffectiveSampleSize(mass);
     const multiplier = mass > 0 ? effectiveWeight / mass : 0;
     pairMass[key] = mass;
+    const outcomeMass: PairOutcomeMass = { lowerWin: 0, tie: 0, higherWin: 0 };
+    for (const { entry, baseWeight } of cluster) {
+      const outcome = canonicalPairOutcome(
+        entry.leftSubjectId,
+        entry.rightSubjectId,
+        entry.outcome as "left" | "tie" | "right",
+      );
+      outcomeMass[outcome] += baseWeight;
+    }
+    pairOutcomeMass[key] = outcomeMass;
     pairEffectiveWeight[key] = effectiveWeight;
     evidenceCount += effectiveWeight;
     if (effectiveWeight >= MINIMUM_COVERAGE_WEIGHT) uniquePairCount += 1;
@@ -587,6 +641,7 @@ export function summarizeRankingEvidence(
     uniquePairCount,
     coveredItemCount,
     pairMass,
+    pairOutcomeMass,
     pairEffectiveWeight,
     itemEffectiveWeight,
   };
@@ -983,6 +1038,7 @@ function posteriorInformation(
   samples: Float64Array[],
   indexById: Map<number, number>,
   tieStrength: number,
+  tieLogSamples?: Float64Array,
   sampleStride = 1,
 ) {
   if (samples.length === 0) return 0;
@@ -996,7 +1052,10 @@ function posteriorInformation(
   for (let sampleIndex = 0; sampleIndex < samples.length; sampleIndex += stride) {
     const sample = samples[sampleIndex];
     const probabilities = davidsonProbabilities(
-      sample[firstIndex] - sample[secondIndex], tieStrength,
+      sample[firstIndex] - sample[secondIndex],
+      tieLogSamples?.length === samples.length
+        ? tieStrengthFromLog(tieLogSamples[sampleIndex])
+        : tieStrength,
     );
     meanProbabilities.left += probabilities.left;
     meanProbabilities.tie += probabilities.tie;
@@ -1041,27 +1100,16 @@ function nextCalibrationPair(
 
 function globalExplorationPair(
   items: RankingItemInput[],
-  history: RankingHistoryInput[],
   fit: FitResult,
   diagnostics: RankingDiagnostics,
-  cooled: Set<string>,
   version: number,
   randomSeed: number,
   radius: number,
-  cache?: PairSelectionCache,
+  cache: PairSelectionCache,
   posteriorSampleStride = 1,
 ): { first: number; second: number; score: number } | undefined {
-  const pairCounts = cache?.pairCounts ?? new Map<string, number>();
-  const itemCounts = cache?.itemCounts ?? new Map(items.map((item) => [item.subjectId, 0]));
-  if (!cache) {
-    for (const entry of history) {
-      if (entry.outcome === "skip") continue;
-      const key = pairKey(entry.leftSubjectId, entry.rightSubjectId);
-      pairCounts.set(key, (pairCounts.get(key) ?? 0) + 1);
-      itemCounts.set(entry.leftSubjectId, (itemCounts.get(entry.leftSubjectId) ?? 0) + 1);
-      itemCounts.set(entry.rightSubjectId, (itemCounts.get(entry.rightSubjectId) ?? 0) + 1);
-    }
-  }
+  const pairWeights = cache.pairEffectiveWeight;
+  const itemWeights = cache.itemEffectiveWeight;
   const indexById = new Map(items.map((item, index) => [item.subjectId, index]));
   const ordered = orderByAbilities(items, fit.abilities);
   const orderedIndex = new Map(ordered.map((item, index) => [item.subjectId, index]));
@@ -1071,7 +1119,7 @@ function globalExplorationPair(
   const firstPool = unstable.length > 0 ? unstable : items;
   const firstCandidates = [...firstPool]
     .sort((left, right) =>
-      (itemCounts.get(left.subjectId) ?? 0) - (itemCounts.get(right.subjectId) ?? 0)
+      (itemWeights.get(left.subjectId) ?? 0) - (itemWeights.get(right.subjectId) ?? 0)
       || (stabilities[left.subjectId] ?? 0) - (stabilities[right.subjectId] ?? 0)
       || hash(`${randomSeed}:${version}:${left.subjectId}:coverage`)
         - hash(`${randomSeed}:${version}:${right.subjectId}:coverage`))
@@ -1096,12 +1144,12 @@ function globalExplorationPair(
         candidates.push({
           first: first.subjectId,
           second: second.subjectId,
-          cooled: cooled.has(key),
-          repeats: pairCounts.get(key) ?? 0,
-          secondCount: itemCounts.get(second.subjectId) ?? 0,
+          cooled: cache.cooled.has(key),
+          repeats: pairWeights.get(key) ?? 0,
+          secondCount: itemWeights.get(second.subjectId) ?? 0,
           information: posteriorInformation(
             first.subjectId, second.subjectId, fit.posteriorSamples, indexById,
-            fit.tieStrength ?? DEFAULT_TIE_STRENGTH, posteriorSampleStride,
+            fit.tieStrength ?? DEFAULT_TIE_STRENGTH, fit.tieLogSamples, posteriorSampleStride,
           ),
           tieBreak: hash(`${randomSeed}:${version}:${key}:exploration`),
         });
@@ -1141,20 +1189,12 @@ export function chooseNextPair(
   if (calibration) return calibration;
 
   const ordered = orderByAbilities(items, fit.abilities);
-  const selectionCache = options.selectionCache;
-  const counts = selectionCache?.pairCounts ?? new Map<string, number>();
-  if (!selectionCache) {
-    for (const entry of history) {
-      if (entry.outcome === "skip") continue;
-      const key = pairKey(entry.leftSubjectId, entry.rightSubjectId);
-      counts.set(key, (counts.get(key) ?? 0) + 1);
-    }
-  }
-  const cooled = selectionCache?.cooled ?? new Set(history
-    .filter((entry) => entry.outcome === "skip" && fit.acceptedComparisons - entry.acceptedCountAtAnswer < 20)
-    .map((entry) => pairKey(entry.leftSubjectId, entry.rightSubjectId)));
-  const nonCalibrationCount = selectionCache?.nonCalibrationCount
-    ?? history.filter((entry) => entry.sessionId === sessionId && entry.queryKind !== "calibration").length;
+  const selectionCache = options.selectionCache ?? createPairSelectionCache(
+    items, history, sessionId, fit.acceptedComparisons,
+  );
+  const pairWeights = selectionCache.pairEffectiveWeight;
+  const cooled = selectionCache.cooled;
+  const nonCalibrationCount = selectionCache.nonCalibrationCount;
   const posteriorSampleStride = Math.max(1, Math.round(options.posteriorSampleStride ?? 1));
   let selected: { first: number; second: number; score: number } | undefined;
   let queryKind: NextPair["queryKind"] = "adaptive";
@@ -1162,7 +1202,7 @@ export function chooseNextPair(
   if ((nonCalibrationCount + 1) % explorationInterval === 0) {
     const explorationRadius = Math.max(1, Math.round(options.explorationRadius ?? 5));
     const exploration = globalExplorationPair(
-      items, history, fit, diagnostics, cooled, version, randomSeed, explorationRadius,
+      items, fit, diagnostics, version, randomSeed, explorationRadius,
       selectionCache, posteriorSampleStride,
     );
     if (exploration) {
@@ -1228,9 +1268,9 @@ export function chooseNextPair(
         if (!ignoreCooldown && cooled.has(key)) continue;
         const information = posteriorInformation(
           first, second, fit.posteriorSamples, indexById,
-          fit.tieStrength ?? DEFAULT_TIE_STRENGTH, posteriorSampleStride,
+          fit.tieStrength ?? DEFAULT_TIE_STRENGTH, fit.tieLogSamples, posteriorSampleStride,
         );
-        const score = information / (1 + (counts.get(key) ?? 0));
+        const score = information / (1 + (pairWeights.get(key) ?? 0));
         if (!best || score > best.score + 1e-12
           || (Math.abs(score - best.score) <= 1e-12 && key < best.key)) {
           best = { first, second, score, key };
@@ -1331,7 +1371,11 @@ export interface StoppingForecastRolloutInput {
   /** Initial MAP abilities retained for worker/backward compatibility. */
   currentAbilities: Float64Array;
   forecastSamples: Float64Array[];
+  /** Joint log(nu) particles, aligned with forecastSamples. */
+  forecastTieLogSamples: Float64Array;
   truthSamples: Float64Array[];
+  /** Latent log(nu) used to answer each corresponding truth rollout. */
+  truthTieLogSamples: Float64Array;
   rolloutSeeds: Uint32Array;
   scoreByRank: Uint8Array;
   acceptedComparisons: number;
@@ -1340,6 +1384,7 @@ export interface StoppingForecastRolloutInput {
   evidenceRequired: number;
   uniquePairRequired: number;
   pairMass: Record<string, number>;
+  pairOutcomeMass: Record<string, PairOutcomeMass>;
   itemEffectiveWeight: Record<number, number>;
   diagnosticStride: number;
   /** Internal safety bound used as the actual finite forecast window. */
@@ -1356,8 +1401,8 @@ export interface StoppingForecastRolloutInput {
  * policy as the product: choose one pair, draw one Davidson response, and
  * update a small posterior ensemble before checking the stopping event again.
  *
- * The response probabilities and importance update use the same fitted
- * Davidson likelihood as the real-data fit and information-gain calculation.
+ * Response generation and the joint local-Laplace update use the same fitted
+ * Davidson likelihood and pair-cluster design effect as the real-data fit.
  */
 const FORECAST_MIN_PAIR_VARIANCE = 1e-8;
 // Sorting every posterior draw is the dominant cost for large collections.
@@ -1504,12 +1549,361 @@ export function updateForecastPosterior(
   return gains;
 }
 
+function pairOutcomeMassTotal(outcomeMass: PairOutcomeMass) {
+  return outcomeMass.lowerWin + outcomeMass.tie + outcomeMass.higherWin;
+}
+
+/** Fractional log likelihood of one correlation-adjusted unordered-pair cluster. */
+function pairClusterLogLikelihood(
+  difference: number,
+  tieLogStrength: number,
+  outcomeMass: PairOutcomeMass,
+) {
+  const mass = pairOutcomeMassTotal(outcomeMass);
+  if (!(mass > 0)) return 0;
+  const probabilities = davidsonProbabilities(difference, tieStrengthFromLog(tieLogStrength));
+  const multiplier = repeatedPairEffectiveSampleSize(mass) / mass;
+  return multiplier * (
+    outcomeMass.lowerWin * Math.log(Math.max(1e-300, probabilities.left))
+    + outcomeMass.tie * Math.log(Math.max(1e-300, probabilities.tie))
+    + outcomeMass.higherWin * Math.log(Math.max(1e-300, probabilities.right))
+  );
+}
+
+interface PairClusterDerivatives {
+  gradient0: number;
+  gradient1: number;
+  information00: number;
+  information01: number;
+  information11: number;
+}
+
+function pairClusterDerivatives(
+  difference: number,
+  tieLogStrength: number,
+  outcomeMass: PairOutcomeMass,
+): PairClusterDerivatives {
+  const mass = pairOutcomeMassTotal(outcomeMass);
+  if (!(mass > 0)) {
+    return {
+      gradient0: 0, gradient1: 0,
+      information00: 0, information01: 0, information11: 0,
+    };
+  }
+  const probabilities = davidsonProbabilities(difference, tieStrengthFromLog(tieLogStrength));
+  const effectiveWeight = repeatedPairEffectiveSampleSize(mass);
+  const multiplier = effectiveWeight / mass;
+  const expectedDifferenceFeature = 0.5 * (probabilities.left - probabilities.right);
+  return {
+    gradient0: multiplier * 0.5 * (outcomeMass.lowerWin - outcomeMass.higherWin)
+      - effectiveWeight * expectedDifferenceFeature,
+    gradient1: multiplier * outcomeMass.tie - effectiveWeight * probabilities.tie,
+    information00: effectiveWeight * (
+      0.25 * (probabilities.left + probabilities.right) - expectedDifferenceFeature ** 2
+    ),
+    information01: effectiveWeight * -expectedDifferenceFeature * probabilities.tie,
+    information11: effectiveWeight * probabilities.tie * (1 - probabilities.tie),
+  };
+}
+
+function regularizePositiveDefinite2x2(
+  matrix00: number,
+  matrix01: number,
+  matrix11: number,
+  minimumEigenvalue = FORECAST_MIN_PAIR_VARIANCE,
+) {
+  const discriminant = Math.hypot(matrix00 - matrix11, 2 * matrix01);
+  const smallestEigenvalue = 0.5 * (matrix00 + matrix11 - discriminant);
+  const diagonalShift = Math.max(0, minimumEigenvalue - smallestEigenvalue);
+  return {
+    matrix00: matrix00 + diagonalShift,
+    matrix01,
+    matrix11: matrix11 + diagonalShift,
+  };
+}
+
+interface Cholesky2x2 {
+  lower00: number;
+  lower10: number;
+  lower11: number;
+}
+
+function covarianceCholesky2x2(covariance00: number, covariance01: number, covariance11: number) {
+  // The shared ridge makes the transform the identity when the source and
+  // target moments are equal, while keeping hand-written degenerate ensembles
+  // finite.
+  const lower00 = Math.sqrt(Math.max(FORECAST_MIN_PAIR_VARIANCE, covariance00 + FORECAST_MIN_PAIR_VARIANCE));
+  const lower10 = covariance01 / lower00;
+  const lower11 = Math.sqrt(Math.max(
+    FORECAST_MIN_PAIR_VARIANCE,
+    covariance11 + FORECAST_MIN_PAIR_VARIANCE - lower10 ** 2,
+  ));
+  return { lower00, lower10, lower11 } satisfies Cholesky2x2;
+}
+
+export interface ForecastClusterPosteriorUpdate {
+  abilityMeanShifts: Float64Array;
+  tieLogMeanShift: number;
+}
+
+/**
+ * Update a joint theta/log(nu) forecast ensemble after adding one answer to an
+ * unordered-pair cluster. The local Laplace target replaces the old cluster
+ * likelihood with the fully reweighted new cluster likelihood, so a
+ * contradictory repeat can also reduce the weight of the earlier answer.
+ */
+export function updateForecastClusterPosterior(
+  posteriorSamples: Float64Array[],
+  tieLogSamples: Float64Array,
+  lowerIndex: number,
+  higherIndex: number,
+  previousOutcomeMass: PairOutcomeMass,
+  newOutcome: CanonicalPairOutcome,
+): ForecastClusterPosteriorUpdate {
+  const itemCount = posteriorSamples[0]?.length ?? 0;
+  const abilityMeanShifts = new Float64Array(itemCount);
+  const sampleCount = posteriorSamples.length;
+  if (sampleCount === 0 || itemCount === 0) {
+    return { abilityMeanShifts, tieLogMeanShift: 0 };
+  }
+  if (tieLogSamples.length !== sampleCount) {
+    throw new Error("预测中的能力样本与平局参数样本没有对齐。");
+  }
+  if (lowerIndex < 0 || higherIndex < 0
+    || lowerIndex >= itemCount || higherIndex >= itemCount || lowerIndex === higherIndex) {
+    throw new Error("预测中的作品对索引无效。");
+  }
+
+  const oldOutcomeMass: PairOutcomeMass = {
+    lowerWin: Math.max(0, previousOutcomeMass.lowerWin),
+    tie: Math.max(0, previousOutcomeMass.tie),
+    higherWin: Math.max(0, previousOutcomeMass.higherWin),
+  };
+  const nextOutcomeMass = { ...oldOutcomeMass };
+  nextOutcomeMass[newOutcome] += 1;
+
+  const differences = new Float64Array(sampleCount);
+  let differenceMean = 0;
+  let tieLogMean = 0;
+  for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex += 1) {
+    const sample = posteriorSamples[sampleIndex];
+    differences[sampleIndex] = sample[lowerIndex] - sample[higherIndex];
+    differenceMean += differences[sampleIndex];
+    tieLogMean += tieLogSamples[sampleIndex];
+  }
+  differenceMean /= sampleCount;
+  tieLogMean /= sampleCount;
+  let covariance00 = 0;
+  let covariance01 = 0;
+  let covariance11 = 0;
+  for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex += 1) {
+    const centeredDifference = differences[sampleIndex] - differenceMean;
+    const centeredTieLog = tieLogSamples[sampleIndex] - tieLogMean;
+    covariance00 += centeredDifference ** 2;
+    covariance01 += centeredDifference * centeredTieLog;
+    covariance11 += centeredTieLog ** 2;
+  }
+  covariance00 /= sampleCount;
+  covariance01 /= sampleCount;
+  covariance11 /= sampleCount;
+
+  // A finite Laplace ensemble is reliable near its centre but its Gaussian
+  // tails cannot safely be divided by the old cluster likelihood. Recover the
+  // local precision of every other factor by subtracting the old cluster's
+  // information, then add the complete new cluster and solve its concave 2-D
+  // target. This is the stable local-Laplace form of the same new/old
+  // likelihood-ratio update.
+  const sourceCovariance = regularizePositiveDefinite2x2(
+    covariance00, covariance01, covariance11,
+  );
+  const sourceDeterminant = sourceCovariance.matrix00 * sourceCovariance.matrix11
+    - sourceCovariance.matrix01 ** 2;
+  const currentPrecision00 = sourceCovariance.matrix11 / sourceDeterminant;
+  const currentPrecision01 = -sourceCovariance.matrix01 / sourceDeterminant;
+  const currentPrecision11 = sourceCovariance.matrix00 / sourceDeterminant;
+  const oldDerivatives = pairClusterDerivatives(
+    differenceMean, tieLogMean, oldOutcomeMass,
+  );
+  const otherPrecision = regularizePositiveDefinite2x2(
+    currentPrecision00 - oldDerivatives.information00,
+    currentPrecision01 - oldDerivatives.information01,
+    currentPrecision11 - oldDerivatives.information11,
+  );
+  const otherGradient0 = -oldDerivatives.gradient0;
+  const otherGradient1 = -oldDerivatives.gradient1;
+  const targetObjective = (difference: number, tieLogStrength: number) => {
+    const delta0 = difference - differenceMean;
+    const delta1 = tieLogStrength - tieLogMean;
+    return otherGradient0 * delta0 + otherGradient1 * delta1
+      - 0.5 * (
+        otherPrecision.matrix00 * delta0 ** 2
+        + 2 * otherPrecision.matrix01 * delta0 * delta1
+        + otherPrecision.matrix11 * delta1 ** 2
+      )
+      + pairClusterLogLikelihood(difference, tieLogStrength, nextOutcomeMass);
+  };
+
+  let targetDifferenceMean = differenceMean;
+  let targetTieLogMean = tieLogMean;
+  for (let iteration = 0; iteration < 24; iteration += 1) {
+    const targetDerivatives = pairClusterDerivatives(
+      targetDifferenceMean, targetTieLogMean, nextOutcomeMass,
+    );
+    const delta0 = targetDifferenceMean - differenceMean;
+    const delta1 = targetTieLogMean - tieLogMean;
+    const gradient0 = otherGradient0
+      - otherPrecision.matrix00 * delta0 - otherPrecision.matrix01 * delta1
+      + targetDerivatives.gradient0;
+    const gradient1 = otherGradient1
+      - otherPrecision.matrix01 * delta0 - otherPrecision.matrix11 * delta1
+      + targetDerivatives.gradient1;
+    const targetPrecision = regularizePositiveDefinite2x2(
+      otherPrecision.matrix00 + targetDerivatives.information00,
+      otherPrecision.matrix01 + targetDerivatives.information01,
+      otherPrecision.matrix11 + targetDerivatives.information11,
+    );
+    const determinant = targetPrecision.matrix00 * targetPrecision.matrix11
+      - targetPrecision.matrix01 ** 2;
+    const step0 = (
+      targetPrecision.matrix11 * gradient0 - targetPrecision.matrix01 * gradient1
+    ) / determinant;
+    const step1 = (
+      targetPrecision.matrix00 * gradient1 - targetPrecision.matrix01 * gradient0
+    ) / determinant;
+    if (!Number.isFinite(step0) || !Number.isFinite(step1)) break;
+    const directionalDerivative = gradient0 * step0 + gradient1 * step1;
+    if (Math.max(Math.abs(step0), Math.abs(step1)) < 1e-8) break;
+    const currentObjective = targetObjective(targetDifferenceMean, targetTieLogMean);
+    let scale = 1;
+    let accepted = false;
+    for (let lineIteration = 0; lineIteration < 24; lineIteration += 1) {
+      const candidateDifference = targetDifferenceMean + scale * step0;
+      const candidateTieLog = targetTieLogMean + scale * step1;
+      const candidateObjective = targetObjective(candidateDifference, candidateTieLog);
+      if (Number.isFinite(candidateObjective)
+        && candidateObjective >= currentObjective + 1e-4 * scale * directionalDerivative) {
+        targetDifferenceMean = candidateDifference;
+        targetTieLogMean = candidateTieLog;
+        accepted = true;
+        break;
+      }
+      scale *= 0.5;
+    }
+    if (!accepted) break;
+  }
+  const finalTargetDerivatives = pairClusterDerivatives(
+    targetDifferenceMean, targetTieLogMean, nextOutcomeMass,
+  );
+  const finalTargetPrecision = regularizePositiveDefinite2x2(
+    otherPrecision.matrix00 + finalTargetDerivatives.information00,
+    otherPrecision.matrix01 + finalTargetDerivatives.information01,
+    otherPrecision.matrix11 + finalTargetDerivatives.information11,
+  );
+  const targetDeterminant = finalTargetPrecision.matrix00 * finalTargetPrecision.matrix11
+    - finalTargetPrecision.matrix01 ** 2;
+  const targetCovariance00 = finalTargetPrecision.matrix11 / targetDeterminant;
+  const targetCovariance01 = -finalTargetPrecision.matrix01 / targetDeterminant;
+  const targetCovariance11 = finalTargetPrecision.matrix00 / targetDeterminant;
+
+  // A = L_target L_source^-1, so A C_source A' = C_target.
+  const sourceCholesky = covarianceCholesky2x2(covariance00, covariance01, covariance11);
+  const targetCholesky = covarianceCholesky2x2(
+    targetCovariance00, targetCovariance01, targetCovariance11,
+  );
+  const transform00 = targetCholesky.lower00 / sourceCholesky.lower00;
+  const transform01 = 0;
+  const transform11 = targetCholesky.lower11 / sourceCholesky.lower11;
+  const transform10 = (
+    targetCholesky.lower10 - transform11 * sourceCholesky.lower10
+  ) / sourceCholesky.lower00;
+
+  // Regress every ability on the observed two-dimensional subspace, then
+  // enforce the exact contrast and zero-global-shift invariants that finite
+  // Monte Carlo covariance estimates only satisfy approximately.
+  const abilityMeans = new Float64Array(itemCount);
+  for (const sample of posteriorSamples) {
+    for (let itemIndex = 0; itemIndex < itemCount; itemIndex += 1) {
+      abilityMeans[itemIndex] += sample[itemIndex];
+    }
+  }
+  for (let itemIndex = 0; itemIndex < itemCount; itemIndex += 1) {
+    abilityMeans[itemIndex] /= sampleCount;
+  }
+  const gainDifference = new Float64Array(itemCount);
+  const gainTieLog = new Float64Array(itemCount);
+  const regularized00 = covariance00 + FORECAST_MIN_PAIR_VARIANCE;
+  const regularized11 = covariance11 + FORECAST_MIN_PAIR_VARIANCE;
+  const determinant = Math.max(
+    FORECAST_MIN_PAIR_VARIANCE ** 2,
+    regularized00 * regularized11 - covariance01 ** 2,
+  );
+  for (let itemIndex = 0; itemIndex < itemCount; itemIndex += 1) {
+    let itemCovarianceDifference = 0;
+    let itemCovarianceTieLog = 0;
+    for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex += 1) {
+      const centeredAbility = posteriorSamples[sampleIndex][itemIndex] - abilityMeans[itemIndex];
+      itemCovarianceDifference += centeredAbility * (differences[sampleIndex] - differenceMean);
+      itemCovarianceTieLog += centeredAbility * (tieLogSamples[sampleIndex] - tieLogMean);
+    }
+    itemCovarianceDifference /= sampleCount;
+    itemCovarianceTieLog /= sampleCount;
+    gainDifference[itemIndex] = (
+      itemCovarianceDifference * regularized11 - itemCovarianceTieLog * covariance01
+    ) / determinant;
+    gainTieLog[itemIndex] = (
+      itemCovarianceTieLog * regularized00 - itemCovarianceDifference * covariance01
+    ) / determinant;
+  }
+  const enforceGainInvariants = (gains: Float64Array, expectedDifference: number) => {
+    const contrastCorrection = expectedDifference - (gains[lowerIndex] - gains[higherIndex]);
+    gains[lowerIndex] += contrastCorrection / 2;
+    gains[higherIndex] -= contrastCorrection / 2;
+    let gainSum = 0;
+    for (const gain of gains) gainSum += gain;
+    const commonCorrection = gainSum / itemCount;
+    for (let itemIndex = 0; itemIndex < itemCount; itemIndex += 1) {
+      gains[itemIndex] -= commonCorrection;
+    }
+  };
+  enforceGainInvariants(gainDifference, 1);
+  enforceGainInvariants(gainTieLog, 0);
+
+  let actualTieLogMeanShift = 0;
+  for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex += 1) {
+    const centeredDifference = differences[sampleIndex] - differenceMean;
+    const centeredTieLog = tieLogSamples[sampleIndex] - tieLogMean;
+    const nextDifference = targetDifferenceMean
+      + transform00 * centeredDifference + transform01 * centeredTieLog;
+    const nextTieLog = targetTieLogMean
+      + transform10 * centeredDifference + transform11 * centeredTieLog;
+    const differenceDelta = nextDifference - differences[sampleIndex];
+    const tieLogDelta = nextTieLog - tieLogSamples[sampleIndex];
+    const sample = posteriorSamples[sampleIndex];
+    for (let itemIndex = 0; itemIndex < itemCount; itemIndex += 1) {
+      const abilityDelta = gainDifference[itemIndex] * differenceDelta
+        + gainTieLog[itemIndex] * tieLogDelta;
+      sample[itemIndex] += abilityDelta;
+      abilityMeanShifts[itemIndex] += abilityDelta;
+    }
+    tieLogSamples[sampleIndex] = nextTieLog;
+    actualTieLogMeanShift += tieLogDelta;
+  }
+  for (let itemIndex = 0; itemIndex < itemCount; itemIndex += 1) {
+    abilityMeanShifts[itemIndex] /= sampleCount;
+  }
+  return {
+    abilityMeanShifts,
+    tieLogMeanShift: actualTieLogMeanShift / sampleCount,
+  };
+}
+
 function fitFromForecastEnsemble(
   items: RankingItemInput[],
   posteriorSamples: Float64Array[],
+  tieLogSamples: Float64Array,
   acceptedComparisons: number,
   effectiveComparisons: number,
-  tieStrength: number,
+  fallbackTieStrength: number,
   optimizerConverged: boolean,
 ): FitResult {
   const abilities: Record<number, number> = {};
@@ -1519,10 +1913,14 @@ function fitFromForecastEnsemble(
       abilities[item.subjectId] = 0;
       uncertainty[item.subjectId] = 0;
     }
+    const tieStrength = tieLogSamples.length > 0
+      ? tieStrengthFromLog(tieLogSamples.reduce((sum, value) => sum + value, 0) / tieLogSamples.length)
+      : fallbackTieStrength;
     return {
       abilities, uncertainty, meanUncertainty: 0, converged: optimizerConverged, iterations: 0,
       acceptedComparisons, effectiveComparisons, tieStrength,
-      optimizationStatus: optimizerConverged ? "converged" : "iteration-limit", posteriorSamples,
+      optimizationStatus: optimizerConverged ? "converged" : "iteration-limit",
+      posteriorSamples, tieLogSamples,
     };
   }
   for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
@@ -1535,6 +1933,9 @@ function fitFromForecastEnsemble(
     // O(items × samples) loop without changing either decision.
     uncertainty[items[itemIndex].subjectId] = 0;
   }
+  const tieStrength = tieLogSamples.length === posteriorSamples.length
+    ? tieStrengthFromLog(tieLogSamples.reduce((sum, value) => sum + value, 0) / tieLogSamples.length)
+    : fallbackTieStrength;
   return {
     abilities,
     uncertainty,
@@ -1546,6 +1947,7 @@ function fitFromForecastEnsemble(
     tieStrength,
     optimizationStatus: optimizerConverged ? "converged" : "iteration-limit",
     posteriorSamples,
+    tieLogSamples,
   };
 }
 
@@ -1624,30 +2026,35 @@ function forecastHistoryRecord(
   };
 }
 
-function createForecastSelectionCache(
+function createPairSelectionCache(
   items: RankingItemInput[],
   history: RankingHistoryInput[],
   sessionId: string,
   acceptedComparisons: number,
+  evidence: Pick<RankingEvidenceSummary, "pairMass" | "itemEffectiveWeight">
+    = summarizeRankingEvidence(history, sessionId),
 ): PairSelectionCache {
-  const pairCounts = new Map<string, number>();
-  const itemCounts = new Map(items.map((item) => [item.subjectId, 0]));
+  const pairMass = new Map(Object.entries(evidence.pairMass));
+  const pairEffectiveWeight = new Map(
+    [...pairMass].map(([key, mass]) => [key, repeatedPairEffectiveSampleSize(mass)]),
+  );
+  const itemEffectiveWeight = new Map(items.map((item) => [item.subjectId, 0]));
+  for (const [subjectId, weight] of Object.entries(evidence.itemEffectiveWeight)) {
+    itemEffectiveWeight.set(Number(subjectId), weight);
+  }
   const cooled = new Set<string>();
   let nonCalibrationCount = 0;
   for (const entry of history) {
+    if (entry.sessionId !== sessionId) continue;
     if (entry.outcome === "skip") {
       if (acceptedComparisons - entry.acceptedCountAtAnswer < 20) {
         cooled.add(pairKey(entry.leftSubjectId, entry.rightSubjectId));
       }
       continue;
     }
-    const key = pairKey(entry.leftSubjectId, entry.rightSubjectId);
-    pairCounts.set(key, (pairCounts.get(key) ?? 0) + 1);
-    itemCounts.set(entry.leftSubjectId, (itemCounts.get(entry.leftSubjectId) ?? 0) + 1);
-    itemCounts.set(entry.rightSubjectId, (itemCounts.get(entry.rightSubjectId) ?? 0) + 1);
-    if (entry.sessionId === sessionId && entry.queryKind !== "calibration") nonCalibrationCount += 1;
+    if (entry.queryKind !== "calibration") nonCalibrationCount += 1;
   }
-  return { pairCounts, itemCounts, cooled, nonCalibrationCount };
+  return { pairMass, pairEffectiveWeight, itemEffectiveWeight, cooled, nonCalibrationCount };
 }
 
 function refreshForecastSelectionDiagnostics(
@@ -1672,27 +2079,31 @@ function refreshForecastSelectionDiagnostics(
 function simulateForecastRollout(
   input: StoppingForecastRolloutInput,
   truth: Float64Array,
+  truthTieLogStrength: number,
   rolloutSeed: number,
 ) {
   const random = seededRandom(rolloutSeed);
   const posteriorSamples = input.forecastSamples.map((sample) => sample.slice());
+  const tieLogSamples = input.forecastTieLogSamples.slice();
   const indexById = new Map(input.items.map((item, index) => [item.subjectId, index]));
   const history = input.history.slice();
   let acceptedComparisons = input.acceptedComparisons;
-  const selectionCache = createForecastSelectionCache(
+  const selectionCache = createPairSelectionCache(
     input.items, history, input.sessionId, acceptedComparisons,
+    { pairMass: input.pairMass, itemEffectiveWeight: input.itemEffectiveWeight },
   );
   let evidenceCount = input.evidenceCount;
-  const pairMass = new Map(Object.entries(input.pairMass));
-  const itemEffectiveWeight = new Map(
-    Object.entries(input.itemEffectiveWeight).map(([subjectId, weight]) => [Number(subjectId), weight]),
+  const pairMass = selectionCache.pairMass;
+  const itemEffectiveWeight = selectionCache.itemEffectiveWeight;
+  const pairOutcomeMass = new Map(
+    Object.entries(input.pairOutcomeMass).map(([key, outcomeMass]) => [key, { ...outcomeMass }]),
   );
   let uniquePairCount = [...pairMass.values()]
     .filter((mass) => repeatedPairEffectiveSampleSize(mass) >= MINIMUM_COVERAGE_WEIGHT).length;
   let coveredItemCount = [...itemEffectiveWeight.values()]
     .filter((weight) => weight >= MINIMUM_COVERAGE_WEIGHT).length;
   const fit = fitFromForecastEnsemble(
-    input.items, posteriorSamples, acceptedComparisons, evidenceCount,
+    input.items, posteriorSamples, tieLogSamples, acceptedComparisons, evidenceCount,
     input.tieStrength, input.optimizerConverged,
   );
   const abilities = input.currentAbilities.slice();
@@ -1745,19 +2156,41 @@ function simulateForecastRollout(
     const nextEffectiveWeight = repeatedPairEffectiveSampleSize(nextMass);
     const effectiveIncrement = nextEffectiveWeight - previousEffectiveWeight;
     const outcome = simulatedOutcome(
-      truth[leftIndex] - truth[rightIndex], random, input.tieStrength,
+      truth[leftIndex] - truth[rightIndex], random, tieStrengthFromLog(truthTieLogStrength),
     );
-    const meanShifts = updateForecastPosterior(
-      posteriorSamples, leftIndex, rightIndex, outcome, input.tieStrength, effectiveIncrement,
+    const lowerSubjectId = Math.min(pair.leftSubjectId, pair.rightSubjectId);
+    const higherSubjectId = Math.max(pair.leftSubjectId, pair.rightSubjectId);
+    const lowerIndex = indexById.get(lowerSubjectId);
+    const higherIndex = indexById.get(higherSubjectId);
+    if (lowerIndex === undefined || higherIndex === undefined) return stoppingTimes;
+    const previousOutcomeMass = pairOutcomeMass.get(selectedKey)
+      ?? { lowerWin: 0, tie: 0, higherWin: 0 };
+    const canonicalOutcome = canonicalPairOutcome(
+      pair.leftSubjectId, pair.rightSubjectId, outcome,
+    );
+    const posteriorUpdate = updateForecastClusterPosterior(
+      posteriorSamples,
+      tieLogSamples,
+      lowerIndex,
+      higherIndex,
+      previousOutcomeMass,
+      canonicalOutcome,
     );
     for (let itemIndex = 0; itemIndex < input.items.length; itemIndex += 1) {
-      const shift = meanShifts[itemIndex];
+      const shift = posteriorUpdate.abilityMeanShifts[itemIndex];
       fit.abilities[input.items[itemIndex].subjectId] += shift;
       abilities[itemIndex] += shift;
     }
+    fit.tieStrength = tieStrengthFromLog(
+      Math.log(fit.tieStrength ?? input.tieStrength) + posteriorUpdate.tieLogMeanShift,
+    );
     acceptedComparisons += 1;
     fit.acceptedComparisons = acceptedComparisons;
     pairMass.set(selectedKey, nextMass);
+    const nextOutcomeMass = { ...previousOutcomeMass };
+    nextOutcomeMass[canonicalOutcome] += 1;
+    pairOutcomeMass.set(selectedKey, nextOutcomeMass);
+    selectionCache.pairEffectiveWeight.set(selectedKey, nextEffectiveWeight);
     evidenceCount += effectiveIncrement;
     fit.effectiveComparisons = evidenceCount;
     if (previousEffectiveWeight < MINIMUM_COVERAGE_WEIGHT
@@ -1770,9 +2203,6 @@ function simulateForecastRollout(
         && nextItemWeight >= MINIMUM_COVERAGE_WEIGHT) coveredItemCount += 1;
     }
     history.push(forecastHistoryRecord(input, pair, outcome, acceptedComparisons, rolloutSeed, answerIndex));
-    selectionCache.pairCounts.set(selectedKey, (selectionCache.pairCounts.get(selectedKey) ?? 0) + 1);
-    selectionCache.itemCounts.set(pair.leftSubjectId, (selectionCache.itemCounts.get(pair.leftSubjectId) ?? 0) + 1);
-    selectionCache.itemCounts.set(pair.rightSubjectId, (selectionCache.itemCounts.get(pair.rightSubjectId) ?? 0) + 1);
     if (pair.queryKind !== "calibration") selectionCache.nonCalibrationCount += 1;
     const checkNow = answerIndex <= Math.min(4, stoppingCheckStride)
       || answerIndex % stoppingCheckStride === 0
@@ -1818,15 +2248,26 @@ export function prepareStoppingForecastRollouts(
   // simulated questions or responses.
   const random = seededRandom(forecastRandomSeed(options, diagnostics));
   const truthSamples: Float64Array[] = [];
+  const truthTieLogSamples = new Float64Array(rolloutCount);
   const rolloutSeeds = new Uint32Array(rolloutCount);
+  const fallbackTieLogStrength = Math.log(fit.tieStrength ?? DEFAULT_TIE_STRENGTH);
+  const hasAlignedTieSamples = fit.tieLogSamples?.length === fit.posteriorSamples.length;
   for (let rollout = 0; rollout < rolloutCount && fit.posteriorSamples.length > 0; rollout += 1) {
-    truthSamples.push(fit.posteriorSamples[Math.floor(random() * fit.posteriorSamples.length)].slice());
+    const truthSampleIndex = Math.floor(random() * fit.posteriorSamples.length);
+    truthSamples.push(fit.posteriorSamples[truthSampleIndex].slice());
+    truthTieLogSamples[rollout] = hasAlignedTieSamples
+      ? fit.tieLogSamples![truthSampleIndex]
+      : fallbackTieLogStrength;
     rolloutSeeds[rollout] = Math.floor(random() * 0x100000000) >>> 0;
   }
-  const selectedSamples = Array.from({ length: forecastSampleCount }, (_, index) =>
-    fit.posteriorSamples[Math.floor(index * fit.posteriorSamples.length / forecastSampleCount)].slice());
+  const selectedSampleIndices = Array.from({ length: forecastSampleCount }, (_, index) =>
+    Math.floor(index * fit.posteriorSamples.length / forecastSampleCount));
+  const selectedSamples = selectedSampleIndices.map((index) => fit.posteriorSamples[index].slice());
+  const forecastTieLogSamples = Float64Array.from(selectedSampleIndices, (index) =>
+    hasAlignedTieSamples ? fit.tieLogSamples![index] : fallbackTieLogStrength);
   const currentAbilities = new Float64Array(items.map((item) => fit.abilities[item.subjectId] ?? 0));
   recenterSamples(selectedSamples, currentAbilities);
+  recenterScalarSamples(forecastTieLogSamples, fallbackTieLogStrength);
   const evidence = summarizeRankingEvidence(history, sessionId);
   const effectiveHistory = history.map((entry) => ({ ...entry }));
   const requestedProjectionHorizon = Math.max(
@@ -1849,7 +2290,9 @@ export function prepareStoppingForecastRollouts(
     initialDiagnostics: diagnostics,
     currentAbilities,
     forecastSamples: selectedSamples,
+    forecastTieLogSamples,
     truthSamples,
+    truthTieLogSamples,
     rolloutSeeds,
     scoreByRank: forecastScoreByRank(items, distribution),
     acceptedComparisons: fit.acceptedComparisons,
@@ -1858,6 +2301,7 @@ export function prepareStoppingForecastRollouts(
     evidenceRequired: diagnostics.evidenceRequired,
     uniquePairRequired: diagnostics.uniquePairRequired ?? minimumUniquePairs(items.length),
     pairMass: evidence.pairMass,
+    pairOutcomeMass: evidence.pairOutcomeMass,
     itemEffectiveWeight: evidence.itemEffectiveWeight,
     diagnosticStride: Math.max(1, Math.round(options.diagnosticStride ?? FORECAST_DEFAULT_DIAGNOSTIC_STRIDE)),
     simulationHorizon,
@@ -1888,7 +2332,9 @@ export function forecastStoppingTimeRolloutsByMode(
       continue;
     }
     const seed = input.rolloutSeeds[absoluteIndex] ?? hash(`${absoluteIndex}:forecast`);
-    const result = simulateForecastRollout(input, truth, seed);
+    const truthTieLogStrength = input.truthTieLogSamples[absoluteIndex]
+      ?? Math.log(input.tieStrength);
+    const result = simulateForecastRollout(input, truth, truthTieLogStrength, seed);
     for (const mode of STOPPING_MODE_ORDER) stoppingTimes[mode].push(result[mode]);
   }
   return stoppingTimes;
@@ -1913,7 +2359,7 @@ function summarizeStoppingTimes(
 ): StoppingForecast {
   const rolloutCount = stoppingTimes.length;
   const base = {
-    method: "posterior-contraction-mc-v11" as const,
+    method: "posterior-contraction-mc-v12" as const,
     rolloutCount,
     nextCheckpoint,
     projectionHorizon,

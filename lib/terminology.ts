@@ -87,7 +87,7 @@ export const TERM_DEFINITIONS = {
   },
   "coverage-exploration": {
     label: "覆盖探索",
-    summary: "定期优先询问比较不足或尚不稳定的作品，防止纯贪心策略困在同一小组。",
+    summary: "定期优先询问来源年龄与同对相关性修正后有效权重不足、或尚不稳定的作品，防止纯贪心策略困在同一小组。",
     sectionId: "question-selection",
   },
   "calibration-repeat": {

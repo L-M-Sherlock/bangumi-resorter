@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { analyzeRanking, buildRankedItems, calibrationPosterior, chooseNextPair, davidsonProbabilities, fitModel, forecastStoppingTime, prepareStoppingForecastRollouts, summarizeRankingEvidence, updateForecastPosterior } from "../lib/ranking/engine";
+import { analyzeRanking, buildRankedItems, calibrationPosterior, chooseNextPair, davidsonProbabilities, fitModel, forecastStoppingTime, prepareStoppingForecastRollouts, summarizeRankingEvidence, updateForecastClusterPosterior, updateForecastPosterior } from "../lib/ranking/engine";
 import { distributionConfig } from "../lib/distribution";
 import {
   allowedCrossTwoBucketCount,
@@ -317,6 +317,123 @@ describe("weighted Davidson ranking engine", () => {
     expect(independent.abilities[1] - independent.abilities[2]).toBeGreaterThan(0);
   });
 
+  it("reweights the whole pair cluster when a repeat contradicts its earlier answer", () => {
+    const rated = inputs.slice(0, 2);
+    const original = history("cluster-original", 1, 2, "left", 0);
+    const originalEvidence = summarizeRankingEvidence([original], "session");
+    const before = fitModel(rated, originalEvidence.comparisons, undefined, {
+      priorStrength: 0.05, priorScale: 0, posteriorSampleCount: 4096, randomSeed: 31,
+    });
+    const forecastSamples = before.posteriorSamples.map((sample) => sample.slice());
+    const forecastTieLogSamples = before.tieLogSamples!.slice();
+    updateForecastClusterPosterior(
+      forecastSamples,
+      forecastTieLogSamples,
+      0,
+      1,
+      originalEvidence.pairOutcomeMass["1:2"],
+      "higherWin",
+    );
+    const forecastDifference = forecastSamples.reduce(
+      (sum, sample) => sum + sample[0] - sample[1], 0,
+    ) / forecastSamples.length;
+
+    const contradiction = history("cluster-contradiction", 1, 2, "right", 1);
+    const refit = fitModel(
+      rated,
+      summarizeRankingEvidence([original, contradiction], "session").comparisons,
+      undefined,
+      { priorStrength: 0.05, priorScale: 0, posteriorSampleCount: 4096, randomSeed: 31 },
+    );
+    const refitDifference = refit.abilities[1] - refit.abilities[2];
+    const oldDifference = before.abilities[1] - before.abilities[2];
+    expect(refitDifference).toBeCloseTo(0, 8);
+    expect(Math.abs(forecastDifference - refitDifference)).toBeLessThan(0.12);
+    expect(Math.abs(forecastDifference)).toBeLessThan(Math.abs(oldDifference) / 5);
+  });
+
+  it("updates the forecast tie-strength particles after a simulated tie", () => {
+    const rated = inputs.slice(0, 2);
+    const fit = fitModel(rated, [], undefined, {
+      priorStrength: 0.35, priorScale: 0, posteriorSampleCount: 4096, randomSeed: 73,
+    });
+    const forecastSamples = fit.posteriorSamples.map((sample) => sample.slice());
+    const forecastTieLogSamples = fit.tieLogSamples!.slice();
+    const beforeTieLogMean = forecastTieLogSamples.reduce((sum, value) => sum + value, 0)
+      / forecastTieLogSamples.length;
+    const update = updateForecastClusterPosterior(
+      forecastSamples,
+      forecastTieLogSamples,
+      0,
+      1,
+      { lowerWin: 0, tie: 0, higherWin: 0 },
+      "tie",
+    );
+    const afterTieLogMean = forecastTieLogSamples.reduce((sum, value) => sum + value, 0)
+      / forecastTieLogSamples.length;
+    expect(update.tieLogMeanShift).toBeGreaterThan(0);
+    expect(afterTieLogMean).toBeGreaterThan(beforeTieLogMean);
+    expect(afterTieLogMean - beforeTieLogMean).toBeCloseTo(update.tieLogMeanShift, 10);
+  });
+
+  it("uses age- and correlation-adjusted coverage weight instead of raw duplicate counts", () => {
+    const rated = Array.from({ length: 30 }, (_, index) => ({ subjectId: index + 1, rate: 7 }));
+    const oldDuplicates = Array.from({ length: 20 }, (_, index) => {
+      const firstPair = index < 10;
+      const entry = history(
+        `old-coverage-${index}`,
+        firstPair ? 1 : 3,
+        firstPair ? 2 : 4,
+        "left",
+        index,
+      );
+      entry.createdAt = "2030-01-01T00:00:00.000Z";
+      entry.sourceCreatedAt = "2020-01-01T00:00:00.000Z";
+      entry.importBatchId = "old-coverage";
+      entry.inheritedFromComparisonId = `old-root-${index}`;
+      return entry;
+    });
+    const freshCoverage = Array.from({ length: 13 }, (_, index) =>
+      history(`fresh-coverage-${index}`, 5 + index * 2, 6 + index * 2, "left", 20 + index));
+    const entries = [...oldDuplicates, ...freshCoverage];
+    const stable = new Float64Array(rated.map((_, index) => rated.length - index));
+    const fit = {
+      abilities: Object.fromEntries(rated.map((entry, index) => [entry.subjectId, stable[index]])),
+      uncertainty: Object.fromEntries(rated.map((entry) => [entry.subjectId, 0])),
+      meanUncertainty: 0,
+      converged: true,
+      iterations: 1,
+      acceptedComparisons: entries.length,
+      tieStrength: 0.35,
+      posteriorSamples: Array.from({ length: 64 }, () => stable.slice()),
+      tieLogSamples: new Float64Array(64).fill(Math.log(0.35)),
+    };
+    const evidence = summarizeRankingEvidence(entries, "session");
+    const diagnostics = analyzeRanking(rated, fit, uniform, entries, "session");
+    expect(evidence.itemEffectiveWeight[1]).toBeLessThan(0.05);
+    expect(diagnostics.coveredItemCount).toBe(26);
+    expect(diagnostics.stoppingChecks?.find((check) => check.mode === "standard")).toMatchObject({
+      evidenceSatisfied: true,
+      uniquePairsSatisfied: true,
+      itemCoverageSatisfied: false,
+    });
+
+    const pair = chooseNextPair(
+      rated,
+      entries,
+      fit,
+      diagnostics,
+      uniform,
+      "session",
+      1,
+      91,
+      { allowCalibration: false, explorationInterval: 1, explorationRadius: 1 },
+    );
+    expect(pair?.queryKind).toBe("exploration");
+    expect([pair?.leftSubjectId, pair?.rightSubjectId].some((subjectId) =>
+      subjectId !== undefined && subjectId <= 4)).toBe(true);
+  });
+
   it("does not stop after repeatedly judging one pair while other items are uncovered", () => {
     const rated = Array.from({ length: 4 }, (_, index) => ({ subjectId: index + 1, rate: 7 }));
     const stable = new Float64Array([4, 3, 2, 1]);
@@ -443,7 +560,7 @@ describe("weighted Davidson ranking engine", () => {
     const evidenceLimitedForecast = forecastStoppingTime(rated, adjacentFit, uniform, coverageLimitedHistory, "session", evidenceLimited, {
       projectionHorizon: 100, randomSeed: 12, forecastEfficiency: 16,
     });
-    expect(evidenceLimitedForecast.method).toBe("posterior-contraction-mc-v11");
+    expect(evidenceLimitedForecast.method).toBe("posterior-contraction-mc-v12");
     expect(evidenceLimitedForecast.medianAdditional ?? Number.POSITIVE_INFINITY).toBeGreaterThanOrEqual(1);
 
     const globallyStable = analyzeRanking(rated, {
@@ -623,7 +740,7 @@ describe("weighted Davidson ranking engine", () => {
     const forecast = forecastStoppingTime(rated, fit, uniform, entries, "session", diagnostics, {
       projectionHorizon: 100, randomSeed: 17, forecastEfficiency: 16,
     });
-    expect(forecast.method).toBe("posterior-contraction-mc-v11");
+    expect(forecast.method).toBe("posterior-contraction-mc-v12");
     expect(forecast.rolloutCount).toBe(64);
     expect(forecast.withinProjectionSuccesses).toBeLessThanOrEqual(forecast.rolloutCount);
   });
