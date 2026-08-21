@@ -243,8 +243,8 @@ function hessianProduct(
   comparisons: IndexedComparison[],
   evaluation: Pick<ModelEvaluation, "edgeWeights" | "tieWeights" | "crossWeights">,
   priorStrength: number,
+  output: Float64Array = new Float64Array(vector.length),
 ) {
-  const output = new Float64Array(vector.length);
   const tieIndex = vector.length - 1;
   for (let i = 0; i < tieIndex; i += 1) output[i] = priorStrength * vector[i];
   output[tieIndex] = TIE_LOG_PRIOR_STRENGTH * vector[tieIndex];
@@ -261,6 +261,24 @@ function hessianProduct(
   return output;
 }
 
+interface PcgScratch {
+  solution: Float64Array;
+  residual: Float64Array;
+  z: Float64Array;
+  direction: Float64Array;
+  product: Float64Array;
+}
+
+function createPcgScratch(size: number): PcgScratch {
+  return {
+    solution: new Float64Array(size),
+    residual: new Float64Array(size),
+    z: new Float64Array(size),
+    direction: new Float64Array(size),
+    product: new Float64Array(size),
+  };
+}
+
 function solvePcg(
   rightHandSide: Float64Array,
   diagonal: Float64Array,
@@ -269,12 +287,16 @@ function solvePcg(
   priorStrength: number,
   tolerance = PCG_TOLERANCE,
   iterationLimit = 200,
+  scratch?: PcgScratch,
 ) {
   const size = rightHandSide.length;
-  const solution = new Float64Array(size);
-  const residual = rightHandSide.slice();
-  const z = new Float64Array(size);
-  const direction = new Float64Array(size);
+  const buffers = scratch?.solution.length === size ? scratch : createPcgScratch(size);
+  const solution = buffers.solution;
+  const residual = buffers.residual;
+  const z = buffers.z;
+  const direction = buffers.direction;
+  solution.fill(0);
+  residual.set(rightHandSide);
   for (let i = 0; i < size; i += 1) z[i] = direction[i] = residual[i] / diagonal[i];
   let residualDotZ = dot(residual, z);
   const initialNorm = Math.sqrt(dot(rightHandSide, rightHandSide));
@@ -282,7 +304,9 @@ function solvePcg(
   const maxIterations = Math.max(1, Math.min(iterationLimit, size));
 
   for (let iteration = 0; iteration < maxIterations; iteration += 1) {
-    const product = hessianProduct(direction, comparisons, evaluation, priorStrength);
+    const product = hessianProduct(
+      direction, comparisons, evaluation, priorStrength, buffers.product,
+    );
     const denominator = dot(direction, product);
     if (!Number.isFinite(denominator) || denominator <= 0) break;
     const alpha = residualDotZ / denominator;
@@ -348,6 +372,7 @@ function sampleLaplacePosterior(
   const normal = normalGenerator(random);
   const priorNoiseScale = Math.sqrt(priorStrength);
   const tieIndex = parameters.length - 1;
+  const pcgScratch = createPcgScratch(parameters.length);
   for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex += 1) {
     const noise = new Float64Array(parameters.length);
     for (let i = 0; i < tieIndex; i += 1) noise[i] = priorNoiseScale * normal();
@@ -376,6 +401,7 @@ function sampleLaplacePosterior(
       priorStrength,
       POSTERIOR_PCG_TOLERANCE,
       100,
+      pcgScratch,
     );
     const sample = new Float64Array(tieIndex);
     for (let i = 0; i < tieIndex; i += 1) sample[i] = parameters[i] + delta[i];
@@ -451,6 +477,7 @@ export function fitModel(
   let iterations = 0;
   let optimizationStatus: OptimizationStatus = "iteration-limit";
   const maxIterations = Math.max(0, Math.round(options.maxIterations ?? MAX_OUTER));
+  const pcgScratch = createPcgScratch(parameters.length);
 
   for (iterations = 0; iterations < maxIterations; iterations += 1) {
     const current = evaluate(parameters, prior, comparisons, priorStrength);
@@ -465,7 +492,10 @@ export function fitModel(
       optimizationStatus = "converged";
       break;
     }
-    let step = solvePcg(current.gradient, current.diagonal, comparisons, current, priorStrength);
+    let step = solvePcg(
+      current.gradient, current.diagonal, comparisons, current, priorStrength,
+      PCG_TOLERANCE, 200, pcgScratch,
+    );
     let directionalDerivative = dot(current.gradient, step);
     if (!Number.isFinite(directionalDerivative) || directionalDerivative <= 0) {
       step = new Float64Array(step.length);
