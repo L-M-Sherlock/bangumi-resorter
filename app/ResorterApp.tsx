@@ -2074,6 +2074,16 @@ function RatingWriteDangerZone({
   </details>;
 }
 
+function newScorePillClass(item: Pick<RankedItem, "rate" | "newRate">, scoreLevelCount: number) {
+  if (scoreLevelCount !== DEFAULT_SCORE_LEVELS || item.newRate === item.rate) return "";
+  return item.newRate > item.rate ? "changed higher" : "changed lower";
+}
+
+function newScorePillLabel(item: Pick<RankedItem, "rate" | "newRate">, scoreLevelCount: number) {
+  if (scoreLevelCount !== DEFAULT_SCORE_LEVELS || item.newRate === item.rate) return undefined;
+  return item.newRate > item.rate ? `新评分 ${item.newRate}，高于原评分 ${item.rate}` : `新评分 ${item.newRate}，低于原评分 ${item.rate}`;
+}
+
 function MobileRankingCards({ items, scoreLevelCount }: { items: RankedItem[]; scoreLevelCount: number }) {
   return <ol className="ranking-cards" aria-label="移动端排名结果">{items.map((item) =>
     <li className="ranking-card" key={item.subjectId}>
@@ -2084,7 +2094,7 @@ function MobileRankingCards({ items, scoreLevelCount }: { items: RankedItem[]; s
       </div>
       <div className="ranking-card-scores">
         <span>原评分 <b className="score-pill old">{item.rate}</b></span>
-        <span>新评分 <b className={"score-pill new " + (scoreLevelCount === DEFAULT_SCORE_LEVELS && item.newRate !== item.rate ? "changed" : "")}>{item.newRate}</b></span>
+        <span>新评分 <b className={`score-pill new ${newScorePillClass(item, scoreLevelCount)}`} title={newScorePillLabel(item, scoreLevelCount)} aria-label={newScorePillLabel(item, scoreLevelCount)}>{item.newRate}</b></span>
         <span>稳定度 <strong>{item.bucketStability === undefined ? "—" : percent(item.bucketStability)}</strong></span>
       </div>
       <details><summary>模型细节</summary><dl><div><dt>连续潜在分数</dt><dd>{item.ability.toFixed(3)}</dd></div><div><dt>后验标准差</dt><dd>{item.uncertainty.toFixed(3)}</dd></div></dl></details>
@@ -2135,7 +2145,10 @@ function ResultsView({ state, sessions, username, busy, onBack, onAnalysis, onMo
       onResync={onResync}
     />
     <MobileRankingCards items={result} scoreLevelCount={scoreLevelCount} />
-    <section className="ranking-table-wrap"><table className="ranking-table"><thead><tr><th>名次</th><th>条目</th><th>原评分（10 档）</th><th>新评分（{scoreLevelCount} 档）</th><th><Term term="bucket-stability">精确分桶稳定度</Term></th><th><Term term="latent-preference">连续潜在分数（仅供解释）</Term></th><th><Term term="posterior-standard-deviation">后验标准差</Term></th><th /></tr></thead><tbody>{result.map((item) => <tr key={item.subjectId}><td><strong>#{item.rank}</strong></td><td><div className="title-cell"><Poster item={item} /><div><strong>{primaryName(item)}</strong><small>{item.nameCn ? item.name : `${item.date?.slice(0, 4) || ""} · ${SUBJECT_TYPES[item.subjectType]}`}</small></div></div></td><td><span className="score-pill old">{item.rate}</span></td><td><span className={`score-pill new ${scoreLevelCount === DEFAULT_SCORE_LEVELS && item.newRate !== item.rate ? "changed" : ""}`}>{item.newRate}</span></td><td>{item.bucketStability === undefined ? "—" : percent(item.bucketStability)}</td><td>{item.ability.toFixed(3)}</td><td>{item.uncertainty.toFixed(3)}</td><td><a href={`https://bgm.tv/subject/${item.subjectId}`} target="_blank" rel="noreferrer" aria-label={`在 Bangumi 打开 ${primaryName(item)}`}>↗</a></td></tr>)}</tbody></table></section>
+    <section className="ranking-table-wrap"><div className="ranking-table-legend" aria-label="排序结果表图例">{scoreLevelCount === DEFAULT_SCORE_LEVELS && <><span><i className="higher" />新评分高于原评分</span><span><i className="lower" />新评分低于原评分</span></>}<span><i className="boundary" />新评分档位分界线</span></div><table className="ranking-table"><thead><tr><th>名次</th><th>条目</th><th>原评分（10 档）</th><th>新评分（{scoreLevelCount} 档）</th><th><Term term="bucket-stability">精确分桶稳定度</Term></th><th><Term term="latent-preference">连续潜在分数（仅供解释）</Term></th><th><Term term="posterior-standard-deviation">后验标准差</Term></th><th /></tr></thead><tbody>{result.map((item, index) => {
+      const bucketStart = index > 0 && result[index - 1].newRate !== item.newRate;
+      return <tr className={bucketStart ? "ranking-table-bucket-start" : undefined} data-score-bucket={item.newRate} key={item.subjectId}><td><strong>#{item.rank}</strong></td><td><div className="title-cell"><Poster item={item} /><div><strong>{primaryName(item)}</strong><small>{item.nameCn ? item.name : `${item.date?.slice(0, 4) || ""} · ${SUBJECT_TYPES[item.subjectType]}`}</small></div></div></td><td><span className="score-pill old">{item.rate}</span></td><td><span className={`score-pill new ${newScorePillClass(item, scoreLevelCount)}`} title={newScorePillLabel(item, scoreLevelCount)} aria-label={newScorePillLabel(item, scoreLevelCount)}>{item.newRate}</span></td><td>{item.bucketStability === undefined ? "—" : percent(item.bucketStability)}</td><td>{item.ability.toFixed(3)}</td><td>{item.uncertainty.toFixed(3)}</td><td><a href={`https://bgm.tv/subject/${item.subjectId}`} target="_blank" rel="noreferrer" aria-label={`在 Bangumi 打开 ${primaryName(item)}`}>↗</a></td></tr>;
+    })}</tbody></table></section>
   </>;
 }
 

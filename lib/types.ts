@@ -640,7 +640,10 @@ export class AppError extends Error implements AppErrorShape {
 export const DISTRIBUTIONS: Record<Exclude<DistributionPreset, "custom">, number[]> = {
   uniform: [10, 10, 10, 10, 10, 10, 10, 10, 10, 10],
   preserve: [10, 10, 10, 10, 10, 10, 10, 10, 10, 10],
-  "high-tail": [3, 5, 8, 14, 20, 20, 12, 8, 6, 4],
+  // Relative bucket weights selected for the high-resolution tail. The total
+  // is intentionally 95; distribution weights are normalized by the ranking
+  // and histogram code, so only the relative mass matters.
+  "high-tail": [1, 2, 3, 5, 8, 16, 32, 16, 8, 4],
   "reverse-j": [50, 25, 14, 4, 2, 1, 1, 1, 1, 1],
 };
 

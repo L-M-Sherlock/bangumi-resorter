@@ -23,7 +23,7 @@ const sections = [
 ] as const;
 
 const clumpedRatings = [1, 1, 2, 3, 7, 16, 44, 88, 63, 22];
-const tailRatings = [3, 5, 8, 14, 20, 20, 12, 8, 6, 4];
+const tailRatings = [1, 2, 3, 5, 8, 16, 32, 16, 8, 4];
 const stoppingModes = [
   { label: "快速", coverage: 80 },
   { label: "标准", coverage: 90 },
@@ -112,7 +112,7 @@ export default function PrinciplesPage() {
         <section>
           <SectionHeading id="score-buckets">从连续排序回到 K 档</SectionHeading>
           <p>潜在分数适合计算，却不适合直接解释。最终输出通过 <Term term="score-bucket">K 档分桶</Term>把排序切成 3–20 档；每一档容纳多少作品由<Term term="score-distribution">评分分布</Term>决定。改变 K 或分布不会删除比较，也不改变“谁在谁前面”，但会移动档位边界，因此必须重新计算稳定度、下一题和剩余预测。</p>
-          <p>均匀分布让每档人数接近；保持原分布保留收藏的整体评分轮廓；默认的<Term term="high-tail">高分辨率尾部分布</Term>在高分区域使用较窄档位；<Term term="reverse-j">反 J 分布</Term>更激进，把大多数作品压进低档，只为极少数顶尖作品保留高分。没有一种分布天然“真实”，只有是否适合你的用途。</p>
+          <p>均匀分布让每档人数接近；保持原分布保留收藏的整体评分轮廓；默认的<Term term="high-tail">高分辨率尾部分布</Term>使用相对权重 1∶2∶3∶5∶8∶16∶32∶16∶8∶4，在高分区域保留更细的档位（按 1–10 档归一化后的均值约 6.67、标准差约 1.78）；<Term term="reverse-j">反 J 分布</Term>更激进，把大多数作品压进低档，只为极少数顶尖作品保留高分。没有一种分布天然“真实”，只有是否适合你的用途。</p>
         </section>
 
         <section>

@@ -166,6 +166,14 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await expect(page.locator(".result-summary .histogram .bar-old")).toHaveCount(10);
   await expect(page.locator(".result-summary .histogram .bar-new")).toHaveCount(10);
   expect(await page.locator(".score-pill.new.changed").count()).toBeGreaterThan(0);
+  const changedPills = page.locator(".score-pill.new.changed");
+  expect(await page.locator(".score-pill.new.changed.higher, .score-pill.new.changed.lower").count()).toBe(await changedPills.count());
+  const bucketBoundaries = await page.locator(".ranking-table tbody tr.ranking-table-bucket-start").evaluateAll((rows) => rows.map((row) => ({
+    bucket: row.getAttribute("data-score-bucket"),
+    previous: row.previousElementSibling?.getAttribute("data-score-bucket"),
+  })));
+  expect(bucketBoundaries.length).toBeGreaterThan(0);
+  expect(bucketBoundaries.every((entry) => entry.bucket !== entry.previous)).toBe(true);
   const ratingRows = await page.locator(".ranking-table tbody tr").evaluateAll((rows) => rows.map((row) => {
     const href = row.querySelector<HTMLAnchorElement>("a[href*='/subject/']")?.href ?? "";
     return {

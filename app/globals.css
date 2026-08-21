@@ -432,9 +432,17 @@ kbd { padding: 2px 5px; border: 1px solid rgba(255,255,255,.35); border-radius: 
 .summary-forecast span, .summary-forecast b, .summary-forecast small { display: block; }
 .summary-forecast b { margin: 4px 0; font-size: 11px; }
 .ranking-table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.ranking-table-legend { min-height: 34px; padding: 8px 12px; display: flex; justify-content: flex-end; align-items: center; gap: 16px; color: var(--muted); border-bottom: 1px solid var(--line-soft); font-size: 9px; }
+.ranking-table-legend span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.ranking-table-legend i { width: 10px; height: 10px; display: inline-block; border: 1px solid; border-radius: 50%; }
+.ranking-table-legend i.higher { border-color: var(--green); background: color-mix(in srgb, var(--green) 16%, var(--panel)); }
+.ranking-table-legend i.lower { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, var(--panel)); }
+.ranking-table-legend i.boundary { width: 14px; height: 2px; border: 0; border-radius: 0; background: var(--line-strong); }
 .ranking-table { width: 100%; border-collapse: collapse; min-width: 860px; }
 .ranking-table th { height: 38px; padding: 0 12px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 9px; text-align: left; text-transform: uppercase; letter-spacing: .08em; white-space: nowrap; }
 .ranking-table td { height: 67px; padding: 8px 12px; border-bottom: 1px solid var(--line-soft); color: var(--text-secondary); font-size: 11px; }
+.ranking-table tr.ranking-table-bucket-start td { border-top: 2px solid var(--line-strong); }
+.ranking-table tr.ranking-table-bucket-start td:nth-child(4) { border-top-color: var(--accent); }
 .ranking-table tr:last-child td { border-bottom: 0; }
 .title-cell { display: flex; align-items: center; gap: 10px; }
 .title-cell strong, .title-cell small { display: block; max-width: 300px; }
@@ -444,6 +452,8 @@ kbd { padding: 2px 5px; border: 1px solid rgba(255,255,255,.35); border-radius: 
 .score-pill.old { background: var(--neutral-bg); color: var(--text-secondary); }
 .score-pill.new { color: var(--teal); border: 1px solid var(--info-border); }
 .score-pill.new.changed { color: white; border-color: var(--accent); background: var(--accent); }
+.score-pill.new.changed.higher { color: var(--green); border-color: var(--green); background: color-mix(in srgb, var(--green) 16%, var(--panel)); }
+.score-pill.new.changed.lower { color: var(--accent-dark); border-color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, var(--panel)); }
 .ranking-table a { color: var(--accent-dark); text-decoration: none; }
 .ranking-cards { display: none; }
 

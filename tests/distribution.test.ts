@@ -31,11 +31,12 @@ describe("score distributions", () => {
   });
 
   it("resamples cumulative probability mass without changing its total", () => {
-    const source = [3, 5, 8, 14, 20, 20, 12, 8, 6, 4];
+    const source = DISTRIBUTIONS["high-tail"];
+    const sourceTotal = source.reduce((sum, value) => sum + value, 0);
     for (const levelCount of [3, 5, 10, 12, 20]) {
       const result = resampleDistributionWeights(source, levelCount);
       expect(result).toHaveLength(levelCount);
-      expect(result.reduce((sum, value) => sum + value, 0)).toBeCloseTo(100, 5);
+      expect(result.reduce((sum, value) => sum + value, 0)).toBeCloseTo(sourceTotal, 5);
     }
     expect(resampleDistributionWeights(source, 10)).toEqual(source);
   });
@@ -44,6 +45,14 @@ describe("score distributions", () => {
     expect(distributionConfig("high-tail", 10).weights).toEqual(DISTRIBUTIONS["high-tail"]);
     expect(distributionConfig("reverse-j", 10).weights).toEqual(DISTRIBUTIONS["reverse-j"]);
     expect(distributionConfig("custom", 5, Array(10).fill(10)).weights).toEqual(Array(5).fill(20));
+  });
+
+  it("uses the selected high-tail shape and exposes its normalized statistics", () => {
+    const weights = distributionConfig("high-tail", 10).weights;
+    expect(weights).toEqual([1, 2, 3, 5, 8, 16, 32, 16, 8, 4]);
+    const stats = scoreDistributionStats(weights);
+    expect(stats?.mean).toBeCloseTo(6.6736842105, 10);
+    expect(stats?.standardDeviation).toBeCloseTo(1.779663512, 10);
   });
 
   it("derives preserve-mode mass from original 1-10 ratings at the active K", () => {

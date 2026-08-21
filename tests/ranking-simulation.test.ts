@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { distributionConfig } from "../lib/distribution";
 import { analyzeRanking, buildRankedItems, chooseNextPair, fitModel, forecastStoppingTime, summarizeRankingEvidence } from "../lib/ranking/engine";
 import type { CollectionItem, DistributionConfig, RankingHistoryInput, RankingItemInput } from "../lib/types";
 
@@ -120,7 +121,7 @@ describe("ranking strategy simulation", () => {
   });
 
   it("reports a held-out stopping time without overclaiming forecast certainty", () => {
-    const distribution: DistributionConfig = { preset: "high-tail", levelCount: 10, weights: [3, 5, 8, 14, 20, 20, 12, 8, 6, 4] };
+    const distribution: DistributionConfig = distributionConfig("high-tail", 10);
     const rated = Array.from({ length: 8 }, (_, index) => ({
       subjectId: index + 1,
       rate: 10 - Math.floor(index / 2),
