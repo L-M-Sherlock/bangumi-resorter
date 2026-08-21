@@ -13,7 +13,7 @@ import { createComparisonBenchmarkScenario } from "./comparison-fixture";
 const EXPECTED_FINGERPRINTS: Record<number, string> = {
   16: "4d379ab5608167a5e6adc85236a7c2a15a24481b703a3489c797dffb91d17236",
   32: "db70312673fc16d7e5942b770a4d5cdd93f4883234a1430e120a38959f778dd2",
-  64: "d59bb47d36bf36e27951eb120ef73a939808e3eb37134132486d9b71e912326f",
+  64: "3edcca6253a7b4ba522fe5dd0ca3e068ca34ddd6f54e374168636540c1be1fa5",
 };
 const CHECKPOINT = 450;
 const requestedRolloutCount = Number(process.env.FORECAST_OPTIMIZATION_ROLLOUT_COUNT ?? 64);

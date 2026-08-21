@@ -2684,7 +2684,7 @@ export function prepareStoppingForecastRollouts(
     // more of the future than the old 1.75×/500 cap. The upper bound is
     // higher for large collections, where an 800-answer window can leave
     // every rollout right-censored at the first checkpoint.
-    Math.max(120, Math.min(1200, Math.ceil(items.length * 2))),
+    Math.max(120, Math.min(1200, Math.ceil(items.length * 3))),
   );
   return {
     items: items.map((item) => ({ ...item })),
