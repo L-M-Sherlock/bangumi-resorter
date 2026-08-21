@@ -94,11 +94,15 @@ export interface PairSelectionOptions {
 }
 
 interface PairSelectionCache {
+  sessionId: string;
   pairMass: Map<string, number>;
   pairEffectiveWeight: Map<string, number>;
   itemEffectiveWeight: Map<number, number>;
   cooled: Set<string>;
   nonCalibrationCount: number;
+  currentSessionResponseCount: number;
+  calibrationTargetIds: Set<string>;
+  calibrationCandidates: RankingHistoryInput[];
 }
 
 export interface StoppingForecastOptions {
@@ -1080,23 +1084,35 @@ function posteriorInformation(
   return Math.max(0, categoricalEntropy(meanProbabilities) - conditionalEntropy);
 }
 
+function compareCalibrationCandidate(left: RankingHistoryInput, right: RankingHistoryInput) {
+  return left.acceptedCountAtAnswer - right.acceptedCountAtAnswer
+    || left.createdAt.localeCompare(right.createdAt)
+    || left.recordId.localeCompare(right.recordId);
+}
+
 function nextCalibrationPair(
-  history: RankingHistoryInput[],
-  sessionId: string,
+  cache: PairSelectionCache,
   version: number,
   randomSeed: number,
 ): NextPair | undefined {
-  const currentSessionResponses = history.filter((entry) => entry.sessionId === sessionId);
-  if ((currentSessionResponses.length + 1) % 20 !== 0) return undefined;
-  const targeted = new Set(history.map((entry) => entry.calibrationOfComparisonId).filter(Boolean));
-  const ordinary = [...history]
-    .filter((entry) => entry.outcome !== "skip" && entry.queryKind !== "calibration" && !targeted.has(entry.recordId))
-    .sort((a, b) => a.acceptedCountAtAnswer - b.acceptedCountAtAnswer
-      || a.createdAt.localeCompare(b.createdAt)
-      || a.recordId.localeCompare(b.recordId));
-  const eligible = ordinary.length > 10 ? ordinary.slice(0, -10) : [];
-  if (eligible.length === 0) return undefined;
-  const target = eligible[hash(`${randomSeed}:${version}:calibration`) % eligible.length];
+  if ((cache.currentSessionResponseCount + 1) % 20 !== 0) return undefined;
+  let availableCount = 0;
+  for (const candidate of cache.calibrationCandidates) {
+    if (!cache.calibrationTargetIds.has(candidate.recordId)) availableCount += 1;
+  }
+  const eligibleCount = Math.max(0, availableCount - 10);
+  if (eligibleCount === 0) return undefined;
+  let targetOrdinal = hash(`${randomSeed}:${version}:calibration`) % eligibleCount;
+  let target: RankingHistoryInput | undefined;
+  for (const candidate of cache.calibrationCandidates) {
+    if (cache.calibrationTargetIds.has(candidate.recordId)) continue;
+    if (targetOrdinal === 0) {
+      target = candidate;
+      break;
+    }
+    targetOrdinal -= 1;
+  }
+  if (!target) return undefined;
   return {
     pairId: `${version}-cal-${hash(target.recordId).toString(36)}`,
     leftSubjectId: target.rightSubjectId,
@@ -1193,15 +1209,15 @@ export function chooseNextPair(
   options: PairSelectionOptions = {},
 ): NextPair | undefined {
   if (items.length < 2) return undefined;
-  const calibration = options.allowCalibration === false
-    ? undefined
-    : nextCalibrationPair(history, sessionId, version, randomSeed);
-  if (calibration) return calibration;
-
-  const ordered = orderByAbilities(items, fit.abilities);
   const selectionCache = options.selectionCache ?? createPairSelectionCache(
     items, history, sessionId, fit.acceptedComparisons,
   );
+  const calibration = options.allowCalibration === false
+    ? undefined
+    : nextCalibrationPair(selectionCache, version, randomSeed);
+  if (calibration) return calibration;
+
+  const ordered = orderByAbilities(items, fit.abilities);
   const pairWeights = selectionCache.pairEffectiveWeight;
   const cooled = selectionCache.cooled;
   const nonCalibrationCount = selectionCache.nonCalibrationCount;
@@ -2152,8 +2168,16 @@ function createPairSelectionCache(
   }
   const cooled = new Set<string>();
   let nonCalibrationCount = 0;
+  let currentSessionResponseCount = 0;
+  const calibrationTargetIds = new Set(
+    history.map((entry) => entry.calibrationOfComparisonId).filter((value): value is string => Boolean(value)),
+  );
+  const calibrationCandidates = history
+    .filter((entry) => entry.outcome !== "skip" && entry.queryKind !== "calibration")
+    .sort(compareCalibrationCandidate);
   for (const entry of history) {
     if (entry.sessionId !== sessionId) continue;
+    currentSessionResponseCount += 1;
     if (entry.outcome === "skip") {
       if (acceptedComparisons - entry.acceptedCountAtAnswer < 20) {
         cooled.add(pairKey(entry.leftSubjectId, entry.rightSubjectId));
@@ -2162,7 +2186,38 @@ function createPairSelectionCache(
     }
     if (entry.queryKind !== "calibration") nonCalibrationCount += 1;
   }
-  return { pairMass, pairEffectiveWeight, itemEffectiveWeight, cooled, nonCalibrationCount };
+  return {
+    sessionId,
+    pairMass,
+    pairEffectiveWeight,
+    itemEffectiveWeight,
+    cooled,
+    nonCalibrationCount,
+    currentSessionResponseCount,
+    calibrationTargetIds,
+    calibrationCandidates,
+  };
+}
+
+function appendPairSelectionHistory(cache: PairSelectionCache, entry: RankingHistoryInput) {
+  if (entry.sessionId === cache.sessionId) cache.currentSessionResponseCount += 1;
+  if (entry.calibrationOfComparisonId) cache.calibrationTargetIds.add(entry.calibrationOfComparisonId);
+  if (entry.outcome !== "skip" && entry.queryKind !== "calibration") {
+    const last = cache.calibrationCandidates.at(-1);
+    if (!last || compareCalibrationCandidate(last, entry) <= 0) {
+      cache.calibrationCandidates.push(entry);
+    } else {
+      let low = 0;
+      let high = cache.calibrationCandidates.length;
+      while (low < high) {
+        const middle = Math.floor((low + high) / 2);
+        if (compareCalibrationCandidate(cache.calibrationCandidates[middle], entry) <= 0) low = middle + 1;
+        else high = middle;
+      }
+      cache.calibrationCandidates.splice(low, 0, entry);
+    }
+    if (entry.sessionId === cache.sessionId) cache.nonCalibrationCount += 1;
+  }
 }
 
 function refreshForecastSelectionDiagnostics(
@@ -2345,9 +2400,12 @@ function simulateForecastRollout(
       if (previousItemWeight < MINIMUM_COVERAGE_WEIGHT
         && nextItemWeight >= MINIMUM_COVERAGE_WEIGHT) coveredItemCount += 1;
     }
-    history.push(forecastHistoryRecord(input, pair, outcome, acceptedComparisons, rolloutSeed, answerIndex));
+    const historyRecord = forecastHistoryRecord(
+      input, pair, outcome, acceptedComparisons, rolloutSeed, answerIndex,
+    );
+    history.push(historyRecord);
+    appendPairSelectionHistory(selectionCache, historyRecord);
     answersSinceExactRefresh += 1;
-    if (pair.queryKind !== "calibration") selectionCache.nonCalibrationCount += 1;
     const checkNow = shouldCheckForecastStopping(
       answerIndex,
       stoppingCheckStride,
