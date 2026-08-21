@@ -115,7 +115,10 @@ export function forecastWorkerCount(
   mobile = false,
 ) {
   if ((hardwareConcurrency ?? 1) < 2 || itemCount < 80 || rolloutCount < 32) return 0;
-  return Math.min(mobile ? 2 : 4, Math.max(2, Math.floor(hardwareConcurrency ?? 2)));
+  return Math.min(
+    mobile ? 2 : 8,
+    Math.max(2, Math.floor((hardwareConcurrency ?? 2) / 2)),
+  );
 }
 
 export async function computePreparedForecasts(

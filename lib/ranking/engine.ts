@@ -1424,6 +1424,9 @@ const FORECAST_MIN_PAIR_VARIANCE = 1e-8;
 // the interactive forecast responsive; the public model itself still checks
 // the stopping event on every real answer.
 const FORECAST_DEFAULT_DIAGNOSTIC_STRIDE = 16;
+/** Local path state may screen checks, but only a refreshed posterior may stop. */
+const FORECAST_EXACT_REFRESH_TRIGGER = STOPPING_PROBABILITY_TARGET;
+const FORECAST_MAX_EXACT_REFRESH_GAP = 128;
 
 function simulatedOutcome(
   difference: number,
@@ -2019,6 +2022,18 @@ function forecastStoppingEventLows(
   ])) as Record<ComparisonBudgetMode, number>;
 }
 
+/** @internal Pure refresh policy used by tests and the rollout loop. */
+export function shouldRefreshForecastPosterior(
+  stoppingEventLows: Record<ComparisonBudgetMode, number>,
+  stoppingTimes: Record<ComparisonBudgetMode, number>,
+  answersSinceRefresh: number,
+) {
+  if (answersSinceRefresh >= FORECAST_MAX_EXACT_REFRESH_GAP) return true;
+  return STOPPING_MODE_ORDER.some((mode) =>
+    !Number.isFinite(stoppingTimes[mode])
+    && stoppingEventLows[mode] >= FORECAST_EXACT_REFRESH_TRIGGER);
+}
+
 function forecastHistoryRecord(
   input: StoppingForecastRolloutInput,
   pair: NextPair,
@@ -2157,6 +2172,7 @@ function simulateForecastRollout(
   input.items.forEach((item, index) => { fit.abilities[item.subjectId] = abilities[index]; });
   let diagnostics = input.initialDiagnostics;
   let optimizerConverged = input.optimizerConverged;
+  let answersSinceExactRefresh = 0;
   const diagnosticStride = Math.max(1, Math.round(input.diagnosticStride));
   const stoppingCheckStride = Math.max(8, diagnosticStride);
   const stoppingTimes = Object.fromEntries(STOPPING_MODE_ORDER.map((mode) => [mode, Number.POSITIVE_INFINITY])) as Record<ComparisonBudgetMode, number>;
@@ -2251,11 +2267,28 @@ function simulateForecastRollout(
         && nextItemWeight >= MINIMUM_COVERAGE_WEIGHT) coveredItemCount += 1;
     }
     history.push(forecastHistoryRecord(input, pair, outcome, acceptedComparisons, rolloutSeed, answerIndex));
+    answersSinceExactRefresh += 1;
     if (pair.queryKind !== "calibration") selectionCache.nonCalibrationCount += 1;
     const checkNow = answerIndex <= Math.min(4, stoppingCheckStride)
       || answerIndex % stoppingCheckStride === 0
       || evidenceCount === input.evidenceRequired;
     if (checkNow) {
+      const screenedStoppingEventLows = forecastStoppingEventLows(
+        input.items,
+        abilities,
+        posteriorSamples,
+        input.scoreByRank,
+        evidenceCount,
+        input.evidenceRequired,
+        uniquePairCount,
+        input.uniquePairRequired,
+        coveredItemCount,
+        optimizerConverged,
+      );
+      if (answerIndex !== input.simulationHorizon
+        && !shouldRefreshForecastPosterior(
+          screenedStoppingEventLows, stoppingTimes, answersSinceExactRefresh,
+        )) continue;
       const refreshed = rebuildForecastPosteriorAtCheckpoint(
         input, history, fit.abilities, rolloutSeed, answerIndex,
       );
@@ -2270,6 +2303,7 @@ function simulateForecastRollout(
         );
       fit.tieLogSamples = tieLogSamples;
       optimizerConverged = fit.converged;
+      answersSinceExactRefresh = 0;
       evidenceCount = refreshed.evidence.evidenceCount;
       uniquePairCount = refreshed.evidence.uniquePairCount;
       coveredItemCount = refreshed.evidence.coveredItemCount;
@@ -2430,7 +2464,7 @@ function summarizeStoppingTimes(
 ): StoppingForecast {
   const rolloutCount = stoppingTimes.length;
   const base = {
-    method: "posterior-contraction-mc-v13" as const,
+    method: "posterior-contraction-mc-v14" as const,
     rolloutCount,
     nextCheckpoint,
     projectionHorizon,

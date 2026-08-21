@@ -247,7 +247,7 @@ export interface CalibrationDiagnostics {
 export type StoppingForecastStatus = "ready" | "forecast" | "uncertain" | "limit";
 
 export interface StoppingForecast {
-  method: "posterior-contraction-mc-v1" | "posterior-contraction-mc-v2" | "posterior-contraction-mc-v3" | "posterior-contraction-mc-v4" | "posterior-contraction-mc-v5" | "posterior-contraction-mc-v6" | "posterior-contraction-mc-v7" | "posterior-contraction-mc-v8" | "posterior-contraction-mc-v9" | "posterior-contraction-mc-v10" | "posterior-contraction-mc-v11" | "posterior-contraction-mc-v12" | "posterior-contraction-mc-v13";
+  method: "posterior-contraction-mc-v1" | "posterior-contraction-mc-v2" | "posterior-contraction-mc-v3" | "posterior-contraction-mc-v4" | "posterior-contraction-mc-v5" | "posterior-contraction-mc-v6" | "posterior-contraction-mc-v7" | "posterior-contraction-mc-v8" | "posterior-contraction-mc-v9" | "posterior-contraction-mc-v10" | "posterior-contraction-mc-v11" | "posterior-contraction-mc-v12" | "posterior-contraction-mc-v13" | "posterior-contraction-mc-v14";
   status: StoppingForecastStatus;
   rolloutCount: number;
   /** Integer additional accepted answers at the 10th, 50th, and 90th stopping-time percentiles. */

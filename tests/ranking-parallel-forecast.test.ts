@@ -56,7 +56,8 @@ class InlineForecastWorker implements ForecastWorkerLike {
 
 describe("parallel stopping forecast", () => {
   it("caps forecast workers and skips parallel overhead for small jobs", () => {
-    expect(forecastWorkerCount(16, 284, 64)).toBe(4);
+    expect(forecastWorkerCount(16, 284, 64)).toBe(8);
+    expect(forecastWorkerCount(8, 284, 64)).toBe(4);
     expect(forecastWorkerCount(2, 284, 64)).toBe(2);
     expect(forecastWorkerCount(16, 284, 64, true)).toBe(2);
     expect(forecastWorkerCount(1, 284, 64)).toBe(0);
@@ -90,7 +91,7 @@ describe("parallel stopping forecast", () => {
           .toBeLessThanOrEqual(simulation.stoppingTimesByMode.thorough[index]);
       }
     }
-    expect(workers).toHaveLength(4);
+    expect(workers).toHaveLength(2);
     expect(workers.every((worker) => worker.terminated)).toBe(true);
   });
 
@@ -106,7 +107,7 @@ describe("parallel stopping forecast", () => {
     await computePreparedForecasts(prepared, options);
     await computePreparedForecasts(prepared, options);
 
-    expect(workers).toHaveLength(4);
+    expect(workers).toHaveLength(2);
     expect(workers.every((worker) => !worker.terminated)).toBe(true);
     pool.terminate();
     expect(workers.every((worker) => worker.terminated)).toBe(true);

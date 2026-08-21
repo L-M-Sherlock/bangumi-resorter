@@ -157,7 +157,7 @@ describe("ranking strategy simulation", () => {
     }
     expect(checkpointForecast).toBeDefined();
     expect(checkpointForecast?.rolloutCount).toBe(64);
-    expect(checkpointForecast?.method).toBe("posterior-contraction-mc-v13");
+    expect(checkpointForecast?.method).toBe("posterior-contraction-mc-v14");
     if (stoppedAt !== undefined) {
       const actualAdditional = stoppedAt - checkpoint;
       if (checkpointForecast?.lowerAdditional !== undefined && checkpointForecast.upperAdditional !== undefined) {

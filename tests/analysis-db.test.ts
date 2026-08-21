@@ -93,7 +93,7 @@ describe("analysis cache database lifecycle", () => {
       priorMode: "weak",
     }).model;
     const forecast: StoppingForecast = {
-      method: "posterior-contraction-mc-v13",
+      method: "posterior-contraction-mc-v14",
       status: "forecast",
       rolloutCount: 64,
       lowerAdditional: 16,
