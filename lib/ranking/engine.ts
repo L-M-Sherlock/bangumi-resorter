@@ -2680,7 +2680,11 @@ export function prepareStoppingForecastRollouts(
   );
   const simulationHorizon = Math.min(
     requestedProjectionHorizon,
-    Math.max(120, Math.min(500, Math.ceil(items.length * 1.75))),
+    // Keep a bounded window for responsiveness, but expose substantially
+    // more of the future than the old 1.75×/500 cap.  The lower bound makes
+    // an early session forecast visible immediately; the upper bound prevents
+    // pathological collections from monopolising the forecast worker.
+    Math.max(120, Math.min(800, Math.ceil(items.length * 2))),
   );
   return {
     items: items.map((item) => ({ ...item })),

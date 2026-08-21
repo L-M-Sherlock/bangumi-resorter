@@ -2204,6 +2204,9 @@ export default function ResorterApp() {
   const forecastWorkerRef = useRef<RankingForecastWorkerClient | null>(null);
   const analysisWorkerRef = useRef<AnalysisWorkerClient | null>(null);
   const forecastGenerationRef = useRef(0);
+  // Forecasts are intentionally throttled: keep the last accepted-count
+  // checkpoint so rapid answering does not restart the expensive simulation.
+  const lastForecastAcceptedCountRef = useRef<number | null>(null);
   const compareRef = useRef<CompareState | undefined>(undefined);
 
   const navigate = useCallback((target: View) => {
@@ -2226,6 +2229,7 @@ export default function ResorterApp() {
     forecastGenerationRef.current += 1;
     forecastWorkerRef.current?.cancel(message);
     setForecastWarning("");
+    lastForecastAcceptedCountRef.current = null;
   }, []);
 
   const loadSnapshot = useCallback(async (nextSnapshot: Snapshot, target: View = "library") => {
@@ -2352,7 +2356,12 @@ export default function ResorterApp() {
     }
   }
 
-  function scheduleForecast(request: ForecastRequest) {
+  function scheduleForecast(request: ForecastRequest, acceptedComparisons: number, force = false) {
+    const baseline = lastForecastAcceptedCountRef.current;
+    // Always compute the first available forecast. Afterwards refresh only
+    // every ten accepted (non-skip) comparisons, unless explicitly forced by
+    // opening a session or changing a model setting.
+    if (!force && baseline !== null && acceptedComparisons - baseline < 10) return;
     const client = forecastWorkerRef.current;
     if (!client) return;
     const generation = forecastGenerationRef.current + 1;
@@ -2368,10 +2377,27 @@ export default function ResorterApp() {
         || current.session.id !== request.sessionId
         || current.session.modelVersion !== request.version) return;
       await adoptCompareState({ ...current, model: merged });
+      lastForecastAcceptedCountRef.current = merged.acceptedComparisons;
     }).catch((cause) => {
       if (forecastGenerationRef.current !== generation) return;
       setForecastWarning(cause instanceof Error ? cause.message : "动态剩余预测暂时不可用。");
     });
+  }
+
+  function retainForecastUntilRefresh(next: ModelState, previous: ModelState) {
+    if (lastForecastAcceptedCountRef.current === null
+      || next.acceptedComparisons - lastForecastAcceptedCountRef.current >= 10) return next;
+    const previousDiagnostics = previous.diagnostics;
+    const nextDiagnostics = next.diagnostics;
+    if (!nextDiagnostics || (!previousDiagnostics?.forecast && !previousDiagnostics?.forecasts)) return next;
+    return {
+      ...next,
+      diagnostics: {
+        ...nextDiagnostics,
+        forecast: previousDiagnostics.forecast,
+        forecasts: previousDiagnostics.forecasts,
+      },
+    };
   }
 
   async function buildAnalysisHistory(context: SessionAnalysisContext, checkpoints: number[]) {
@@ -2457,7 +2483,8 @@ export default function ResorterApp() {
       await initializeModel(sessionId, calculated.model);
       const refreshed = await getSessionBundle(sessionId); if (!refreshed) throw new Error("会话不存在。");
       await adoptCompareState({ session: refreshed.session, items: refreshed.items, history: refreshed.history, model: calculated.model, nextPair: calculated.nextPair });
-      if (!reusableForecastModel) scheduleForecast(calculated.forecastRequest);
+      if (reusableForecastModel) lastForecastAcceptedCountRef.current = calculated.model.acceptedComparisons;
+      else scheduleForecast(calculated.forecastRequest, calculated.model.acceptedComparisons, true);
       setSessions(await listSessions(refreshed.session.profileId));
       if (!reusableAnalysisModel) navigate(target);
     } catch (cause) { setGlobalError(cause instanceof Error ? cause.message : "无法打开会话。"); }
@@ -2507,7 +2534,6 @@ export default function ResorterApp() {
       const current = compare;
       const pair = current.nextPair;
       if (!pair) return;
-      cancelForecast("会话新增了回答，旧的动态剩余预测已取消。");
       const provisional: ComparisonRecord = {
         id: crypto.randomUUID(),
         profileId: current.session.profileId,
@@ -2526,8 +2552,9 @@ export default function ResorterApp() {
       const calculated = await calculate(current.session, current.items, nextHistory, current.model, "APPLY_RESPONSE", current.session.modelVersion + 1);
       await commitResponse(current.session.id, current.session.modelVersion, { ...pair, recordId: provisional.id }, outcome, calculated.model);
       const bundle = await getSessionBundle(current.session.id); if (!bundle) throw new Error("会话保存失败。");
-      await adoptCompareState({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
-      scheduleForecast(calculated.forecastRequest);
+      const nextModel = retainForecastUntilRefresh(calculated.model, current.model);
+      await adoptCompareState({ session: bundle.session, items: bundle.items, history: bundle.history, model: nextModel, nextPair: calculated.nextPair });
+      scheduleForecast(calculated.forecastRequest, calculated.model.acceptedComparisons);
       setSessions(await listSessions(current.session.profileId));
     } catch (cause) { setGlobalError(cause instanceof Error ? cause.message : "无法保存这次比较。"); }
     finally { setBusy(false); }
@@ -2552,8 +2579,8 @@ export default function ResorterApp() {
         queryKind: record.queryKind ?? "adaptive",
         calibrationOfComparisonId: record.calibrationOfComparisonId,
       };
-      await adoptCompareState({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: retryPair });
-      scheduleForecast(calculated.forecastRequest);
+        await adoptCompareState({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: retryPair });
+      scheduleForecast(calculated.forecastRequest, calculated.model.acceptedComparisons, true);
     } catch (cause) { setGlobalError(cause instanceof Error ? cause.message : "无法撤销。"); }
     finally { setBusy(false); }
   }
@@ -2584,7 +2611,7 @@ export default function ResorterApp() {
       await commitSessionDistribution(current.session.id, current.session.modelVersion, distribution, calculated.model);
       const bundle = await getSessionBundle(current.session.id); if (!bundle) throw new Error("会话保存失败。");
       await adoptCompareState({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
-      scheduleForecast(calculated.forecastRequest);
+      scheduleForecast(calculated.forecastRequest, calculated.model.acceptedComparisons, true);
       setSessions(await listSessions(current.session.profileId));
     } catch (cause) { setGlobalError(cause instanceof Error ? cause.message : "无法更新评分分布。"); }
     finally { setBusy(false); }
@@ -2605,7 +2632,7 @@ export default function ResorterApp() {
       await commitSessionBudgetMode(current.session.id, current.session.modelVersion, budgetMode, calculated.model);
       const bundle = await getSessionBundle(current.session.id); if (!bundle) throw new Error("会话保存失败。");
       await adoptCompareState({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
-      if (calculated.forecastRequest) scheduleForecast(calculated.forecastRequest);
+      if (calculated.forecastRequest) scheduleForecast(calculated.forecastRequest, calculated.model.acceptedComparisons, true);
       setSessions(await listSessions(current.session.profileId));
     } catch (cause) { setGlobalError(cause instanceof Error ? cause.message : "无法更新停止严格度。"); }
     finally { setBusy(false); }
@@ -2624,7 +2651,7 @@ export default function ResorterApp() {
       await commitSessionPriorMode(current.session.id, current.session.modelVersion, priorMode, calculated.model);
       const bundle = await getSessionBundle(current.session.id); if (!bundle) throw new Error("会话保存失败。");
       await adoptCompareState({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
-      scheduleForecast(calculated.forecastRequest);
+      scheduleForecast(calculated.forecastRequest, calculated.model.acceptedComparisons);
       setSessions(await listSessions(current.session.profileId));
     } catch (cause) { setGlobalError(cause instanceof Error ? cause.message : "无法更新先验强度。"); }
     finally { setBusy(false); }
@@ -2643,7 +2670,6 @@ export default function ResorterApp() {
       const allowed = new Set(current.items.map((item) => item.subjectId));
       if (leftSubjectId === rightSubjectId) throw new Error("左右两侧不能选择同一个条目。");
       if (!allowed.has(leftSubjectId) || !allowed.has(rightSubjectId)) throw new Error("只能添加当前会话范围内的比较。");
-      cancelForecast("会话新增了手动判断，旧的动态剩余预测已取消。");
       const provisional: ComparisonRecord = {
         id: crypto.randomUUID(),
         profileId: current.session.profileId,
@@ -2663,8 +2689,9 @@ export default function ResorterApp() {
         recordId: provisional.id, leftSubjectId, rightSubjectId, queryKind: "manual",
       }, outcome, calculated.model);
       const bundle = await getSessionBundle(current.session.id); if (!bundle) throw new Error("会话保存失败。");
-      await adoptCompareState({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
-      scheduleForecast(calculated.forecastRequest);
+      const nextModel = retainForecastUntilRefresh(calculated.model, current.model);
+      await adoptCompareState({ session: bundle.session, items: bundle.items, history: bundle.history, model: nextModel, nextPair: calculated.nextPair });
+      scheduleForecast(calculated.forecastRequest, calculated.model.acceptedComparisons);
       setSessions(await listSessions(current.session.profileId));
     } catch (cause) { setGlobalError(cause instanceof Error ? cause.message : "无法添加这次比较。"); }
     finally { setBusy(false); }
@@ -2703,7 +2730,7 @@ export default function ResorterApp() {
       const bundle = await getSessionBundle(current.session.id);
       if (!bundle) throw new Error("会话保存失败。");
       await adoptCompareState({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
-      scheduleForecast(calculated.forecastRequest);
+      scheduleForecast(calculated.forecastRequest, calculated.model.acceptedComparisons, true);
       setSessions(await listSessions(current.session.profileId));
     } catch (cause) {
       throw cause instanceof Error ? cause : new Error("无法导入其他会话的判断。");
@@ -2726,7 +2753,7 @@ export default function ResorterApp() {
       await commitComparisonDeletion(current.session.id, current.session.modelVersion, recordId, calculated.model);
       const bundle = await getSessionBundle(current.session.id); if (!bundle) throw new Error("会话保存失败。");
       await adoptCompareState({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
-      scheduleForecast(calculated.forecastRequest);
+      scheduleForecast(calculated.forecastRequest, calculated.model.acceptedComparisons, true);
       setSessions(await listSessions(current.session.profileId));
     } catch (cause) { setGlobalError(cause instanceof Error ? cause.message : "无法删除这条判断。"); }
     finally { setBusy(false); }
