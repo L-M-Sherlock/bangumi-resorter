@@ -768,7 +768,7 @@ kbd { padding: 2px 5px; border: 1px solid rgba(255,255,255,.35); border-radius: 
 .analysis-page { width: 100%; min-width: 0; }
 .analysis-header { margin-bottom: 24px; }
 .analysis-header-actions { align-items: end; flex-wrap: wrap; justify-content: flex-end; }
-.analysis-header-actions label { min-width: 116px; display: grid; gap: 5px; color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: .04em; }
+.analysis-header-actions label { min-width: 116px; display: grid; gap: 5px; color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .04em; }
 .analysis-header-actions select { min-width: 116px; min-height: 40px; padding: 0 30px 0 11px; color: var(--ink); border: 1px solid var(--line); border-radius: 8px; background: var(--surface-soft); font-size: 11px; }
 .analysis-page .notice { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .text-button { min-height: 36px; padding: 0 8px; color: inherit; border: 0; background: transparent; font-weight: 700; text-decoration: underline; text-underline-offset: 3px; }
@@ -794,8 +794,8 @@ kbd { padding: 2px 5px; border: 1px solid rgba(255,255,255,.35); border-radius: 
 .analysis-chart-card { min-width: 0; padding: 17px 17px 14px; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
 .analysis-chart-wide { grid-column: 1 / -1; }
 .analysis-chart-card header h2 { margin: 0; font: 700 19px/1.2 Georgia, "Songti SC", serif; }
-.analysis-chart-card header p { margin: 6px 0 0; color: var(--muted); font-size: 10px; line-height: 1.55; }
-.analysis-chart-legend { min-height: 38px; margin: 10px 0 2px; display: flex; align-items: center; flex-wrap: wrap; gap: 7px 14px; color: var(--muted); font-size: 9px; }
+.analysis-chart-card header p { margin: 6px 0 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
+.analysis-chart-legend { min-height: 38px; margin: 10px 0 2px; display: flex; align-items: center; flex-wrap: wrap; gap: 7px 14px; color: var(--muted); font-size: 11px; }
 .analysis-chart-legend span { display: inline-flex; align-items: center; gap: 6px; }
 .analysis-chart-legend span.active { color: var(--ink); font-weight: 800; }
 .analysis-chart-legend i { width: 18px; height: 0; border-top-width: 2px; border-top-color: currentColor; }
@@ -803,18 +803,18 @@ kbd { padding: 2px 5px; border: 1px solid rgba(255,255,255,.35); border-radius: 
 .analysis-svg-wrap svg { width: 100%; height: auto; display: block; overflow: visible; cursor: crosshair; user-select: none; }
 .analysis-grid-line { stroke: var(--line-soft); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .analysis-grid-line.vertical { stroke-dasharray: 2 5; }
-.analysis-axis-label { fill: var(--muted); font: 9px Arial, "PingFang SC", sans-serif; }
+.analysis-axis-label { fill: var(--muted); font: 11px Arial, "PingFang SC", sans-serif; }
 .analysis-band { opacity: .13; }
 .analysis-reference-line { stroke: var(--accent-dark); stroke-width: 1.5; stroke-dasharray: 5 4; vector-effect: non-scaling-stroke; }
-.analysis-reference-label { fill: var(--accent-dark); font: 700 9px Arial, "PingFang SC", sans-serif; }
+.analysis-reference-label { fill: var(--accent-dark); font: 700 11px Arial, "PingFang SC", sans-serif; }
 .analysis-crosshair { stroke: var(--ink); stroke-width: 1; stroke-dasharray: 2 3; opacity: .48; vector-effect: non-scaling-stroke; }
-.analysis-chart-tooltip { min-height: 44px; padding: 8px 10px; display: flex; align-items: center; flex-wrap: wrap; gap: 7px 13px; border-radius: 7px; background: var(--surface-soft); color: var(--muted); font-size: 9px; }
+.analysis-chart-tooltip { min-height: 44px; padding: 8px 10px; display: flex; align-items: center; flex-wrap: wrap; gap: 7px 13px; border-radius: 7px; background: var(--surface-soft); color: var(--muted); font-size: 11px; }
 .analysis-chart-tooltip > strong { color: var(--ink); }
 .analysis-chart-tooltip span { display: inline-flex; align-items: center; gap: 5px; }
 .analysis-chart-tooltip i { width: 6px; height: 6px; border-radius: 50%; }
 .analysis-chart-tooltip b { color: var(--ink); }
-.analysis-chart-footer { margin: 9px 2px 0; color: var(--muted); font-size: 9px; line-height: 1.5; }
-.analysis-disclaimer { margin: 18px 0 0; padding: 12px 14px; color: var(--muted); border-left: 3px solid var(--analysis-purple); background: var(--surface-soft); font-size: 10px; line-height: 1.6; }
+.analysis-chart-footer { margin: 9px 2px 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.analysis-disclaimer { margin: 18px 0 0; padding: 12px 14px; color: var(--muted); border-left: 3px solid var(--analysis-purple); background: var(--surface-soft); font-size: 11px; line-height: 1.6; }
 
 @media (max-width: 1200px) {
   .analysis-control-panel { grid-template-columns: 1fr 2fr; }
