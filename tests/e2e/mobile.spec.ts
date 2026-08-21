@@ -191,6 +191,13 @@ test.describe("移动端 UI/UX", () => {
     await page.getByRole("button", { name: "返回收藏概览" }).click();
     await expect(page.getByRole("heading", { name: /demo 的已评分收藏/ })).toBeVisible();
 
+    await page.getByRole("button", { name: "会话分析", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "还没有排序会话" })).toBeVisible();
+    await expect(page.getByText("暂无可恢复的会话")).toBeVisible();
+    await expectNoHorizontalOverflow(page);
+    await page.getByRole("button", { name: "返回收藏概览" }).click();
+    await expect(page.getByRole("heading", { name: /demo 的已评分收藏/ })).toBeVisible();
+
     await page.getByRole("button", { name: "排序结果", exact: true }).click();
     await expect(page.getByRole("heading", { name: "还没有排序会话" })).toBeVisible();
     await expect(page.getByText("暂无可恢复的会话")).toBeVisible();
@@ -206,7 +213,7 @@ test.describe("移动端 UI/UX", () => {
         const rect = element.getBoundingClientRect();
         return { width: rect.width, height: rect.height, right: rect.right };
       }));
-      expect(navMetrics).toHaveLength(5);
+      expect(navMetrics).toHaveLength(6);
       for (const metric of navMetrics) {
         expect(metric.height).toBeGreaterThanOrEqual(44);
         expect(metric.right).toBeLessThanOrEqual(viewport.width);

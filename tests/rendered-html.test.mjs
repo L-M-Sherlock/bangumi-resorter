@@ -37,5 +37,6 @@ test("static export bundles the ranking workers and social preview", async () =>
   ]);
   assert.ok(staticFiles.some((filename) => /ranking\.worker.*\.js$/.test(filename)));
   assert.ok(staticFiles.some((filename) => /forecast\.worker.*\.js$/.test(filename)));
+  assert.ok(staticFiles.some((filename) => /analysis\.worker.*\.js$/.test(filename)));
   assert.ok(preview.byteLength > 100_000);
 });

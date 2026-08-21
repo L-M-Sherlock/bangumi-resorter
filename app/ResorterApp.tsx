@@ -4,6 +4,9 @@
 import { FormEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { Term } from "@/app/Term";
 import { ThemeToggle } from "@/app/ThemeToggle";
+import { SessionAnalysisView, type AnalysisTaskState } from "@/app/SessionAnalysisView";
+import { sessionAnalysisContext, type SessionAnalysisContext } from "@/lib/analysis";
+import { AnalysisWorkerClient } from "@/lib/analysis/worker-client";
 import {
   previewBangumiRatingWrite,
   RatingWriteCandidate,
@@ -44,6 +47,8 @@ import {
   previewSnapshotDeletion,
   previewSessionTagDerivation,
   previewSessionUpgrade,
+  persistSessionAnalysisEndpoint,
+  persistSessionAnalysisPoint,
   saveSnapshot,
   setActiveSnapshot,
   upgradeSessionToSnapshot,
@@ -73,6 +78,7 @@ import {
   sessionBudgetMode,
   sessionPriorMode,
   stoppingCoverageTarget,
+  STOPPING_MODE_ORDER,
   STOPPING_PROBABILITY_TARGET,
 } from "@/lib/ranking/strategy";
 import { RankingWorkerClient } from "@/lib/ranking/worker-client";
@@ -118,7 +124,7 @@ import {
   ValidatedBackup,
 } from "@/lib/types";
 
-type View = "connect" | "library" | "compare" | "results" | "backup";
+type View = "connect" | "library" | "compare" | "results" | "analysis" | "backup";
 
 interface CompareState {
   session: SortingSession;
@@ -354,7 +360,7 @@ function Shell({ view, onNavigate, profile, snapshot, projects, onSwitchSnapshot
   children: ReactNode;
 }) {
   const nav: Array<[View, string, string]> = [
-    ["library", "⌂", "收藏概览"], ["compare", "⇄", "两两比较"], ["results", "≋", "排序结果"], ["backup", "↓", "备份与导出"],
+    ["library", "⌂", "收藏概览"], ["compare", "⇄", "两两比较"], ["results", "≋", "排序结果"], ["analysis", "⌁", "会话分析"], ["backup", "↓", "备份与导出"],
   ];
   const projectOptions = projects.flatMap((project) => project.snapshots.map((entry) => ({
     value: entry.id,
@@ -1530,7 +1536,7 @@ function PriorModeSelect({ id, value, busy, onChange }: {
 }
 
 function SessionPicker({ purpose, sessions, currentSnapshotId, busy, onResume, onBack }: {
-  purpose: "compare" | "results";
+  purpose: "compare" | "results" | "analysis";
   sessions: SortingSession[];
   currentSnapshotId: string;
   busy: boolean;
@@ -1540,15 +1546,21 @@ function SessionPicker({ purpose, sessions, currentSnapshotId, busy, onResume, o
   const orderedSessions = [...sessions].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   const hasSessions = orderedSessions.length > 0;
   const isResults = purpose === "results";
-  const actionLabel = isResults ? "查看结果" : "进入会话";
+  const isAnalysis = purpose === "analysis";
+  const actionLabel = isAnalysis ? "查看分析" : isResults ? "查看结果" : "进入会话";
+  const sectionLabel = isAnalysis ? "会话分析" : isResults ? "排序结果" : "两两比较";
+  const selectionTitle = isAnalysis ? "选择一个排序会话查看分析" : isResults ? "选择一个排序会话查看结果" : "选择一个排序会话继续比较";
+  const selectionCopy = isAnalysis
+    ? "选择会话即可立即查看当前端点，并按需在后台补算历史检查点。"
+    : isResults
+      ? "选择最近的会话即可直接查看排序结果；每个会话会保留自己的范围和推断设置。"
+      : "选择最近的会话即可恢复判断；每个会话会保留自己的范围和推断设置。";
 
   return <section className="center-message session-picker" aria-labelledby="session-picker-title" aria-busy={busy}>
     <div className="session-picker-header">
-      <span className="eyebrow">{isResults ? "排序结果" : "两两比较"}</span>
-      <h1 id="session-picker-title">{hasSessions ? (isResults ? "选择一个排序会话查看结果" : "选择一个排序会话继续比较") : "还没有排序会话"}</h1>
-      <p>{hasSessions
-        ? (isResults ? "选择最近的会话即可直接查看排序结果；每个会话会保留自己的范围和推断设置。" : "选择最近的会话即可恢复判断；每个会话会保留自己的范围和推断设置。")
-        : "先在收藏概览创建一个排序会话，之后就可以从这里直接进入。"}</p>
+      <span className="eyebrow">{sectionLabel}</span>
+      <h1 id="session-picker-title">{hasSessions ? selectionTitle : "还没有排序会话"}</h1>
+      <p>{hasSessions ? selectionCopy : "先在收藏概览创建一个排序会话，之后就可以从这里直接进入。"}</p>
     </div>
     {hasSessions ? <div className="session-picker-list" role="list" aria-label="可进入的排序会话">
       {orderedSessions.map((session) => {
@@ -2074,12 +2086,13 @@ function MobileRankingCards({ items, scoreLevelCount }: { items: RankedItem[]; s
     </li>)}</ol>;
 }
 
-function ResultsView({ state, sessions, username, busy, onBack, onMode, onPriorMode, onDistribution, onExportCsv, onAddComparison, onDeleteComparison, onImportComparison, onResync }: {
+function ResultsView({ state, sessions, username, busy, onBack, onAnalysis, onMode, onPriorMode, onDistribution, onExportCsv, onAddComparison, onDeleteComparison, onImportComparison, onResync }: {
   state: CompareState;
   sessions: SortingSession[];
   username: string;
   busy: boolean;
   onBack: () => void;
+  onAnalysis: () => void;
   onMode: (mode: ComparisonBudgetMode) => Promise<void>;
   onPriorMode: (mode: PriorMode) => Promise<void>;
   onDistribution: (distribution: DistributionConfig) => Promise<void>;
@@ -2102,7 +2115,7 @@ function ResultsView({ state, sessions, username, busy, onBack, onMode, onPriorM
   const evidenceWasAdjusted = Math.abs(adjustedEvidence - effectiveEvidence.length) > 0.05;
   const priorCopy = priorMode === "strong" ? "原评分作为强先验" : "仅保留弱零均值正则";
   return <>
-    <header className="page-header results-header"><div><span className="eyebrow">排序结果 · {PRIOR_MODE_COPY[priorMode].label} · {BUDGET_MODE_COPY[budgetMode].label}停止 · <Term term="score-bucket">{scoreLevelCount} 档</Term></span><h1>你的偏好序列</h1><p>{result.length} 个{SUBJECT_TYPES[state.session.subjectType]}条目 · 当前输出 <Term term="score-bucket">{scoreLevelCount} 档评分</Term> · <Term term="prior">{priorCopy}</Term></p><p>总有效证据 {formatEvidence(adjustedEvidence)} 条 · 本会话新回答 {newEvidence} 条 · 导入证据 {importedEvidence} 条{evidenceWasAdjusted ? ` · 原始判断 ${effectiveEvidence.length} 条` : ""}</p></div><div className="header-actions"><PriorModeSelect id="result-prior-mode" value={priorMode} busy={busy} onChange={onPriorMode} /><InferenceModeSelect id="result-budget-mode" value={budgetMode} busy={busy} onChange={onMode} /><button className="outline-button" onClick={onBack}>继续比较</button><button className="primary-button compact" onClick={() => onExportCsv(result)}>导出 CSV</button></div></header>
+    <header className="page-header results-header"><div><span className="eyebrow">排序结果 · {PRIOR_MODE_COPY[priorMode].label} · {BUDGET_MODE_COPY[budgetMode].label}停止 · <Term term="score-bucket">{scoreLevelCount} 档</Term></span><h1>你的偏好序列</h1><p>{result.length} 个{SUBJECT_TYPES[state.session.subjectType]}条目 · 当前输出 <Term term="score-bucket">{scoreLevelCount} 档评分</Term> · <Term term="prior">{priorCopy}</Term></p><p>总有效证据 {formatEvidence(adjustedEvidence)} 条 · 本会话新回答 {newEvidence} 条 · 导入证据 {importedEvidence} 条{evidenceWasAdjusted ? ` · 原始判断 ${effectiveEvidence.length} 条` : ""}</p></div><div className="header-actions"><PriorModeSelect id="result-prior-mode" value={priorMode} busy={busy} onChange={onPriorMode} /><InferenceModeSelect id="result-budget-mode" value={budgetMode} busy={busy} onChange={onMode} /><button className="outline-button" onClick={onAnalysis}>会话分析</button><button className="outline-button" onClick={onBack}>继续比较</button><button className="primary-button compact" onClick={() => onExportCsv(result)}>导出 CSV</button></div></header>
     {!state.model.converged && <Notice tone="warning">排序优化器未收敛（{state.model.optimizationStatus ?? "状态未知"}）；当前结果仅供诊断，停止结论与有限剩余题量均已关闭。</Notice>}
     <section className="result-summary"><article className="panel"><div className="panel-title"><div><span className="eyebrow"><Term term="score-distribution">{scoreLevelCount === DEFAULT_SCORE_LEVELS ? "评分分布对比" : "评分分布"}</Term></span><h2>{scoreLevelCount === DEFAULT_SCORE_LEVELS ? "原评分 → 新评分" : `原评分与 ${scoreLevelCount} 档新评分`}</h2></div><div className="distribution-controls"><ScoreLevelSelect id="result-score-level-count" className="header-select" compact value={scoreLevelCount} disabled={busy} onChange={(levelCount) => void onDistribution(distributionWithLevelCount(state.session.distribution, levelCount))} /><ThemedSelect id="result-distribution-preset" value={state.session.distribution.preset} options={distributionPresetOptions(scoreLevelCount)} ariaLabel="评分分布预设" menuLabel="评分分布预设选项" compact alignMenu="end" triggerClassName="header-select" disabled={busy} onChange={(preset) => void onDistribution(distributionConfig(preset, scoreLevelCount, state.session.distribution.weights))} /></div></div>{state.session.distribution.preset === "custom" && <CustomDistributionEditor key={`${state.session.id}:${scoreLevelCount}`} weights={state.session.distribution.weights} busy={busy} onApply={(weights) => onDistribution(distributionConfig("custom", scoreLevelCount, weights))} />}{scoreLevelCount === DEFAULT_SCORE_LEVELS ? <><TenLevelComparisonHistogram items={state.items} result={result} /><div className="chart-legend"><span><i className="old" />原评分</span><span><i className="new" />新评分</span></div></> : <div className="distribution-charts"><div className="distribution-chart"><strong>原评分 · 1–10</strong><OriginalScoreHistogram items={state.items} /></div><div className="distribution-chart"><strong>新评分 · 1–{scoreLevelCount}</strong><NewScoreHistogram result={result} levelCount={scoreLevelCount} /></div></div>}</article><article className="summary-stat"><span><Term term="cross-two-buckets">预计跨两档作品</Term></span><strong>{crossTwoBucketValue(diagnostics)}</strong><small><Term term="posterior-interval">{crossTwoBucketInterval(diagnostics)}</Term></small><div className="summary-forecast"><span><Term term="dynamic-forecast">动态剩余预测</Term></span><b>{forecastRange(diagnostics)}</b><small><StoppingCriterionDetail diagnostics={diagnostics} /></small></div><hr /><span><Term term="maximum-displacement">最坏偏移</Term></span><strong>{maxBucketDisplacementValue(diagnostics)}</strong><small>{maxBucketDisplacementInterval(diagnostics)}；仅作尾部诊断，当前模式要求 {percent(stoppingCoverageTarget(budgetMode))} 的作品保持在相邻一档，允许最多 {allowedCrossTwoBucketCount(state.items.length, stoppingCoverageTarget(budgetMode))} 部<Term term="cross-two-buckets">跨两档</Term>。{diagnostics?.calibration.completed ? <><Term term="calibration-repeat">复问</Term> {diagnostics.calibration.consistent}/{diagnostics.calibration.completed} 次一致，<Term term="posterior">后验</Term> {percent(diagnostics.calibration.posteriorMean)}；一致率仅作诊断，复问答案已按相关重复折权入模</> : "尚无校准复问；区间仅代表模型内近似"}</small></article></section>
     <ComparisonManager key={state.session.id} items={result} history={state.history} session={state.session} sessions={sessions} busy={busy} onAdd={onAddComparison} onDelete={onDeleteComparison} onImport={onImportComparison} />
@@ -2178,7 +2191,11 @@ export default function ResorterApp() {
   const [resyncOpen, setResyncOpen] = useState(false);
   const [globalError, setGlobalError] = useState("");
   const [storeStatus, setStoreStatus] = useState({ usage: 0, quota: 0, persisted: false });
+  const [analysisTask, setAnalysisTask] = useState<AnalysisTaskState>({ status: "idle", completed: 0, total: 0 });
+  const [analysisCacheRevision, setAnalysisCacheRevision] = useState(0);
+  const [analysisStorageWarning, setAnalysisStorageWarning] = useState("");
   const workerRef = useRef<RankingWorkerClient | null>(null);
+  const analysisWorkerRef = useRef<AnalysisWorkerClient | null>(null);
 
   const navigate = useCallback((target: View) => {
     setGlobalError("");
@@ -2189,20 +2206,29 @@ export default function ResorterApp() {
     window.scrollTo({ top: 0, left: 0 });
   }, []);
 
+  const cancelAnalysisTask = useCallback((message = "历史分析已取消。") => {
+    analysisWorkerRef.current?.cancel(message);
+    setAnalysisTask((current) => current.status === "running"
+      ? { ...current, status: "cancelled", message }
+      : current);
+  }, []);
+
   const loadSnapshot = useCallback(async (nextSnapshot: Snapshot, target: View = "library") => {
+    cancelAnalysisTask("项目或收藏快照已经切换，历史分析已取消。");
     const [nextItems, nextSessions, nextProfile, nextProjects, nextHistory] = await Promise.all([
       getSnapshotItems(nextSnapshot.id), listSessions(nextSnapshot.profileId), db.profiles.get(nextSnapshot.profileId),
       listLocalProjects(), listBackupImportHistory(nextSnapshot.profileId),
     ]);
     await setActiveSnapshot(nextSnapshot.id);
     try { window.localStorage.setItem(LOCAL_PROJECT_MARKER_KEY, "1"); } catch { /* IndexedDB remains the source of truth. */ }
-    setSnapshot(nextSnapshot); setItems(nextItems); setSessions(nextSessions); setProfile(nextProfile); setProjects(nextProjects); setImportHistory(nextHistory); setCompare(undefined); setStoreStatus(await storageStatus()); navigate(target);
-  }, [navigate]);
+    setSnapshot(nextSnapshot); setItems(nextItems); setSessions(nextSessions); setProfile(nextProfile); setProjects(nextProjects); setImportHistory(nextHistory); setCompare(undefined); setAnalysisStorageWarning(""); setStoreStatus(await storageStatus()); navigate(target);
+  }, [cancelAnalysisTask, navigate]);
 
   useEffect(() => {
     let active = true;
     let readyFrame = 0;
     workerRef.current = new RankingWorkerClient();
+    analysisWorkerRef.current = new AnalysisWorkerClient();
     const clearPrinciplesReturn = () => {
       try {
         window.sessionStorage.removeItem(PRINCIPLES_RETURN_PENDING_KEY);
@@ -2219,7 +2245,13 @@ export default function ResorterApp() {
       try {
         const saved = await getActiveSnapshot();
         if (!active) return;
-        if (saved) await loadSnapshot(saved, "library");
+        if (saved) {
+          const requested = window.location.hash.slice(1);
+          const target = (["library", "compare", "results", "analysis", "backup"] as View[]).includes(requested as View)
+            ? requested as View
+            : "library";
+          await loadSnapshot(saved, target);
+        }
         else {
           try { window.localStorage.removeItem(LOCAL_PROJECT_MARKER_KEY); } catch { /* Storage may be disabled. */ }
           navigate("connect");
@@ -2246,6 +2278,7 @@ export default function ResorterApp() {
       window.removeEventListener("pageshow", pageshow);
       delete document.documentElement.dataset.resorterReady;
       workerRef.current?.terminate();
+      analysisWorkerRef.current?.terminate();
     };
   }, [loadSnapshot, navigate]);
 
@@ -2280,16 +2313,97 @@ export default function ResorterApp() {
     return result;
   }
 
-  async function openSession(sessionId: string, target: "compare" | "results" = "compare") {
+  async function adoptCompareState(next: CompareState) {
+    setCompare(next);
+    const context = sessionAnalysisContext(
+      next.session,
+      next.items,
+      next.history,
+      sessionPriorMode(next.session),
+      sessionBudgetMode(next.session),
+    );
+    try {
+      await persistSessionAnalysisEndpoint(context, next.model);
+      setAnalysisStorageWarning("");
+      setAnalysisCacheRevision((value) => value + 1);
+    } catch (cause) {
+      setAnalysisStorageWarning(cause instanceof Error ? cause.message : "无法保存当前分析端点。");
+    }
+  }
+
+  async function buildAnalysisHistory(context: SessionAnalysisContext, checkpoints: number[]) {
+    const client = analysisWorkerRef.current;
+    if (!client || checkpoints.length === 0) return;
+    if (analysisTask.status === "running") cancelAnalysisTask("已由新的历史分析任务替换。");
+    const taskIdentity = { sessionId: context.sessionId, seriesId: context.identity.id };
+    setAnalysisStorageWarning("");
+    setAnalysisTask({ status: "running", ...taskIdentity, completed: 0, total: checkpoints.length });
+    try {
+      await client.run({
+        type: "CALCULATE_HISTORY",
+        identity: context.identity,
+        inputDigest: context.inputDigest,
+        randomSeed: context.randomSeed,
+        items: context.items,
+        history: context.history,
+        distribution: context.distribution,
+        priorMode: context.priorMode,
+        budgetMode: context.budgetMode,
+        checkpoints,
+        forecastWorkerCount: window.innerWidth <= 820 || window.matchMedia("(pointer: coarse)").matches ? 1 : 2,
+      }, async (progress) => {
+        if (progress.seriesId !== context.identity.id || progress.inputDigest !== context.inputDigest) {
+          throw new Error("分析 Worker 返回了陈旧或错位的检查点。");
+        }
+        await persistSessionAnalysisPoint(context, progress.point);
+        setAnalysisCacheRevision((value) => value + 1);
+        setAnalysisTask((current) => current.status === "running"
+          && current.sessionId === context.sessionId
+          && current.seriesId === context.identity.id
+          ? { ...current, completed: progress.completed, total: progress.total }
+          : current);
+      });
+      setAnalysisTask((current) => current.status === "running"
+        && current.sessionId === context.sessionId
+        && current.seriesId === context.identity.id
+        ? { ...current, status: "complete", completed: checkpoints.length, total: checkpoints.length }
+        : current);
+    } catch (cause) {
+      setAnalysisTask((current) => current.status === "running"
+        && current.sessionId === context.sessionId
+        && current.seriesId === context.identity.id
+        ? { ...current, status: "error", message: cause instanceof Error ? cause.message : "历史分析计算失败。" }
+        : current);
+    }
+  }
+
+  async function openSession(sessionId: string, target: "compare" | "results" | "analysis" = "compare") {
     setBusy(true); setGlobalError("");
     try {
       const bundle = await getSessionBundle(sessionId); if (!bundle) throw new Error("会话不存在。");
+      const reusableAnalysisModel = target === "analysis"
+        && bundle.model?.version === bundle.session.modelVersion
+        && bundle.model.diagnostics?.method === "laplace-mc-v6"
+        && bundle.model.diagnostics.forecast?.method === "posterior-contraction-mc-v12"
+        && STOPPING_MODE_ORDER.every((mode) => bundle.model?.diagnostics?.forecasts?.[mode]?.method === "posterior-contraction-mc-v12")
+        && STOPPING_MODE_ORDER.every((mode) => bundle.model?.diagnostics?.stoppingChecks?.some((check) => check.mode === mode))
+        && Object.keys(bundle.model.abilities).length === bundle.items.length
+        && Object.keys(bundle.model.uncertainty).length === bundle.items.length;
+      if (reusableAnalysisModel) {
+        await adoptCompareState({
+          session: bundle.session,
+          items: bundle.items,
+          history: bundle.history,
+          model: bundle.model!,
+        });
+        navigate("analysis");
+      }
       const calculated = await calculate(bundle.session, bundle.items, bundle.history, bundle.model, bundle.model ? "RECOMPUTE" : "INIT_SESSION");
       await initializeModel(sessionId, calculated.model);
       const refreshed = await getSessionBundle(sessionId); if (!refreshed) throw new Error("会话不存在。");
-      setCompare({ session: refreshed.session, items: refreshed.items, history: refreshed.history, model: calculated.model, nextPair: calculated.nextPair });
+      await adoptCompareState({ session: refreshed.session, items: refreshed.items, history: refreshed.history, model: calculated.model, nextPair: calculated.nextPair });
       setSessions(await listSessions(refreshed.session.profileId));
-      navigate(target);
+      if (!reusableAnalysisModel) navigate(target);
     } catch (cause) { setGlobalError(cause instanceof Error ? cause.message : "无法打开会话。"); }
     finally { setBusy(false); }
   }
@@ -2332,6 +2446,7 @@ export default function ResorterApp() {
 
   async function answer(outcome: ComparisonOutcome) {
     if (!compare?.nextPair || busy) return; setBusy(true); setGlobalError("");
+    cancelAnalysisTask("会话新增了回答，历史分析已取消。");
     try {
       const current = compare;
       const pair = current.nextPair;
@@ -2354,7 +2469,7 @@ export default function ResorterApp() {
       const calculated = await calculate(current.session, current.items, nextHistory, current.model, "APPLY_RESPONSE", current.session.modelVersion + 1);
       await commitResponse(current.session.id, current.session.modelVersion, { ...pair, recordId: provisional.id }, outcome, calculated.model);
       const bundle = await getSessionBundle(current.session.id); if (!bundle) throw new Error("会话保存失败。");
-      setCompare({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
+      await adoptCompareState({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
       setSessions(await listSessions(current.session.profileId));
     } catch (cause) { setGlobalError(cause instanceof Error ? cause.message : "无法保存这次比较。"); }
     finally { setBusy(false); }
@@ -2362,6 +2477,7 @@ export default function ResorterApp() {
 
   async function undo() {
     if (!compare || busy) return; setBusy(true); setGlobalError("");
+    cancelAnalysisTask("会话撤销了回答，历史分析已取消。");
     try {
       const record = await lastActiveResponse(compare.session.id); if (!record) throw new Error("还没有可撤销的回答。");
       const nextHistory = compare.history.filter((item) => item.id !== record.id);
@@ -2377,7 +2493,7 @@ export default function ResorterApp() {
         queryKind: record.queryKind ?? "adaptive",
         calibrationOfComparisonId: record.calibrationOfComparisonId,
       };
-      setCompare({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: retryPair });
+      await adoptCompareState({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: retryPair });
     } catch (cause) { setGlobalError(cause instanceof Error ? cause.message : "无法撤销。"); }
     finally { setBusy(false); }
   }
@@ -2399,13 +2515,14 @@ export default function ResorterApp() {
   async function changeDistribution(distribution: DistributionConfig) {
     if (!compare || busy) return;
     setBusy(true); setGlobalError("");
+    cancelAnalysisTask("评分分布已经修改，历史分析已取消。");
     try {
       const current = compare;
       const nextVersion = current.session.modelVersion + 1;
       const calculated = await calculate(current.session, current.items, current.history, current.model, "RECOMPUTE", nextVersion, distribution);
       await commitSessionDistribution(current.session.id, current.session.modelVersion, distribution, calculated.model);
       const bundle = await getSessionBundle(current.session.id); if (!bundle) throw new Error("会话保存失败。");
-      setCompare({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
+      await adoptCompareState({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
       setSessions(await listSessions(current.session.profileId));
     } catch (cause) { setGlobalError(cause instanceof Error ? cause.message : "无法更新评分分布。"); }
     finally { setBusy(false); }
@@ -2424,7 +2541,7 @@ export default function ResorterApp() {
         : await calculate(nextSession, current.items, current.history, current.model, "RECOMPUTE", nextVersion);
       await commitSessionBudgetMode(current.session.id, current.session.modelVersion, budgetMode, calculated.model);
       const bundle = await getSessionBundle(current.session.id); if (!bundle) throw new Error("会话保存失败。");
-      setCompare({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
+      await adoptCompareState({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
       setSessions(await listSessions(current.session.profileId));
     } catch (cause) { setGlobalError(cause instanceof Error ? cause.message : "无法更新停止严格度。"); }
     finally { setBusy(false); }
@@ -2433,6 +2550,7 @@ export default function ResorterApp() {
   async function changePriorMode(priorMode: PriorMode) {
     if (!compare || busy || sessionPriorMode(compare.session) === priorMode) return;
     setBusy(true); setGlobalError("");
+    cancelAnalysisTask("先验强度已经修改，历史分析已取消。");
     try {
       const current = compare;
       const nextVersion = current.session.modelVersion + 1;
@@ -2440,7 +2558,7 @@ export default function ResorterApp() {
       const calculated = await calculate(nextSession, current.items, current.history, current.model, "RECOMPUTE", nextVersion);
       await commitSessionPriorMode(current.session.id, current.session.modelVersion, priorMode, calculated.model);
       const bundle = await getSessionBundle(current.session.id); if (!bundle) throw new Error("会话保存失败。");
-      setCompare({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
+      await adoptCompareState({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
       setSessions(await listSessions(current.session.profileId));
     } catch (cause) { setGlobalError(cause instanceof Error ? cause.message : "无法更新先验强度。"); }
     finally { setBusy(false); }
@@ -2453,6 +2571,7 @@ export default function ResorterApp() {
   ) {
     if (!compare || busy) return;
     setBusy(true); setGlobalError("");
+    cancelAnalysisTask("会话新增了手动判断，历史分析已取消。");
     try {
       const current = compare;
       const allowed = new Set(current.items.map((item) => item.subjectId));
@@ -2477,7 +2596,7 @@ export default function ResorterApp() {
         recordId: provisional.id, leftSubjectId, rightSubjectId, queryKind: "manual",
       }, outcome, calculated.model);
       const bundle = await getSessionBundle(current.session.id); if (!bundle) throw new Error("会话保存失败。");
-      setCompare({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
+      await adoptCompareState({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
       setSessions(await listSessions(current.session.profileId));
     } catch (cause) { setGlobalError(cause instanceof Error ? cause.message : "无法添加这次比较。"); }
     finally { setBusy(false); }
@@ -2492,6 +2611,7 @@ export default function ResorterApp() {
       throw new Error("导入预览已失效，请重新选择来源会话。");
     }
     setBusy(true); setGlobalError("");
+    cancelAnalysisTask("会话导入了判断，历史分析已取消。");
     try {
       const current = compare;
       const nextHistory = [...current.history, ...preview.plannedRecords];
@@ -2513,7 +2633,7 @@ export default function ResorterApp() {
       );
       const bundle = await getSessionBundle(current.session.id);
       if (!bundle) throw new Error("会话保存失败。");
-      setCompare({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
+      await adoptCompareState({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
       setSessions(await listSessions(current.session.profileId));
     } catch (cause) {
       throw cause instanceof Error ? cause : new Error("无法导入其他会话的判断。");
@@ -2525,6 +2645,7 @@ export default function ResorterApp() {
   async function removeComparison(recordId: string) {
     if (!compare || busy) return;
     setBusy(true); setGlobalError("");
+    cancelAnalysisTask("会话删除了历史判断，历史分析已取消。");
     try {
       const current = compare;
       const record = current.history.find((entry) => entry.id === recordId && entry.active && entry.sessionId === current.session.id);
@@ -2533,13 +2654,14 @@ export default function ResorterApp() {
       const calculated = await calculate(current.session, current.items, nextHistory, current.model, "RECOMPUTE", current.session.modelVersion + 1);
       await commitComparisonDeletion(current.session.id, current.session.modelVersion, recordId, calculated.model);
       const bundle = await getSessionBundle(current.session.id); if (!bundle) throw new Error("会话保存失败。");
-      setCompare({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
+      await adoptCompareState({ session: bundle.session, items: bundle.items, history: bundle.history, model: calculated.model, nextPair: calculated.nextPair });
       setSessions(await listSessions(current.session.profileId));
     } catch (cause) { setGlobalError(cause instanceof Error ? cause.message : "无法删除这条判断。"); }
     finally { setBusy(false); }
   }
 
   async function removeSession(sessionId: string) {
+    if (analysisTask.sessionId === sessionId) cancelAnalysisTask("分析会话已经删除。");
     await deleteSession(sessionId);
     // Any deleted session may have supplied reusable comparisons to the cached result.
     setCompare(undefined);
@@ -2556,6 +2678,7 @@ export default function ResorterApp() {
   }
 
   async function finishSnapshotDeletion(result: SnapshotDeletionResult) {
+    cancelAnalysisTask("项目数据已经删除，历史分析已取消。");
     setSnapshotDeletionPreview(undefined);
     setLastSnapshotDeletion(result);
     setLastBackupImport(undefined);
@@ -2581,10 +2704,12 @@ export default function ResorterApp() {
     if (!snapshot || !profile) return null;
     if (view === "library") return <LibraryView snapshot={snapshot} items={items} sessions={sessions} legacySessionIds={projects.find((entry) => entry.profile.id === profile.id)?.legacySessionIds ?? []} onStart={startSession} onResume={openSession} onUpgradeSession={upgradeSession} onDeriveSession={deriveSession} onDeleteSession={removeSession} onSyncAgain={() => setResyncOpen(true)} onSwitchAccount={() => navigate("connect")} />;
     if (view === "compare" && compare) return <CompareView state={compare} busy={busy} scoresVisible={scoresVisible} onToggleScores={() => setScoresVisible((value) => !value)} onMode={changeBudgetMode} onPriorMode={changePriorMode} onAnswer={answer} onUndo={undo} onPause={() => navigate("library")} onResults={() => navigate("results")} />;
-    if (view === "results" && compare) return <ResultsView state={compare} sessions={sessions} username={snapshot.username} busy={busy} onBack={() => navigate("compare")} onMode={changeBudgetMode} onPriorMode={changePriorMode} onDistribution={changeDistribution} onExportCsv={exportCsv} onAddComparison={addManualComparison} onDeleteComparison={removeComparison} onImportComparison={importComparisonsIntoCurrent} onResync={() => setResyncOpen(true)} />;
+    if (view === "results" && compare) return <ResultsView state={compare} sessions={sessions} username={snapshot.username} busy={busy} onBack={() => navigate("compare")} onAnalysis={() => navigate("analysis")} onMode={changeBudgetMode} onPriorMode={changePriorMode} onDistribution={changeDistribution} onExportCsv={exportCsv} onAddComparison={addManualComparison} onDeleteComparison={removeComparison} onImportComparison={importComparisonsIntoCurrent} onResync={() => setResyncOpen(true)} />;
+    if (view === "analysis" && compare) return <SessionAnalysisView session={compare.session} items={compare.items} history={compare.history} model={compare.model} busy={busy} cacheRevision={analysisCacheRevision} task={analysisTask} storageWarning={analysisStorageWarning} onBuildHistory={buildAnalysisHistory} onCancelHistory={() => cancelAnalysisTask()} onPriorMode={changePriorMode} onMode={changeBudgetMode} onResults={() => navigate("results")} onCompare={() => navigate("compare")} />;
     if (view === "backup") return <BackupView snapshot={snapshot} items={items} profile={profile} sessions={sessions} storage={storeStatus} importHistory={importHistory} onImported={async (result) => { setLastBackupImport(result); await loadSnapshot(result.snapshot, "library"); }} />;
     if (view === "compare") return <SessionPicker purpose="compare" sessions={sessions} currentSnapshotId={snapshot.id} busy={busy} onResume={openSession} onBack={() => navigate("library")} />;
     if (view === "results") return <SessionPicker purpose="results" sessions={sessions} currentSnapshotId={snapshot.id} busy={busy} onResume={(sessionId) => openSession(sessionId, "results")} onBack={() => navigate("library")} />;
+    if (view === "analysis") return <SessionPicker purpose="analysis" sessions={sessions} currentSnapshotId={snapshot.id} busy={busy} onResume={(sessionId) => openSession(sessionId, "analysis")} onBack={() => navigate("library")} />;
     return <div className="center-message"><h2>请先选择一个排序会话</h2><button className="primary-button compact" onClick={() => navigate("library")}>返回收藏概览</button></div>;
   })();
 
