@@ -2681,10 +2681,10 @@ export function prepareStoppingForecastRollouts(
   const simulationHorizon = Math.min(
     requestedProjectionHorizon,
     // Keep a bounded window for responsiveness, but expose substantially
-    // more of the future than the old 1.75×/500 cap.  The lower bound makes
-    // an early session forecast visible immediately; the upper bound prevents
-    // pathological collections from monopolising the forecast worker.
-    Math.max(120, Math.min(800, Math.ceil(items.length * 2))),
+    // more of the future than the old 1.75×/500 cap. The upper bound is
+    // higher for large collections, where an 800-answer window can leave
+    // every rollout right-censored at the first checkpoint.
+    Math.max(120, Math.min(1200, Math.ceil(items.length * 2))),
   );
   return {
     items: items.map((item) => ({ ...item })),
