@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { analyzeRanking, buildRankedItems, calibrationPosterior, chooseNextPair, davidsonProbabilities, fitModel, forecastStoppingTime, prepareStoppingForecastRollouts, rebuildForecastPosteriorAtCheckpoint, shouldRefreshForecastPosterior, summarizeRankingEvidence, updateForecastClusterPosterior, updateForecastPosterior } from "../lib/ranking/engine";
+import { analyzeRanking, buildRankedItems, calibrationPosterior, chooseNextPair, davidsonProbabilities, fitModel, forecastStoppingTime, prepareStoppingForecastRollouts, rebuildForecastPosteriorAtCheckpoint, shouldCheckForecastStopping, shouldRefreshForecastPosterior, summarizeRankingEvidence, updateForecastClusterPosterior, updateForecastPosterior } from "../lib/ranking/engine";
 import { distributionConfig } from "../lib/distribution";
 import {
   allowedCrossTwoBucketCount,
@@ -560,7 +560,7 @@ describe("weighted Davidson ranking engine", () => {
     const evidenceLimitedForecast = forecastStoppingTime(rated, adjacentFit, uniform, coverageLimitedHistory, "session", evidenceLimited, {
       projectionHorizon: 100, randomSeed: 12, forecastEfficiency: 16,
     });
-    expect(evidenceLimitedForecast.method).toBe("posterior-contraction-mc-v14");
+    expect(evidenceLimitedForecast.method).toBe("posterior-contraction-mc-v15");
     expect(evidenceLimitedForecast.medianAdditional ?? Number.POSITIVE_INFINITY).toBeGreaterThanOrEqual(1);
 
     const globallyStable = analyzeRanking(rated, {
@@ -772,6 +772,9 @@ describe("weighted Davidson ranking engine", () => {
     expect(shouldRefreshForecastPosterior(
       { quick: 1, standard: 0.2, thorough: 0 }, { ...unresolved, quick: 16 }, 4,
     )).toBe(false);
+    expect(shouldCheckForecastStopping(496, 16, 497, 100, 200)).toBe(true);
+    expect(shouldCheckForecastStopping(497, 16, 497, 100, 200)).toBe(true);
+    expect(shouldCheckForecastStopping(495, 16, 497, 100, 200)).toBe(false);
   });
 
   it("fails closed when optimization has not converged", () => {
@@ -828,7 +831,7 @@ describe("weighted Davidson ranking engine", () => {
     const forecast = forecastStoppingTime(rated, fit, uniform, entries, "session", diagnostics, {
       projectionHorizon: 100, randomSeed: 17, forecastEfficiency: 16,
     });
-    expect(forecast.method).toBe("posterior-contraction-mc-v14");
+    expect(forecast.method).toBe("posterior-contraction-mc-v15");
     expect(forecast.rolloutCount).toBe(64);
     expect(forecast.withinProjectionSuccesses).toBeLessThanOrEqual(forecast.rolloutCount);
   });

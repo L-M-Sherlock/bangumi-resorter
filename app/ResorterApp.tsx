@@ -2427,8 +2427,8 @@ export default function ResorterApp() {
       cancelForecast("正在打开会话，旧的动态剩余预测已取消。");
       const reusableForecastModel = bundle.model?.version === bundle.session.modelVersion
         && bundle.model.diagnostics?.method === "laplace-mc-v6"
-        && bundle.model.diagnostics.forecast?.method === "posterior-contraction-mc-v14"
-        && STOPPING_MODE_ORDER.every((mode) => bundle.model?.diagnostics?.forecasts?.[mode]?.method === "posterior-contraction-mc-v14")
+        && bundle.model.diagnostics.forecast?.method === "posterior-contraction-mc-v15"
+        && STOPPING_MODE_ORDER.every((mode) => bundle.model?.diagnostics?.forecasts?.[mode]?.method === "posterior-contraction-mc-v15")
         && STOPPING_MODE_ORDER.every((mode) => bundle.model?.diagnostics?.stoppingChecks?.some((check) => check.mode === mode))
         && Object.keys(bundle.model.abilities).length === bundle.items.length
         && Object.keys(bundle.model.uncertainty).length === bundle.items.length;

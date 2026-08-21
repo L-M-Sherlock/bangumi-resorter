@@ -140,7 +140,7 @@ function validateStoppingForecast(value: unknown, path: string) {
   const forecast = requiredObject(value, path);
   if (forecast.method !== undefined) {
     enumString(forecast.method, `${path}.method`, [
-      "posterior-contraction-mc-v1", "posterior-contraction-mc-v2", "posterior-contraction-mc-v3", "posterior-contraction-mc-v4", "posterior-contraction-mc-v5", "posterior-contraction-mc-v6", "posterior-contraction-mc-v7", "posterior-contraction-mc-v8", "posterior-contraction-mc-v9", "posterior-contraction-mc-v10", "posterior-contraction-mc-v11", "posterior-contraction-mc-v12", "posterior-contraction-mc-v13", "posterior-contraction-mc-v14",
+      "posterior-contraction-mc-v1", "posterior-contraction-mc-v2", "posterior-contraction-mc-v3", "posterior-contraction-mc-v4", "posterior-contraction-mc-v5", "posterior-contraction-mc-v6", "posterior-contraction-mc-v7", "posterior-contraction-mc-v8", "posterior-contraction-mc-v9", "posterior-contraction-mc-v10", "posterior-contraction-mc-v11", "posterior-contraction-mc-v12", "posterior-contraction-mc-v13", "posterior-contraction-mc-v14", "posterior-contraction-mc-v15",
     ]);
   }
   if (forecast.status !== undefined) enumString(forecast.status, `${path}.status`, ["ready", "forecast", "uncertain", "limit"]);

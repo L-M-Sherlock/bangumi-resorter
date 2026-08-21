@@ -2115,9 +2115,9 @@ function validModel(model: ModelState | undefined, session: SortingSession, link
   if (!model || model.version !== session.modelVersion) return false;
   const diagnostics = model.diagnostics;
   if (diagnostics?.method !== "laplace-mc-v6"
-    || diagnostics.forecast?.method !== "posterior-contraction-mc-v14"
+    || diagnostics.forecast?.method !== "posterior-contraction-mc-v15"
     || !(["quick", "standard", "thorough"] as const)
-      .every((mode) => diagnostics.forecasts?.[mode]?.method === "posterior-contraction-mc-v14")
+      .every((mode) => diagnostics.forecasts?.[mode]?.method === "posterior-contraction-mc-v15")
     || !session.priorMode) return false;
   const allowed = new Set(links.filter((entry) => entry.sessionId === session.id).map((entry) => String(entry.subjectId)));
   const abilities = Object.keys(model.abilities);

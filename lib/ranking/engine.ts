@@ -2034,6 +2034,20 @@ export function shouldRefreshForecastPosterior(
     && stoppingEventLows[mode] >= FORECAST_EXACT_REFRESH_TRIGGER);
 }
 
+/** @internal Pure stopping-check cadence, including a non-stride window endpoint. */
+export function shouldCheckForecastStopping(
+  answerIndex: number,
+  stoppingCheckStride: number,
+  simulationHorizon: number,
+  evidenceCount: number,
+  evidenceRequired: number,
+) {
+  return answerIndex === simulationHorizon
+    || answerIndex <= Math.min(4, stoppingCheckStride)
+    || answerIndex % stoppingCheckStride === 0
+    || evidenceCount === evidenceRequired;
+}
+
 function forecastHistoryRecord(
   input: StoppingForecastRolloutInput,
   pair: NextPair,
@@ -2269,9 +2283,13 @@ function simulateForecastRollout(
     history.push(forecastHistoryRecord(input, pair, outcome, acceptedComparisons, rolloutSeed, answerIndex));
     answersSinceExactRefresh += 1;
     if (pair.queryKind !== "calibration") selectionCache.nonCalibrationCount += 1;
-    const checkNow = answerIndex <= Math.min(4, stoppingCheckStride)
-      || answerIndex % stoppingCheckStride === 0
-      || evidenceCount === input.evidenceRequired;
+    const checkNow = shouldCheckForecastStopping(
+      answerIndex,
+      stoppingCheckStride,
+      input.simulationHorizon,
+      evidenceCount,
+      input.evidenceRequired,
+    );
     if (checkNow) {
       const screenedStoppingEventLows = forecastStoppingEventLows(
         input.items,
@@ -2464,7 +2482,7 @@ function summarizeStoppingTimes(
 ): StoppingForecast {
   const rolloutCount = stoppingTimes.length;
   const base = {
-    method: "posterior-contraction-mc-v14" as const,
+    method: "posterior-contraction-mc-v15" as const,
     rolloutCount,
     nextCheckpoint,
     projectionHorizon,

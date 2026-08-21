@@ -6,7 +6,7 @@ import type {
   StoppingForecastStatus,
 } from "../types";
 
-export const ANALYSIS_ALGORITHM_VERSION = "session-analysis-v4-source-time-availability-backtest-laplace6-forecast14";
+export const ANALYSIS_ALGORITHM_VERSION = "session-analysis-v5-source-time-availability-backtest-guard-laplace6-forecast15";
 export const ANALYSIS_ROLLOUT_COUNT = 64;
 
 export interface AnalysisHistoryEntry extends RankingHistoryInput {
