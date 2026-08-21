@@ -10,7 +10,7 @@ import {
 import { rankingTuning, STOPPING_MODE_ORDER } from "../lib/ranking/strategy";
 import { createComparisonBenchmarkScenario } from "./comparison-fixture";
 
-const EXPECTED_FINGERPRINT = "d59bb47d36bf36e27951eb120ef73a939808e3eb37134132486d9b71e912326f";
+const EXPECTED_FINGERPRINT: string = "d59bb47d36bf36e27951eb120ef73a939808e3eb37134132486d9b71e912326f";
 const CHECKPOINT = 450;
 
 function encoded(values: number[]) {

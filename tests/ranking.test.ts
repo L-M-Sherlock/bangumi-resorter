@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { analyzeRanking, buildRankedItems, calibrationPosterior, chooseNextPair, davidsonProbabilities, fitModel, forecastStoppingTime, prepareStoppingForecastRollouts, rebuildForecastPosteriorAtCheckpoint, shouldCheckForecastStopping, shouldRefreshForecastPosterior, summarizeRankingEvidence, updateForecastClusterPosterior, updateForecastPosterior } from "../lib/ranking/engine";
+import { analyzeRanking, buildRankedItems, calibrationPosterior, chooseNextPair, davidsonProbabilities, fitModel, forecastStoppingTime, minimumForecastStableSamples, prepareStoppingForecastRollouts, rebuildForecastPosteriorAtCheckpoint, shouldCheckForecastStopping, shouldRefreshForecastPosterior, summarizeRankingEvidence, updateForecastClusterPosterior, updateForecastPosterior } from "../lib/ranking/engine";
 import { distributionConfig } from "../lib/distribution";
 import {
   allowedCrossTwoBucketCount,
@@ -130,6 +130,12 @@ describe("weighted Davidson ranking engine", () => {
     expect(threeOfFour.acceptable).toBe(true);
     expect(threeOfFour.credibleLow).toBeLessThan(threeOfFour.posteriorMean);
     expect(threeOfFour.credibleHigh).toBeGreaterThan(threeOfFour.posteriorMean);
+  });
+
+  it("derives the exact Wilson success count used by forecast screening", () => {
+    expect(minimumForecastStableSamples(64)).toBe(62);
+    expect(minimumForecastStableSamples(32)).toBe(32);
+    expect(minimumForecastStableSamples(16)).toBe(17);
   });
 
   it("maps scores to uniform, reverse-J, preserved, and zero-safe custom distributions", () => {

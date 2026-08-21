@@ -1326,6 +1326,15 @@ function wilsonInterval(successes: number, trials: number, z = 1.644853626951472
   };
 }
 
+/** @internal Smallest success count whose one-sided Wilson lower bound may stop a path. */
+export function minimumForecastStableSamples(sampleCount: number) {
+  const trials = Math.max(0, Math.floor(sampleCount));
+  for (let successes = 0; successes <= trials; successes += 1) {
+    if (wilsonInterval(successes, trials).low >= STOPPING_PROBABILITY_TARGET) return successes;
+  }
+  return trials + 1;
+}
+
 function forecastScoreByRank(items: RankingItemInput[], distribution: DistributionConfig) {
   const levelCount = normalizeScoreLevelCount(distribution.levelCount);
   const weights = effectiveDistributionWeights(items, distribution);
@@ -2022,6 +2031,62 @@ function forecastStoppingEventLows(
   ])) as Record<ComparisonBudgetMode, number>;
 }
 
+/**
+ * Exact threshold-only screen. It stops sorting posterior samples as soon as
+ * every unresolved mode is guaranteed either to reach or to miss the Wilson
+ * threshold. The full posterior refresh remains the only stopping authority.
+ */
+function forecastScreenCanTriggerExactRefresh(
+  items: RankingItemInput[],
+  abilities: Float64Array,
+  posteriorSamples: Float64Array[],
+  scoreByRank: Uint8Array,
+  evidenceCount: number,
+  evidenceRequired: number,
+  uniquePairCount: number,
+  uniquePairRequired: number,
+  coveredItemCount: number,
+  optimizerConverged: boolean,
+  stoppingTimes: Record<ComparisonBudgetMode, number>,
+) {
+  if (evidenceCount + 1e-12 < evidenceRequired
+    || uniquePairCount < uniquePairRequired
+    || !optimizerConverged
+    || posteriorSamples.length === 0) return false;
+
+  const unresolvedModes = new Set(STOPPING_MODE_ORDER.filter((mode) =>
+    !Number.isFinite(stoppingTimes[mode])
+    && coveredItemCount >= minimumCoveredItems(items.length, mode)));
+  if (unresolvedModes.size === 0) return false;
+
+  const requiredStableSamples = minimumForecastStableSamples(posteriorSamples.length);
+  if (requiredStableSamples > posteriorSamples.length) return false;
+  const allowedCrossCounts = Object.fromEntries(STOPPING_MODE_ORDER.map((mode) => [
+    mode,
+    allowedCrossTwoBucketCount(items.length, stoppingCoverageTarget(mode)),
+  ])) as Record<ComparisonBudgetMode, number>;
+  const largestAllowance = Math.max(...[...unresolvedModes].map((mode) => allowedCrossCounts[mode]));
+  const stableSamples = Object.fromEntries(STOPPING_MODE_ORDER.map((mode) => [mode, 0])) as Record<ComparisonBudgetMode, number>;
+  const referenceRates = ratesByItem(items, abilities, scoreByRank);
+
+  for (let sampleIndex = 0; sampleIndex < posteriorSamples.length; sampleIndex += 1) {
+    const sampleRates = ratesByItem(items, posteriorSamples[sampleIndex], scoreByRank);
+    let crossTwoBucketCount = 0;
+    for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
+      if (Math.abs(referenceRates[itemIndex] - sampleRates[itemIndex]) > 1) crossTwoBucketCount += 1;
+      if (crossTwoBucketCount > largestAllowance) break;
+    }
+    const remainingSamples = posteriorSamples.length - sampleIndex - 1;
+    for (const mode of [...unresolvedModes]) {
+      if (crossTwoBucketCount <= allowedCrossCounts[mode]) stableSamples[mode] += 1;
+      if (stableSamples[mode] >= requiredStableSamples) return true;
+      if (stableSamples[mode] + remainingSamples < requiredStableSamples) unresolvedModes.delete(mode);
+    }
+    if (unresolvedModes.size === 0) return false;
+  }
+  return false;
+}
+
 /** @internal Pure refresh policy used by tests and the rollout loop. */
 export function shouldRefreshForecastPosterior(
   stoppingEventLows: Record<ComparisonBudgetMode, number>,
@@ -2291,21 +2356,20 @@ function simulateForecastRollout(
       input.evidenceRequired,
     );
     if (checkNow) {
-      const screenedStoppingEventLows = forecastStoppingEventLows(
-        input.items,
-        abilities,
-        posteriorSamples,
-        input.scoreByRank,
-        evidenceCount,
-        input.evidenceRequired,
-        uniquePairCount,
-        input.uniquePairRequired,
-        coveredItemCount,
-        optimizerConverged,
-      );
       if (answerIndex !== input.simulationHorizon
-        && !shouldRefreshForecastPosterior(
-          screenedStoppingEventLows, stoppingTimes, answersSinceExactRefresh,
+        && answersSinceExactRefresh < FORECAST_MAX_EXACT_REFRESH_GAP
+        && !forecastScreenCanTriggerExactRefresh(
+          input.items,
+          abilities,
+          posteriorSamples,
+          input.scoreByRank,
+          evidenceCount,
+          input.evidenceRequired,
+          uniquePairCount,
+          input.uniquePairRequired,
+          coveredItemCount,
+          optimizerConverged,
+          stoppingTimes,
         )) continue;
       const refreshed = rebuildForecastPosteriorAtCheckpoint(
         input, history, fit.abilities, rolloutSeed, answerIndex,
