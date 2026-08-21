@@ -45,6 +45,14 @@ npm run build
 npm run test:e2e
 ```
 
+比较性能基准使用一组确定性的匿名合成数据，默认模拟 284 部作品、已有 1,212 条判断（含 491 条导入和 59 次校准复问），再加入一次新回答。核心基准逐项测量相关性/时间衰减折算、模型拟合、后验诊断、停止预测和下一题选择；浏览器基准使用真实 Chromium Worker 拓扑测量完整模型更新。它不会读取或修改本地用户数据，也不把设备相关的 IndexedDB 持久化耗时混入模型耗时。
+
+```shell
+npm run benchmark:comparison
+```
+
+也可以分别运行 `benchmark:comparison:core` 和 `benchmark:comparison:browser`。浏览器基准默认先预热一次再测量三次；可用 `COMPARISON_BENCH_ITERATIONS` 调整稳态样本数。
+
 生产静态文件位于 `dist/client`。
 
 ### Windows
