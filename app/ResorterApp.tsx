@@ -995,9 +995,10 @@ function distributionPresetOptions(levelCount: number): Array<ThemedSelectOption
   ];
 }
 
-function LibraryView({ snapshot, items, sessions, legacySessionIds, onStart, onResume, onUpgradeSession, onDeriveSession, onDeleteSession, onSyncAgain, onSwitchAccount }: {
+function LibraryView({ snapshot, items, sessions, legacySessionIds, busy: externalBusy, onStart, onResume, onUpgradeSession, onDeriveSession, onDeleteSession, onSyncAgain, onSwitchAccount }: {
   snapshot: Snapshot; items: CollectionItem[]; sessions: SortingSession[];
   legacySessionIds: string[];
+  busy: boolean;
   onStart: (
     type: SubjectType,
     statuses: CollectionType[],
@@ -1147,6 +1148,7 @@ function LibraryView({ snapshot, items, sessions, legacySessionIds, onStart, onR
   const currentPreviewBusy = previewBusy && sourceCandidateExists;
 
   async function start() {
+    if (externalBusy) return;
     setBusy(true); setError("");
     try {
       await onStart(
@@ -1257,7 +1259,7 @@ function LibraryView({ snapshot, items, sessions, legacySessionIds, onStart, onR
             <strong>{SUBJECT_TYPES[selectedType]} · {selectedItems.length} 部</strong>
             <small>{tagFilterSummary(tagFilter)} · {PRIOR_MODE_COPY[priorMode].label} · {BUDGET_MODE_COPY[budgetMode].label}停止 · {scoreLevelCount} 档 · {sourceSessionId ? (currentImportPreview ? `导入 ${currentImportPreview.importableCount} 条历史判断` : "已选择历史来源") : "不导入历史判断"}</small>
           </div>
-          <button className="primary-button" onClick={start} disabled={busy || currentPreviewBusy || Boolean(currentPreviewError) || Boolean(sourceSessionId && !currentImportPreview) || selectedItems.length < 2}>{busy ? "正在准备模型…" : `开始${BUDGET_MODE_COPY[budgetMode].label}比较`}<span>→</span></button>
+          <button className="primary-button" onClick={start} disabled={busy || externalBusy || currentPreviewBusy || Boolean(currentPreviewError) || Boolean(sourceSessionId && !currentImportPreview) || selectedItems.length < 2}>{busy || externalBusy ? "正在准备模型…" : `开始${BUDGET_MODE_COPY[budgetMode].label}比较`}<span>→</span></button>
         </div>
         <details className="start-settings">
           <summary><span><strong>调整范围与模型设置</strong><small>收藏状态、个人标签、先验强度、停止严格度、评分档数与历史导入</small></span><b aria-hidden="true">⌄</b></summary>
@@ -1279,12 +1281,12 @@ function LibraryView({ snapshot, items, sessions, legacySessionIds, onStart, onR
       const usesCurrentSnapshot = session.snapshotId === snapshot.id;
       const upgradedAlready = sessions.some((candidate) =>
         candidate.snapshotId === snapshot.id && candidate.upgradedFromSessionId === session.id);
-      const actionBusy = Boolean(deletingSessionId || upgradingSessionId || derivingSessionId);
+      const actionBusy = Boolean(deletingSessionId || upgradingSessionId || derivingSessionId || externalBusy);
       const stats = comparisonStats[session.id];
       const importedCount = stats?.imported ?? 0;
       const historyLabel = importedCount > 0 ? `本地历史 · 导入 ${importedCount} 条` : "本地历史 · 未导入";
       return <article className="session-row" key={session.id}>
-        <button className="session-open" disabled={actionBusy} onClick={() => onResume(session.id)}>
+        <button className="session-open" disabled={actionBusy || externalBusy} onClick={() => void onResume(session.id)}>
           <span className="session-type">{SUBJECT_TYPES[session.subjectType]}</span>
           <div><span className="session-heading"><strong>{session.title}{legacySessionIds.includes(session.id) ? " · 旧导入副本" : ""}</strong><span className="session-comparison-count">已有判断 <b>{stats?.accepted ?? "…"}</b> 条</span></span><small>{PRIOR_MODE_COPY[sessionPriorMode(session)].label} · {BUDGET_MODE_COPY[sessionBudgetMode(session)].label}停止 · {normalizeScoreLevelCount(session.distribution.levelCount)} 档 · {usesCurrentSnapshot ? "当前收藏" : "旧收藏"} · {historyLabel} · 更新于 {formatDate(session.updatedAt)}</small><small>标签范围：{tagFilterSummary(session.tagFilter)}</small></div>
           <span className={`session-status ${session.status}`}>{session.status === "complete" ? "已稳定" : "进行中"}</span><b>→</b>
@@ -2655,7 +2657,7 @@ export default function ResorterApp() {
 
   const shellContent = (() => {
     if (!snapshot || !profile) return null;
-    if (view === "library") return <LibraryView snapshot={snapshot} items={items} sessions={sessions} legacySessionIds={projects.find((entry) => entry.profile.id === profile.id)?.legacySessionIds ?? []} onStart={startSession} onResume={openSession} onUpgradeSession={upgradeSession} onDeriveSession={deriveSession} onDeleteSession={removeSession} onSyncAgain={() => setResyncOpen(true)} onSwitchAccount={() => navigate("connect")} />;
+    if (view === "library") return <LibraryView snapshot={snapshot} items={items} sessions={sessions} legacySessionIds={projects.find((entry) => entry.profile.id === profile.id)?.legacySessionIds ?? []} busy={busy} onStart={startSession} onResume={openSession} onUpgradeSession={upgradeSession} onDeriveSession={deriveSession} onDeleteSession={removeSession} onSyncAgain={() => setResyncOpen(true)} onSwitchAccount={() => navigate("connect")} />;
     if (view === "compare" && compare) return <CompareView state={compare} busy={busy} scoresVisible={scoresVisible} onToggleScores={() => setScoresVisible((value) => !value)} onMode={changeBudgetMode} onPriorMode={changePriorMode} onAnswer={answer} onUndo={undo} onPause={() => navigate("library")} onResults={() => navigate("results")} />;
     if (view === "results" && compare) return <ResultsView state={compare} sessions={sessions} username={snapshot.username} busy={busy} onBack={() => navigate("compare")} onAnalysis={() => navigate("analysis")} onMode={changeBudgetMode} onPriorMode={changePriorMode} onDistribution={changeDistribution} onExportCsv={exportCsv} onAddComparison={addManualComparison} onDeleteComparison={removeComparison} onImportComparison={importComparisonsIntoCurrent} onResync={() => setResyncOpen(true)} />;
     if (view === "analysis" && compare) return <SessionAnalysisView session={compare.session} items={compare.items} history={compare.history} model={compare.model} busy={busy} cacheRevision={analysisCacheRevision} task={analysisTask} storageWarning={analysisStorageWarning} onBuildHistory={buildAnalysisHistory} onCancelHistory={() => cancelAnalysisTask()} onPriorMode={changePriorMode} onMode={changeBudgetMode} onResults={() => navigate("results")} onCompare={() => navigate("compare")} />;
