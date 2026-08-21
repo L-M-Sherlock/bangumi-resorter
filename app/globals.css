@@ -391,7 +391,9 @@ input:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgba(45,102,98,.0
 .media-kicker { color: var(--accent-dark); font-size: 9px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
 .media-copy h2 { margin: 5px 0 2px; font: 700 23px/1.1 Georgia, "Songti SC", serif; }
 .media-copy p { margin: 0; color: var(--muted); font-size: 10px; letter-spacing: .04em; }
-.old-score { position: absolute; top: 18px; right: 5px; color: var(--teal); font-size: 10px; font-weight: 700; }
+.comparison-scores { position: absolute; top: 17px; right: 5px; display: grid; gap: 3px; color: var(--teal); font-size: 10px; font-weight: 700; text-align: right; }
+.comparison-scores .old-score, .comparison-scores .new-score { display: block; }
+.comparison-scores .new-score { color: var(--accent-dark); }
 .choice-button { width: 100%; min-height: 46px; margin-top: auto; display: flex; align-items: center; justify-content: center; gap: 9px; color: white; border: 0; border-radius: 8px; background: var(--teal); font-weight: 700; box-shadow: inset 0 -2px 0 rgba(0,0,0,.15); }
 .choice-button:hover:not(:disabled) { filter: brightness(1.07); transform: translateY(-1px); }
 kbd { padding: 2px 5px; border: 1px solid rgba(255,255,255,.35); border-radius: 4px; font: 9px/1.2 Arial, sans-serif; opacity: .8; }
@@ -933,6 +935,7 @@ kbd { padding: 2px 5px; border: 1px solid rgba(255,255,255,.35); border-radius: 
   .media-copy { min-height: 84px; padding: 10px 2px 8px; }
   .media-copy h2 { font-size: 17px; }
   .media-copy p { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .comparison-scores { position: static; margin-top: 6px; display: flex; justify-content: flex-start; gap: 8px; text-align: left; font-size: 9px; }
   .media-kicker { font-size: 8px; }
   .choice-button { font-size: 0; }
   .choice-button span { font-size: 11px; }

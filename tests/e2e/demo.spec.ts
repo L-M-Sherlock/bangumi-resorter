@@ -63,7 +63,15 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await page.setViewportSize({ width: 1280, height: 800 });
   await expect(page.locator(".choice-button kbd").first()).toBeVisible();
   await expect(page.locator(".secondary-actions kbd").first()).toBeVisible();
-  await expect(page.getByText(/原评分 \d/)).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "显示评分" })).toBeVisible();
+  await expect(page.locator(".comparison-scores")).toHaveCount(0);
+  await page.getByRole("button", { name: "显示评分" }).click();
+  await expect(page.getByRole("button", { name: "隐藏评分" })).toBeVisible();
+  await expect(page.locator(".comparison-scores")).toHaveCount(2);
+  await expect(page.locator(".comparison-scores").first()).toContainText(/原评分 \d/);
+  await expect(page.locator(".comparison-scores").first()).toContainText(/新评分 \d/);
+  await page.getByRole("button", { name: "隐藏评分" }).click();
+  await expect(page.locator(".comparison-scores")).toHaveCount(0);
   const originalPair = await page.locator(".media-card h2").allTextContents();
   await page.locator(".media-card h2").nth(1).evaluate((heading) => {
     heading.textContent = "用于验证多行标题时两侧卡片仍然保持相同高度";
