@@ -97,6 +97,7 @@ interface PairSelectionCache {
   sessionId: string;
   indexById: Map<number, number>;
   orderedPositions: Int32Array;
+  coverageTieBreaks: Uint32Array;
   pairMass: Map<string, number>;
   pairEffectiveWeight: Map<string, number>;
   itemEffectiveWeight: Map<number, number>;
@@ -1200,15 +1201,28 @@ function globalExplorationPair(
     if (itemIndex !== undefined) cache.orderedPositions[itemIndex] = index;
   }
   const stabilities = diagnostics.adjacentBucketStabilityByItem ?? diagnostics.bucketStability;
-  const unstable = items.filter((item) =>
-    (stabilities[item.subjectId] ?? 0) < BUCKET_STABILITY_TARGET - 1e-12);
-  const firstPool = unstable.length > 0 ? unstable : items;
-  const firstCandidates = [...firstPool]
-    .sort((left, right) =>
-      (itemWeights.get(left.subjectId) ?? 0) - (itemWeights.get(right.subjectId) ?? 0)
-      || (stabilities[left.subjectId] ?? 0) - (stabilities[right.subjectId] ?? 0)
-      || hash(`${randomSeed}:${version}:${left.subjectId}:coverage`)
-        - hash(`${randomSeed}:${version}:${right.subjectId}:coverage`))
+  const unstableIndices: number[] = [];
+  for (let itemIndex = 0; itemIndex < items.length; itemIndex += 1) {
+    if ((stabilities[items[itemIndex].subjectId] ?? 0) < BUCKET_STABILITY_TARGET - 1e-12) {
+      unstableIndices.push(itemIndex);
+    }
+  }
+  const firstPoolIndices = unstableIndices.length > 0
+    ? unstableIndices
+    : items.map((_, itemIndex) => itemIndex);
+  for (const itemIndex of firstPoolIndices) {
+    cache.coverageTieBreaks[itemIndex] = hash(
+      `${randomSeed}:${version}:${items[itemIndex].subjectId}:coverage`,
+    );
+  }
+  const firstCandidates = [...firstPoolIndices]
+    .sort((leftIndex, rightIndex) => {
+      const left = items[leftIndex];
+      const right = items[rightIndex];
+      return (itemWeights.get(left.subjectId) ?? 0) - (itemWeights.get(right.subjectId) ?? 0)
+        || (stabilities[left.subjectId] ?? 0) - (stabilities[right.subjectId] ?? 0)
+        || cache.coverageTieBreaks[leftIndex] - cache.coverageTieBreaks[rightIndex];
+    })
     .slice(0, 24);
   const candidates: Array<{
     first: number;
@@ -1219,9 +1233,8 @@ function globalExplorationPair(
     information: number;
     tieBreak: number;
   }> = [];
-  for (const first of firstCandidates) {
-    const firstIndex = indexById.get(first.subjectId);
-    if (firstIndex === undefined) continue;
+  for (const firstIndex of firstCandidates) {
+    const first = items[firstIndex];
     const position = cache.orderedPositions[firstIndex];
     for (let distance = 1; distance <= radius; distance += 1) {
       for (const neighborIndex of [position - distance, position + distance]) {
@@ -2286,6 +2299,7 @@ function createPairSelectionCache(
     sessionId,
     indexById: new Map(items.map((item, index) => [item.subjectId, index])),
     orderedPositions: new Int32Array(items.length),
+    coverageTieBreaks: new Uint32Array(items.length),
     pairMass,
     pairEffectiveWeight,
     itemEffectiveWeight,
