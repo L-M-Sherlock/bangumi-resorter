@@ -1254,7 +1254,7 @@ function globalExplorationPair(
         || cache.coverageTieBreaks[leftIndex] - cache.coverageTieBreaks[rightIndex];
     })
     .slice(0, 24);
-  const candidates: Array<{
+  type ExplorationCandidate = {
     first: number;
     second: number;
     cooled: boolean;
@@ -1262,7 +1262,14 @@ function globalExplorationPair(
     secondCount: number;
     information: number;
     tieBreak: number;
-  }> = [];
+  };
+  const compareCandidate = (left: ExplorationCandidate, right: ExplorationCandidate) =>
+    Number(left.cooled) - Number(right.cooled)
+    || left.repeats - right.repeats
+    || left.secondCount - right.secondCount
+    || right.information - left.information
+    || left.tieBreak - right.tieBreak;
+  let selected: ExplorationCandidate | undefined;
   for (const firstIndex of firstCandidates) {
     const first = items[firstIndex];
     const position = cache.orderedPositions[firstIndex];
@@ -1271,7 +1278,7 @@ function globalExplorationPair(
         const second = ordered[neighborIndex];
         if (!second) continue;
         const key = pairKey(first.subjectId, second.subjectId);
-        candidates.push({
+        const candidate: ExplorationCandidate = {
           first: first.subjectId,
           second: second.subjectId,
           cooled: cache.cooled.has(key),
@@ -1282,17 +1289,11 @@ function globalExplorationPair(
             fit.tieStrength ?? DEFAULT_TIE_STRENGTH, fit.tieLogSamples, posteriorSampleStride,
           ),
           tieBreak: hash(`${randomSeed}:${version}:${key}:exploration`),
-        });
+        };
+        if (!selected || compareCandidate(candidate, selected) < 0) selected = candidate;
       }
     }
   }
-  candidates.sort((left, right) =>
-    Number(left.cooled) - Number(right.cooled)
-    || left.repeats - right.repeats
-    || left.secondCount - right.secondCount
-    || right.information - left.information
-    || left.tieBreak - right.tieBreak);
-  const selected = candidates[0];
   if (!selected) return undefined;
   return {
     first: selected.first,
