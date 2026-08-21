@@ -4,14 +4,17 @@ import {
   analysisCheckpointsForHistory,
   analysisEvidenceBreakdown,
   analysisForecastBacktest,
+  analysisHistoryOrderDiffers,
   analysisInputDigest,
   analysisPointFromModel,
+  analysisPointWithAvailabilityForecast,
   analysisPrefixDigest,
   analysisSeriesIdentity,
   cleanCheckpointStep,
   reconcileAnalysisSeries,
   sessionAnalysisContext,
   sortAnalysisRecords,
+  sortAnalysisHistoryByAvailability,
   toAnalysisHistory,
 } from "../lib/analysis";
 import { computeAnalysisCheckpoint, computeAnalysisHistory } from "../lib/analysis/compute";
@@ -169,6 +172,22 @@ describe("session analysis checkpoints and evidence", () => {
       "before", "batch-a", "after", "batch-b",
     ]);
   });
+
+  it("separates judgment occurrence from when evidence became available", () => {
+    const records = [
+      record("local", 1, 2, "left", new Date(10).toISOString()),
+      record("imported", 2, 3, "tie", new Date(20).toISOString(), {
+        importBatchId: "batch",
+        sourceCreatedAt: new Date(0).toISOString(),
+      }),
+    ];
+    const sourceHistory = toAnalysisHistory(records);
+    expect(sourceHistory.map((entry) => entry.recordId)).toEqual(["imported", "local"]);
+    expect(sortAnalysisHistoryByAvailability(sourceHistory).map((entry) => entry.recordId))
+      .toEqual(["local", "imported"]);
+    expect(analysisHistoryOrderDiffers(sourceHistory)).toBe(true);
+    expect(analysisHistoryOrderDiffers(toAnalysisHistory([records[0]]))).toBe(false);
+  });
 });
 
 describe("session analysis mapping and cache identity", () => {
@@ -247,6 +266,49 @@ describe("session analysis mapping and cache identity", () => {
     expect(analysisForecastBacktest(points.slice(0, 2), mode)).toMatchObject({
       status: "right-censored",
       forecastCount: 2,
+    });
+  });
+
+  it("uses availability-time stopping states instead of synthetic source-time states", () => {
+    const mode = "quick" as const;
+    const makePoint = (checkpoint: number, sourceReady: boolean, causalReady: boolean, median?: number) => {
+      const source = {
+        ...point([], 0),
+        checkpoint,
+        stoppingChecks: {
+          [mode]: { mode, sampleCount: 128, stableSamples: Number(sourceReady) * 128, probability: Number(sourceReady), low: Number(sourceReady), high: 1, ready: sourceReady },
+        },
+        forecasts: median === undefined ? {} : {
+          [mode]: {
+            mode, status: "forecast" as const, rolloutCount: 64,
+            lowerAdditional: median - 10, medianAdditional: median, upperAdditional: median + 10,
+            projectionHorizon: 497, probabilityWithinProjection: 1,
+          },
+        },
+      };
+      const availability = {
+        ...source,
+        importedRaw: 0,
+        manualRaw: 0,
+        stoppingChecks: {
+          [mode]: { mode, sampleCount: 128, stableSamples: Number(causalReady) * 128, probability: Number(causalReady), low: Number(causalReady), high: 1, ready: causalReady },
+        },
+      };
+      return analysisPointWithAvailabilityForecast(source, availability);
+    };
+    const result = analysisForecastBacktest([
+      makePoint(400, false, false, 96),
+      makePoint(450, false, false, 48),
+      makePoint(500, false, true),
+      makePoint(550, true, true),
+    ], mode);
+    expect(result).toMatchObject({
+      status: "observed",
+      observedStopWindowStart: 451,
+      observedStopCheckpoint: 500,
+      forecastCount: 2,
+      boundedIntervalHits: 2,
+      medianAbsoluteError: 0,
     });
   });
 
@@ -383,5 +445,25 @@ describe("analysis history computation", () => {
     expect(first.forecasts.quick?.rolloutCount).toBe(64);
     expect(first.forecasts.standard?.rolloutCount).toBe(64);
     expect(first.forecasts.thorough?.rolloutCount).toBe(64);
+  }, 20_000);
+
+  it("fits source-time diagnostics but forecasts from the available evidence prefix", async () => {
+    const mixedHistory = toAnalysisHistory([
+      record("local", 1, 2, "left", new Date(10).toISOString()),
+      record("imported", 2, 3, "tie", new Date(20).toISOString(), {
+        importBatchId: "batch",
+        sourceCreatedAt: new Date(0).toISOString(),
+      }),
+    ]);
+    const mixedRequest = { ...request, history: mixedHistory, checkpoints: [1] };
+    const result = await computeAnalysisCheckpoint(mixedRequest, 1);
+    const availability = sortAnalysisHistoryByAvailability(mixedHistory).slice(0, 1);
+
+    expect(result.importedRaw).toBe(1);
+    expect(result.forecastImportedRaw).toBe(0);
+    expect(result.prefixDigest).toBe(analysisPrefixDigest(mixedHistory, 1));
+    expect(result.forecastPrefixDigest).toBe(analysisPrefixDigest(availability));
+    expect(result.backtestStoppingChecks).toBeDefined();
+    expect(result.forecasts.quick?.rolloutCount).toBe(64);
   }, 20_000);
 });

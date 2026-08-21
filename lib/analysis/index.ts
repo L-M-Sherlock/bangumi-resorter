@@ -112,6 +112,23 @@ export function toAnalysisHistory(records: ComparisonRecord[]): AnalysisHistoryE
   }));
 }
 
+function availabilityOrderValue(entry: Pick<AnalysisHistoryEntry, "createdAt">) {
+  const parsed = Date.parse(entry.createdAt);
+  return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
+}
+
+/** The evidence set that was actually visible to the session at each historical checkpoint. */
+export function sortAnalysisHistoryByAvailability(history: AnalysisHistoryEntry[]) {
+  return [...history].sort((left, right) =>
+    availabilityOrderValue(left) - availabilityOrderValue(right)
+    || left.recordId.localeCompare(right.recordId));
+}
+
+export function analysisHistoryOrderDiffers(history: AnalysisHistoryEntry[]) {
+  return sortAnalysisHistoryByAvailability(history)
+    .some((entry, index) => entry.recordId !== history[index]?.recordId);
+}
+
 function historyToken(entry: AnalysisHistoryEntry) {
   return [
     entry.recordId,
@@ -342,6 +359,7 @@ export function analysisPointFromModel(
 ): SessionAnalysisPoint {
   const evidence = analysisEvidenceBreakdown(history);
   const diagnostics = model.diagnostics;
+  const stoppingChecks = mappedStoppingChecks(model);
   return {
     checkpoint: history.length,
     prefixDigest: analysisPrefixDigest(history),
@@ -353,9 +371,28 @@ export function analysisPointFromModel(
     crossTwoBucketCountMedian: diagnostics?.crossTwoBucketCountMedian,
     crossTwoBucketCountLow: diagnostics?.crossTwoBucketCountLow,
     crossTwoBucketCountHigh: diagnostics?.crossTwoBucketCountHigh,
-    stoppingChecks: mappedStoppingChecks(model),
+    stoppingChecks,
+    backtestStoppingChecks: stoppingChecks,
     forecasts: mappedForecasts(model),
+    forecastImportedRaw: evidence.importedRaw,
+    forecastManualRaw: evidence.manualRaw,
+    forecastPrefixDigest: analysisPrefixDigest(history),
     computedAt,
+  };
+}
+
+/** Retain source-time diagnostics while attaching a causally available forecast state. */
+export function analysisPointWithAvailabilityForecast(
+  sourcePoint: SessionAnalysisPoint,
+  availabilityPoint: SessionAnalysisPoint,
+): SessionAnalysisPoint {
+  return {
+    ...sourcePoint,
+    forecasts: availabilityPoint.forecasts,
+    backtestStoppingChecks: availabilityPoint.stoppingChecks,
+    forecastImportedRaw: availabilityPoint.importedRaw,
+    forecastManualRaw: availabilityPoint.manualRaw,
+    forecastPrefixDigest: availabilityPoint.prefixDigest,
   };
 }
 
@@ -420,6 +457,9 @@ export function analysisSeriesPoints(series: SessionAnalysisSeries | undefined, 
 export interface AnalysisForecastBacktest {
   mode: ComparisonBudgetMode;
   status: "observed" | "right-censored";
+  /** First integer answer count in the checkpoint-resolution stopping window. */
+  observedStopWindowStart?: number;
+  /** Last integer answer count in the checkpoint-resolution stopping window. */
   observedStopCheckpoint?: number;
   forecastCount: number;
   boundedIntervalCount: number;
@@ -445,10 +485,23 @@ export function analysisForecastBacktest(
   mode: ComparisonBudgetMode,
 ): AnalysisForecastBacktest {
   const ordered = [...points].sort((left, right) => left.checkpoint - right.checkpoint);
-  const stopped = ordered.find((point) => point.stoppingChecks[mode]?.ready);
+  const backtestCheck = (point: SessionAnalysisPoint) =>
+    point.backtestStoppingChecks?.[mode] ?? point.stoppingChecks[mode];
+  const forecastImportedRaw = (point: SessionAnalysisPoint) =>
+    point.forecastImportedRaw ?? point.importedRaw;
+  const forecastManualRaw = (point: SessionAnalysisPoint) =>
+    point.forecastManualRaw ?? point.manualRaw ?? 0;
+  const stopped = ordered.find((point) => backtestCheck(point)?.ready);
+  const lastKnownNotReady = stopped
+    ? ordered.filter((point) => point.checkpoint < stopped.checkpoint && !backtestCheck(point)?.ready).at(-1)
+    : undefined;
+  const observedStopWindowStart = stopped
+    ? (lastKnownNotReady?.checkpoint ?? -1) + 1
+    : undefined;
   const endpoint = stopped ?? ordered.at(-1);
-  const comparableForecast = (point: SessionAnalysisPoint) => point.importedRaw === endpoint?.importedRaw
-    && (point.manualRaw ?? 0) === (endpoint?.manualRaw ?? 0);
+  const comparableForecast = (point: SessionAnalysisPoint) =>
+    forecastImportedRaw(point) === (endpoint ? forecastImportedRaw(endpoint) : undefined)
+    && forecastManualRaw(point) === (endpoint ? forecastManualRaw(endpoint) : undefined);
   const candidateForecasts = ordered.filter((point) => point.checkpoint < (stopped?.checkpoint ?? Number.POSITIVE_INFINITY)
     && point.forecasts[mode]?.medianAdditional !== undefined);
   const interruptedForecastCount = candidateForecasts.filter((point) => !comparableForecast(point)).length;
@@ -470,17 +523,25 @@ export function analysisForecastBacktest(
     const forecast = point.forecasts[mode];
     if (forecast?.medianAdditional === undefined) continue;
     if (!comparableForecast(point)) continue;
-    const actualAdditional = stopped.checkpoint - point.checkpoint;
-    errors.push(forecast.medianAdditional - actualAdditional);
+    const actualAdditionalLow = Math.max(0, observedStopWindowStart! - point.checkpoint);
+    const actualAdditionalHigh = stopped.checkpoint - point.checkpoint;
+    const error = forecast.medianAdditional < actualAdditionalLow
+      ? forecast.medianAdditional - actualAdditionalLow
+      : forecast.medianAdditional > actualAdditionalHigh
+        ? forecast.medianAdditional - actualAdditionalHigh
+        : 0;
+    errors.push(error);
     if (forecast.lowerAdditional === undefined || forecast.upperAdditional === undefined) continue;
     boundedIntervalCount += 1;
-    if (forecast.lowerAdditional <= actualAdditional && actualAdditional <= forecast.upperAdditional) {
+    if (forecast.lowerAdditional <= actualAdditionalHigh
+      && forecast.upperAdditional >= actualAdditionalLow) {
       boundedIntervalHits += 1;
     }
   }
   return {
     mode,
     status: "observed",
+    observedStopWindowStart,
     observedStopCheckpoint: stopped.checkpoint,
     forecastCount: errors.length,
     boundedIntervalCount,

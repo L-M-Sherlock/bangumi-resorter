@@ -6,7 +6,7 @@ import type {
   StoppingForecastStatus,
 } from "../types";
 
-export const ANALYSIS_ALGORITHM_VERSION = "session-analysis-v3-source-time-fixed-checkpoints-backtest-laplace6-forecast14";
+export const ANALYSIS_ALGORITHM_VERSION = "session-analysis-v4-source-time-availability-backtest-laplace6-forecast14";
 export const ANALYSIS_ROLLOUT_COUNT = 64;
 
 export interface AnalysisHistoryEntry extends RankingHistoryInput {
@@ -62,7 +62,14 @@ export interface SessionAnalysisPoint {
   crossTwoBucketCountLow?: number;
   crossTwoBucketCountHigh?: number;
   stoppingChecks: Partial<Record<ComparisonBudgetMode, SessionAnalysisStoppingCheck>>;
+  /** Causal stopping history using when evidence became available to this session. */
+  backtestStoppingChecks?: Partial<Record<ComparisonBudgetMode, SessionAnalysisStoppingCheck>>;
   forecasts: Partial<Record<ComparisonBudgetMode, SessionAnalysisForecast>>;
+  /** Provenance counts on the availability-time prefix used by forecasts and backtests. */
+  forecastImportedRaw?: number;
+  forecastManualRaw?: number;
+  /** Digest of the availability-time prefix; source-time prefixDigest remains the cache identity. */
+  forecastPrefixDigest?: string;
   computedAt: string;
 }
 

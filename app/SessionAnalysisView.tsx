@@ -10,6 +10,7 @@ import {
 import {
   analysisCheckpointsForHistory,
   analysisForecastBacktest,
+  analysisHistoryOrderDiffers,
   analysisPointFromModel,
   analysisSeriesPoints,
   sessionAnalysisContext,
@@ -312,6 +313,7 @@ export function SessionAnalysisView({
   const compatibleSeries = series?.id === context.identity.id ? series : undefined;
   const points = useMemo(() => analysisSeriesPoints(compatibleSeries, live), [compatibleSeries, live]);
   const expected = useMemo(() => analysisCheckpointsForHistory(items.length, context.history), [items.length, context.history]);
+  const availabilityReordered = useMemo(() => analysisHistoryOrderDiffers(context.history), [context.history]);
   const selected = points.find((point) => point.checkpoint === selectedCheckpoint) ?? live;
   const selectedIndex = Math.max(0, points.findIndex((point) => point.checkpoint === selected.checkpoint));
   const presentMilestones = new Set(compatibleSeries?.milestones.map((point) => point.checkpoint) ?? []);
@@ -331,13 +333,16 @@ export function SessionAnalysisView({
     const successes = forecast.withinProjectionSuccesses;
     const simulated = `${successes === undefined ? formatPercent(forecast.probabilityWithinProjection) : `${successes}/${forecast.rolloutCount}`} 条模拟路径在窗口内达标`;
     const interrupted = backtest.interruptedForecastCount > 0
-      ? `；另有 ${backtest.interruptedForecastCount} 点被后续导入或手动判断截断`
+      ? `；另有 ${backtest.interruptedForecastCount} 点被后续导入或手动判断改变可用证据而截断`
       : "";
     if (backtest.status === "right-censored") {
       return `${BUDGET_MODE_COPY[mode].label}：${simulated}；尚未观察到实际停止（右删失）${interrupted}`;
     }
+    const stopWindow = backtest.observedStopWindowStart === backtest.observedStopCheckpoint
+      ? `第 ${backtest.observedStopCheckpoint} 条`
+      : `第 ${backtest.observedStopWindowStart}–${backtest.observedStopCheckpoint} 条之间`;
     if (backtest.forecastCount === 0) {
-      return `${BUDGET_MODE_COPY[mode].label}：${simulated}；第 ${backtest.observedStopCheckpoint} 条检查点首次观察到停止，之前无可检验预测${interrupted}`;
+      return `${BUDGET_MODE_COPY[mode].label}：${simulated}；${stopWindow}首次观察到停止，之前无可检验预测${interrupted}`;
     }
     const interval = backtest.boundedIntervalCount > 0
       ? `P10–P90 ${backtest.boundedIntervalHits}/${backtest.boundedIntervalCount}`
@@ -397,6 +402,7 @@ export function SessionAnalysisView({
 
     {(cacheWarning || storageWarning) && <div className="notice notice-warning" role="status">当前端点仍可查看；历史缓存不可用：{cacheWarning || storageWarning}</div>}
     {activeTask && task.status === "error" && <div className="notice notice-error" role="alert">历史补算中断：{task.message}<button type="button" className="text-button" disabled={!canBuild} onClick={() => void onBuildHistory(context, missing)}>重试缺失点</button></div>}
+    {availabilityReordered && <div className="notice notice-info">历史诊断按判断实际发生时间重建；动态剩余与回溯改按证据进入当前会话的时间计算，避免把后来导入的判断当成当时选题器已经掌握的证据。</div>}
     {anyReadyZero && <div className="notice notice-info">预测的 0–0 表示对应停止规则已经满足；它不表示后验分布或模型不确定性消失。</div>}
 
     <section className="analysis-control-panel" aria-label="历史检查点控制">
@@ -417,8 +423,8 @@ export function SessionAnalysisView({
       <AnalysisChart title="后验不确定性与平局强度" description="平均后验标准差与模型拟合的 Davidson 共享平局参数。" points={points} expectedCheckpoints={expected} selected={selected} series={uncertaintySeries} onSelect={selectCheckpoint} />
       <AnalysisChart title="跨两档作品数" description="作品跨越两档或以上的后验期望，以及中央 80% 后验区间。" points={points} expectedCheckpoints={expected} selected={selected} series={crossSeries} onSelect={selectCheckpoint} />
       <AnalysisChart wide title="三档停止下界" description="快速、标准、精细覆盖事件的 90% Monte Carlo 下界；当前停止模式在图例中标出。" points={points} expectedCheckpoints={expected} selected={selected} series={stoppingSeries} onSelect={selectCheckpoint} fixedDomain={[0, 1]} reference={{ value: STOPPING_PROBABILITY_TARGET, label: "90% 门槛" }} />
-      <AnalysisChart wide title="三档动态剩余预测" description="共享模拟路径得到的剩余题量 P50 与 P10–P90；回溯指标只使用已经实际观察到停止的档位，区间未闭合时阴影会断开。" points={points} expectedCheckpoints={expected} selected={selected} series={forecastSeries} onSelect={selectCheckpoint} footer={forecastHitFooter} />
+      <AnalysisChart wide title="三档动态剩余预测" description="按证据进入当前会话的时间重建可用信息集，再以共享模拟路径给出剩余题量 P50 与 P10–P90；区间未闭合时阴影会断开。" points={points} expectedCheckpoints={expected} selected={selected} series={forecastSeries} onSelect={selectCheckpoint} footer={forecastHitFooter} />
     </div>
-    <p className="analysis-disclaimer">64 路径条件情景区间，未经经验覆盖率校准。历史检查点按判断实际发生时间重建：导入判断使用原始 sourceCreatedAt，不受复制到本会话的时间影响；检查点按固定判断步长生成，因此导入批次内部也可能出现重建点。回溯只比较未被后续导入或手动选题打断的同一策略区段，停止时间只有检查点粒度，尚未停止的档位按右删失处理。同一会话的相邻回溯点共享历史且高度相关，命中比例不是独立样本的覆盖率校准。当前模型结果始终是权威端点。</p>
+    <p className="analysis-disclaimer">64 路径条件情景区间，未经经验覆盖率校准。证据、覆盖、后验与停止下界按判断实际发生时间重建：导入判断使用原始 sourceCreatedAt，不受复制时间影响；检查点按固定判断步长生成。动态剩余和回溯则按 createdAt 重建当时真正可见的证据集，防止导入判断穿越到选题器尚不可见的过去；只比较未被后续导入或手动判断打断的同一可用证据区段。停止时间只有检查点粒度，尚未停止的档位按右删失处理。同一会话的相邻回溯点共享历史且高度相关，命中比例不是独立样本的覆盖率校准。当前模型结果始终是权威端点。</p>
   </section>;
 }

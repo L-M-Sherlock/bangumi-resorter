@@ -1,7 +1,12 @@
-import { finalizeRanking, prepareRanking } from "../ranking/compute";
+import { finalizeRanking, finalizeRankingWithoutForecast, prepareRanking } from "../ranking/compute";
 import { computePreparedForecasts, type ForecastWorkerPool } from "../ranking/parallel-forecast";
 import { rankingTuning } from "../ranking/strategy";
-import { analysisPointFromModel, analysisPrefixDigest } from "./index";
+import {
+  analysisPointFromModel,
+  analysisPointWithAvailabilityForecast,
+  analysisPrefixDigest,
+  sortAnalysisHistoryByAvailability,
+} from "./index";
 import type { AnalysisWorkerRequest } from "./protocol";
 import { ANALYSIS_ROLLOUT_COUNT, type SessionAnalysisPoint } from "./types";
 
@@ -10,12 +15,13 @@ export async function computeAnalysisCheckpoint(
   checkpoint: number,
   forecastPool?: ForecastWorkerPool,
 ) {
-  const history = request.history.slice(0, checkpoint);
+  const sourceHistory = request.history.slice(0, checkpoint);
+  const availabilityHistory = sortAnalysisHistoryByAvailability(request.history).slice(0, checkpoint);
   const tuning = rankingTuning(request.priorMode);
   // Historical checkpoints deliberately use a stable standard-mode alias.
   // prepareRanking still creates the three ordered checks and the forecast
   // simulator emits all three modes over the same 64 paths.
-  const prepared = prepareRanking({
+  const prepare = (history: typeof request.history) => prepareRanking({
     type: "RECOMPUTE",
     requestId: `${request.taskId}:${checkpoint}`,
     sessionId: request.identity.sessionId,
@@ -28,13 +34,35 @@ export async function computeAnalysisCheckpoint(
     priorMode: request.priorMode,
     ...tuning,
   });
-  const simulations = await computePreparedForecasts(prepared, {
+  const availabilityIds = new Set(availabilityHistory.map((entry) => entry.recordId));
+  const sameEvidenceSet = sourceHistory.length === availabilityHistory.length
+    && sourceHistory.every((entry) => availabilityIds.has(entry.recordId));
+  if (sameEvidenceSet) {
+    const prepared = prepare(sourceHistory);
+    const simulations = await computePreparedForecasts(prepared, {
+      rolloutCount: ANALYSIS_ROLLOUT_COUNT,
+      hardwareConcurrency: 2,
+      workerPool: forecastPool,
+    });
+    const model = finalizeRanking(prepared, simulations).model;
+    const point = analysisPointFromModel(sourceHistory, model);
+    point.prefixDigest = analysisPrefixDigest(request.history, checkpoint);
+    point.forecastPrefixDigest = analysisPrefixDigest(availabilityHistory);
+    return point;
+  }
+
+  const sourcePrepared = prepare(sourceHistory);
+  const sourceModel = finalizeRankingWithoutForecast(sourcePrepared).model;
+  const sourcePoint = analysisPointFromModel(sourceHistory, sourceModel);
+  const availabilityPrepared = prepare(availabilityHistory);
+  const simulations = await computePreparedForecasts(availabilityPrepared, {
     rolloutCount: ANALYSIS_ROLLOUT_COUNT,
     hardwareConcurrency: 2,
     workerPool: forecastPool,
   });
-  const model = finalizeRanking(prepared, simulations).model;
-  const point = analysisPointFromModel(history, model);
+  const availabilityModel = finalizeRanking(availabilityPrepared, simulations).model;
+  const availabilityPoint = analysisPointFromModel(availabilityHistory, availabilityModel);
+  const point = analysisPointWithAvailabilityForecast(sourcePoint, availabilityPoint);
   point.prefixDigest = analysisPrefixDigest(request.history, checkpoint);
   return point;
 }
