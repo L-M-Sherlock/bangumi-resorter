@@ -51,7 +51,7 @@ test("current session analysis exposes six linked charts and resumable history c
   await expect(crossBucketChart.locator(".analysis-chart-tooltip")).toContainText(/\d+(?:\.\d+)? 部（\d+(?:\.\d+)?%）/u);
   await expect(crossBucketChart.locator(".analysis-axis-label").first()).toContainText(/\/ \d+(?:\.\d+)?%/u);
   await expect(crossBucketChart.locator(".analysis-chart-footer")).toContainText(/中央 80% 后验区间.*部（.*%）/u);
-  await expect(page.getByText("64 路径条件情景区间，未经经验覆盖率校准。", { exact: false })).toBeVisible();
+  await expect(page.getByText("历史检查点固定使用 64 路径条件情景区间；当前端点在桌面端使用 64、手机端使用 32", { exact: false })).toBeVisible();
   await expect(page.getByText("第 1 条判断", { exact: true })).toBeVisible();
 
   const build = page.getByRole("button", { name: /补算历史检查点/ });

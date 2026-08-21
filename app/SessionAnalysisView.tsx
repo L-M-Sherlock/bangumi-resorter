@@ -474,6 +474,6 @@ export function SessionAnalysisView({
       <AnalysisChart wide title="三档停止下界" description="快速、标准、精细覆盖事件的 90% Monte Carlo 下界；当前停止模式在图例中标出。" points={points} expectedCheckpoints={expected} selected={selected} series={stoppingSeries} onSelect={selectCheckpoint} fixedDomain={[0, 1]} reference={{ value: STOPPING_PROBABILITY_TARGET, label: "90% 门槛" }} />
       <AnalysisChart wide title="三档动态剩余预测" description="按证据进入当前会话的时间重建可用信息集，再以共享模拟路径给出剩余题量 P50 与 P10–P90；区间未闭合时阴影会断开。" points={points} expectedCheckpoints={expected} selected={selected} series={forecastSeries} onSelect={selectCheckpoint} footer={forecastHitFooter} />
     </div>
-    <p className="analysis-disclaimer">64 路径条件情景区间，未经经验覆盖率校准。证据、覆盖、后验与停止下界按判断实际发生时间重建：导入判断使用原始 sourceCreatedAt，不受复制时间影响；检查点按固定判断步长生成。动态剩余和回溯则按 createdAt 重建当时真正可见的证据集，防止导入判断穿越到选题器尚不可见的过去；只比较未被后续导入或手动判断打断的同一可用证据区段。停止时间只有检查点粒度，尚未停止的档位按右删失处理。同一会话的相邻回溯点共享历史且高度相关，命中比例不是独立样本的覆盖率校准。当前模型结果始终是权威端点。</p>
+    <p className="analysis-disclaimer">历史检查点固定使用 64 路径条件情景区间；当前端点在桌面端使用 64、手机端使用 32，均未经经验覆盖率校准。证据、覆盖、后验与停止下界按判断实际发生时间重建：导入判断使用原始 sourceCreatedAt，不受复制时间影响；检查点按固定判断步长生成。动态剩余和回溯则按 createdAt 重建当时真正可见的证据集，防止导入判断穿越到选题器尚不可见的过去；只比较未被后续导入或手动判断打断的同一可用证据区段。停止时间只有检查点粒度，尚未停止的档位按右删失处理。同一会话的相邻回溯点共享历史且高度相关，命中比例不是独立样本的覆盖率校准。当前模型结果始终是权威端点。</p>
   </section>;
 }

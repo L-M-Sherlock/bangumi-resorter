@@ -20,7 +20,7 @@ export async function computeAnalysisCheckpoint(
   const tuning = rankingTuning(request.priorMode);
   // Historical checkpoints deliberately use a stable standard-mode alias.
   // prepareRanking still creates the three ordered checks and the forecast
-  // simulator emits all three modes over the same 64 paths.
+  // simulator emits all three modes over the same fixed 64 paths.
   const prepare = (history: typeof request.history) => prepareRanking({
     type: "RECOMPUTE",
     requestId: `${request.taskId}:${checkpoint}`,

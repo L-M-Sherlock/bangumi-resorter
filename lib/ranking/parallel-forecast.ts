@@ -7,6 +7,12 @@ import {
   type StoppingForecastRolloutInput,
 } from "./engine";
 import type { PreparedRanking } from "./compute";
+import { forecastRolloutCount } from "./strategy";
+export {
+  DEFAULT_FORECAST_ROLLOUT_COUNT,
+  MOBILE_FORECAST_ROLLOUT_COUNT,
+  forecastRolloutCount,
+} from "./strategy";
 
 export interface ForecastWorkerLike {
   onmessage: ((event: MessageEvent<ForecastWorkerResponse>) => void) | null;
@@ -125,7 +131,7 @@ export async function computePreparedForecasts(
   prepared: PreparedRanking,
   options: ParallelForecastOptions = {},
 ) {
-  const rolloutCount = Math.max(16, Math.round(options.rolloutCount ?? 64));
+  const rolloutCount = forecastRolloutCount(options);
   const workerCount = forecastWorkerCount(
     options.hardwareConcurrency,
     prepared.request.items.length,

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { prepareRanking } from "../lib/ranking/compute";
 import {
   computePreparedForecasts,
+  forecastRolloutCount,
   ForecastWorkerPool,
   forecastWorkerCount,
   runForecastWorkerTask,
@@ -55,6 +56,33 @@ class InlineForecastWorker implements ForecastWorkerLike {
 }
 
 describe("parallel stopping forecast", () => {
+  it("halves the default rollout budget on mobile without changing explicit budgets", () => {
+    expect(forecastRolloutCount()).toBe(64);
+    expect(forecastRolloutCount({ mobile: true })).toBe(32);
+    expect(forecastRolloutCount({ mobile: true, rolloutCount: 48 })).toBe(48);
+    expect(forecastRolloutCount({ mobile: true, rolloutCount: 8 })).toBe(16);
+  });
+
+  it("uses 32 paths for a mobile forecast when no budget is supplied", async () => {
+    const prepared = prepareRanking(request());
+    for (const forecast of prepared.forecasts) {
+      forecast.diagnostics.evidenceCount = forecast.diagnostics.evidenceRequired;
+      forecast.diagnostics.coverageTargetStabilityLow = 1;
+      forecast.diagnostics.ready = true;
+      forecast.diagnostics.stoppingChecks?.forEach((check) => {
+        check.low = 1;
+        check.high = 1;
+        check.ready = true;
+      });
+    }
+    const result = await computePreparedForecasts(prepared, {
+      hardwareConcurrency: 1,
+      mobile: true,
+    });
+    expect(result[0]?.forecast.rolloutCount).toBe(32);
+    expect(result[0]?.stoppingTimesByMode.quick).toHaveLength(32);
+  });
+
   it("caps forecast workers and skips parallel overhead for small jobs", () => {
     expect(forecastWorkerCount(16, 284, 64)).toBe(8);
     expect(forecastWorkerCount(8, 284, 64)).toBe(4);

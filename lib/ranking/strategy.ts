@@ -98,6 +98,17 @@ export function forecastProjectionHorizon(itemCount: number) {
   return Math.min(5000, Math.max(1000, Math.ceil(Math.max(0, itemCount)) * 10));
 }
 
+/** Default Monte Carlo path budgets for the responsive forecast worker. */
+export const DEFAULT_FORECAST_ROLLOUT_COUNT = 64;
+export const MOBILE_FORECAST_ROLLOUT_COUNT = DEFAULT_FORECAST_ROLLOUT_COUNT / 2;
+
+export function forecastRolloutCount(options: { mobile?: boolean; rolloutCount?: number } = {}) {
+  const defaultCount = options.mobile
+    ? MOBILE_FORECAST_ROLLOUT_COUNT
+    : DEFAULT_FORECAST_ROLLOUT_COUNT;
+  return Math.max(16, Math.round(options.rolloutCount ?? defaultCount));
+}
+
 export function sessionBudgetMode(session: Pick<SortingSession, "budgetMode">): ComparisonBudgetMode {
   return session.budgetMode ?? "standard";
 }

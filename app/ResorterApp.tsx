@@ -77,6 +77,7 @@ import {
   BUDGET_MODE_COPY,
   PRIOR_MODE_COPY,
   allowedCrossTwoBucketCount,
+  forecastRolloutCount,
   rankingTuning,
   recommendedDistribution,
   sessionBudgetMode,
@@ -168,6 +169,10 @@ function toRankingHistory(history: ComparisonRecord[]): RankingHistoryInput[] {
       sourceCreatedAt: record.sourceCreatedAt,
       createdAt: record.createdAt,
     }));
+}
+
+function usesMobileForecastBudget() {
+  return typeof navigator !== "undefined" && /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
 }
 
 function percent(value?: number) {
@@ -2294,11 +2299,13 @@ export default function ResorterApp() {
     try {
       const bundle = await getSessionBundle(sessionId); if (!bundle) throw new Error("会话不存在。");
       cancelForecast("正在打开会话，旧的动态剩余预测已取消。");
+      const expectedForecastRollouts = forecastRolloutCount({ mobile: usesMobileForecastBudget() });
       const reusableForecastModel = bundle.model?.version === bundle.session.modelVersion
         && bundle.model.diagnostics?.method === "laplace-mc-v6"
         && bundle.model.diagnostics.forecast?.method === "posterior-contraction-mc-v15"
         && STOPPING_MODE_ORDER.every((mode) => bundle.model?.diagnostics?.forecasts?.[mode]?.method === "posterior-contraction-mc-v15")
         && STOPPING_MODE_ORDER.every((mode) => bundle.model?.diagnostics?.stoppingChecks?.some((check) => check.mode === mode))
+        && STOPPING_MODE_ORDER.every((mode) => bundle.model?.diagnostics?.forecasts?.[mode]?.rolloutCount === expectedForecastRollouts)
         && Object.keys(bundle.model.abilities).length === bundle.items.length
         && Object.keys(bundle.model.uncertainty).length === bundle.items.length;
       const reusableAnalysisModel = target === "analysis" && reusableForecastModel;
