@@ -44,9 +44,13 @@ test("current session analysis exposes six linked charts and resumable history c
   await expect(page.getByText(/16 部作品 · 1 条原始判断/)).toBeVisible();
   await expect(page.getByText(/实际后验样本 64|实际后验样本 128/)).toBeVisible();
   await expect(page.locator(".analysis-chart-card")).toHaveCount(6);
-  for (const title of ["证据折算", "覆盖与效率", "后验不确定性与平局强度", "跨两档作品数", "三档停止下界", "三档动态剩余预测"]) {
+  for (const title of ["证据折算", "覆盖与效率", "后验不确定性与平局强度", "跨两档作品数与占比", "三档停止下界", "三档动态剩余预测"]) {
     await expect(page.getByRole("heading", { name: title })).toBeVisible();
   }
+  const crossBucketChart = page.locator(".analysis-chart-card").filter({ hasText: "跨两档作品数与占比" });
+  await expect(crossBucketChart.locator(".analysis-chart-tooltip")).toContainText(/\d+(?:\.\d+)? 部（\d+(?:\.\d+)?%）/u);
+  await expect(crossBucketChart.locator(".analysis-axis-label").first()).toContainText(/\/ \d+(?:\.\d+)?%/u);
+  await expect(crossBucketChart.locator(".analysis-chart-footer")).toContainText(/中央 80% 后验区间.*部（.*%）/u);
   await expect(page.getByText("64 路径条件情景区间，未经经验覆盖率校准。", { exact: false })).toBeVisible();
   await expect(page.getByText("第 1 条判断", { exact: true })).toBeVisible();
 
@@ -72,6 +76,24 @@ test("current session analysis exposes six linked charts and resumable history c
   await expect(page.locator("#result-prior-mode")).toHaveAttribute("data-value", "strong");
   await page.locator(".results-header").getByRole("button", { name: "会话分析", exact: true }).click();
   await expect(page.getByRole("heading", { name: "demo 的排序" })).toBeVisible();
+
+  const stoppingChart = page.locator(".analysis-chart-card").filter({ hasText: "三档停止下界" });
+  const stoppingAxisLabel = stoppingChart.locator(".analysis-axis-label").first();
+  await page.setViewportSize({ width: 736, height: 900 });
+  await expect.poll(() => stoppingChart.locator("svg").evaluate((element) => {
+    const svg = element as SVGSVGElement;
+    const containerWidth = svg.parentElement?.getBoundingClientRect().width ?? 0;
+    return Math.abs(svg.viewBox.baseVal.width - containerWidth);
+  })).toBeLessThan(1);
+  const compactAxisLabelHeight = await stoppingAxisLabel.evaluate((label) => label.getBoundingClientRect().height);
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await expect.poll(() => stoppingChart.locator("svg").evaluate((element) => {
+    const svg = element as SVGSVGElement;
+    const containerWidth = svg.parentElement?.getBoundingClientRect().width ?? 0;
+    return Math.abs(svg.viewBox.baseVal.width - containerWidth);
+  })).toBeLessThan(1);
+  const wideAxisLabelHeight = await stoppingAxisLabel.evaluate((label) => label.getBoundingClientRect().height);
+  expect(Math.abs(wideAxisLabelHeight - compactAxisLabelHeight)).toBeLessThan(1);
 
   for (const viewport of [{ width: 1024, height: 800 }, { width: 736, height: 900 }, { width: 390, height: 844 }, { width: 360, height: 800 }]) {
     await page.setViewportSize(viewport);

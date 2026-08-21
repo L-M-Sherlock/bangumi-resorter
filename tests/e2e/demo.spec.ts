@@ -107,6 +107,22 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await expect(page.getByRole("heading", { name: "你的偏好序列" })).toBeVisible();
   await expectThemedSelect(page, "result-budget-mode", "standard");
   await expectThemedSelect(page, "result-prior-mode", "weak");
+  await page.locator("#result-budget-mode").click();
+  const resultBudgetOptions = page.locator('[data-themed-select="result-budget-mode"] .themed-select-option');
+  await expect(resultBudgetOptions).toHaveCount(3);
+  for (const option of await resultBudgetOptions.all()) {
+    await expect(option.locator("span").first()).toHaveCSS("white-space", "nowrap");
+    expect(await option.evaluate((element) => element.getBoundingClientRect().height)).toBeLessThanOrEqual(38);
+  }
+  await page.locator("#result-budget-mode").click();
+  const resultHeaderControls = page.locator(".results-header .header-actions button");
+  const resultHeaderRects = await resultHeaderControls.evaluateAll((controls) => controls.map((control) => {
+    const rect = control.getBoundingClientRect();
+    return { top: rect.top, bottom: rect.bottom, height: rect.height };
+  }));
+  expect(Math.max(...resultHeaderRects.map(({ top }) => top)) - Math.min(...resultHeaderRects.map(({ top }) => top))).toBeLessThan(1);
+  expect(Math.max(...resultHeaderRects.map(({ bottom }) => bottom)) - Math.min(...resultHeaderRects.map(({ bottom }) => bottom))).toBeLessThan(1);
+  await expect(page.locator(".results-header .header-actions > button").first()).toHaveCSS("white-space", "nowrap");
   await selectThemedOption(page, "result-budget-mode", "精细模式 · 95% 覆盖");
   await expectThemedSelect(page, "result-budget-mode", "thorough");
   await expect(page.locator(".page-header .eyebrow")).toContainText("精细停止");

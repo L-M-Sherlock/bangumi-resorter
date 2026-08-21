@@ -107,6 +107,11 @@ function formatPercent(value: number) {
   return `${Math.round(value * 100)}%`;
 }
 
+function formatShare(value: number) {
+  const percent = Math.round(value * 1000) / 10;
+  return `${Number.isInteger(percent) ? percent.toFixed(0) : percent.toFixed(1)}%`;
+}
+
 function formatDecimal(value: number) {
   return value.toFixed(value >= 10 ? 1 : 3).replace(/\.0+$/u, "");
 }
@@ -169,6 +174,8 @@ function AnalysisChart({
   wide = false,
   reference,
   footer,
+  yTickFormat,
+  leftMargin = 52,
 }: {
   title: string;
   description: string;
@@ -181,11 +188,15 @@ function AnalysisChart({
   wide?: boolean;
   reference?: { value: number; label: string };
   footer?: string;
+  yTickFormat?: (value: number) => string;
+  leftMargin?: number;
 }) {
   const [containerRef, observedWidth] = useObservedWidth<HTMLDivElement>();
-  const viewWidth = 720;
+  // Keep SVG user units aligned with CSS pixels. A fixed-width viewBox makes
+  // text and symbols scale with the card when the browser is resized.
+  const viewWidth = observedWidth;
   const viewHeight = 278;
-  const margin = { left: 52, right: 18, top: 20, bottom: 38 };
+  const margin = { left: leftMargin, right: 18, top: 20, bottom: 38 };
   const plotWidth = viewWidth - margin.left - margin.right;
   const plotHeight = viewHeight - margin.top - margin.bottom;
   const endpoint = Math.max(1, expectedCheckpoints.at(-1) ?? points.at(-1)?.checkpoint ?? 1);
@@ -223,7 +234,7 @@ function AnalysisChart({
         <title>{title}</title><desc>{description}。点击图中真实检查点可同步选择。</desc>
         {yTicks.map((tick) => <g key={`y-${tick}`}>
           <line x1={margin.left} y1={y(tick)} x2={viewWidth - margin.right} y2={y(tick)} className="analysis-grid-line" />
-          <text x={margin.left - 9} y={y(tick) + 4} textAnchor="end" className="analysis-axis-label">{fixedDomain ? formatPercent(tick) : formatCount(tick)}</text>
+          <text x={margin.left - 9} y={y(tick) + 4} textAnchor="end" className="analysis-axis-label">{yTickFormat ? yTickFormat(tick) : fixedDomain ? formatPercent(tick) : formatCount(tick)}</text>
         </g>)}
         {xTicks.map((tick) => <g key={`x-${tick}`}>
           <line x1={x(tick)} y1={margin.top} x2={x(tick)} y2={viewHeight - margin.bottom} className="analysis-grid-line vertical" />
@@ -361,6 +372,10 @@ export function SessionAnalysisView({
     return `${BUDGET_MODE_COPY[mode].label}：${simulated}；回溯 ${backtest.forecastCount} 点，${interval}，P50 中位绝对误差 ${backtest.medianAbsoluteError === undefined ? "—" : formatCount(backtest.medianAbsoluteError)}，中位偏差 ${bias}${interrupted}`;
   }).join(" · ");
   const evidenceBreakdownFooter = `时间折损 ${formatCount(selected.sourceAgeLoss)} · 同作品对相关性折损 ${formatCount(selected.repeatedPairLoss)} · 校准复问 ${selected.calibrationRaw}→${formatCount(selected.calibrationEffective)} · 导入判断 ${selected.importedRaw}→${formatCount(selected.importedEffective)}`;
+  const crossCount = (value: number) => `${formatCount(value)} 部（${formatShare(value / Math.max(1, items.length))}）`;
+  const crossFooter = finite(selected.crossTwoBucketCountLow) && finite(selected.crossTwoBucketCountHigh)
+    ? `中央 80% 后验区间 ${crossCount(selected.crossTwoBucketCountLow)}–${crossCount(selected.crossTwoBucketCountHigh)}`
+    : undefined;
 
   const evidenceSeries: ChartSeries[] = [
     { key: "raw", label: "原始判断", color: "var(--analysis-pink)", symbol: "circle", value: (point) => point.rawEvidence },
@@ -377,7 +392,7 @@ export function SessionAnalysisView({
     { key: "ties", label: "Davidson 平局强度", color: "var(--analysis-purple)", dash: "8 4", symbol: "square", value: (point) => point.tieStrength, format: formatDecimal },
   ];
   const crossSeries: ChartSeries[] = [
-    { key: "cross", label: "预期跨两档作品数", color: "var(--analysis-purple)", symbol: "diamond", value: (point) => point.expectedCrossTwoBucketCount, low: (point) => point.crossTwoBucketCountLow, high: (point) => point.crossTwoBucketCountHigh },
+    { key: "cross", label: "预期跨两档作品数 / 占比", color: "var(--analysis-purple)", symbol: "diamond", value: (point) => point.expectedCrossTwoBucketCount, low: (point) => point.crossTwoBucketCountLow, high: (point) => point.crossTwoBucketCountHigh, format: crossCount },
   ];
   const stoppingSeries = STOPPING_MODE_ORDER.map<ChartSeries>((mode) => ({
     key: `stopping-${mode}`,
@@ -441,7 +456,7 @@ export function SessionAnalysisView({
       <AnalysisChart title="证据折算" description="原始判断经来源时间衰减和同作品对相关性修正后形成有效证据。" points={points} expectedCheckpoints={expected} selected={selected} series={evidenceSeries} onSelect={selectCheckpoint} footer={evidenceBreakdownFooter} />
       <AnalysisChart title="覆盖与效率" description="覆盖作品、有效证据和唯一作品对相对原始判断的比例。" points={points} expectedCheckpoints={expected} selected={selected} series={efficiencySeries} onSelect={selectCheckpoint} fixedDomain={[0, 1]} />
       <AnalysisChart title="后验不确定性与平局强度" description="平均后验标准差与模型拟合的 Davidson 共享平局参数。" points={points} expectedCheckpoints={expected} selected={selected} series={uncertaintySeries} onSelect={selectCheckpoint} />
-      <AnalysisChart title="跨两档作品数" description="作品跨越两档或以上的后验期望，以及中央 80% 后验区间。" points={points} expectedCheckpoints={expected} selected={selected} series={crossSeries} onSelect={selectCheckpoint} />
+      <AnalysisChart title="跨两档作品数与占比" description="作品跨越两档或以上的后验期望及其占总作品的比例，以及中央 80% 后验区间。" points={points} expectedCheckpoints={expected} selected={selected} series={crossSeries} onSelect={selectCheckpoint} yTickFormat={(value) => `${formatCount(value)} / ${formatShare(value / Math.max(1, items.length))}`} leftMargin={78} footer={crossFooter} />
       <AnalysisChart wide title="三档停止下界" description="快速、标准、精细覆盖事件的 90% Monte Carlo 下界；当前停止模式在图例中标出。" points={points} expectedCheckpoints={expected} selected={selected} series={stoppingSeries} onSelect={selectCheckpoint} fixedDomain={[0, 1]} reference={{ value: STOPPING_PROBABILITY_TARGET, label: "90% 门槛" }} />
       <AnalysisChart wide title="三档动态剩余预测" description="按证据进入当前会话的时间重建可用信息集，再以共享模拟路径给出剩余题量 P50 与 P10–P90；区间未闭合时阴影会断开。" points={points} expectedCheckpoints={expected} selected={selected} series={forecastSeries} onSelect={selectCheckpoint} footer={forecastHitFooter} />
     </div>
