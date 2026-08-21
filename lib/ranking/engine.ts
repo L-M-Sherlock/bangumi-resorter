@@ -95,6 +95,8 @@ export interface PairSelectionOptions {
 
 interface PairSelectionCache {
   sessionId: string;
+  indexById: Map<number, number>;
+  orderedPositions: Int32Array;
   pairMass: Map<string, number>;
   pairEffectiveWeight: Map<string, number>;
   itemEffectiveWeight: Map<number, number>;
@@ -1191,9 +1193,12 @@ function globalExplorationPair(
 ): { first: number; second: number; score: number } | undefined {
   const pairWeights = cache.pairEffectiveWeight;
   const itemWeights = cache.itemEffectiveWeight;
-  const indexById = new Map(items.map((item, index) => [item.subjectId, index]));
+  const indexById = cache.indexById;
   const ordered = orderByAbilities(items, fit.abilities);
-  const orderedIndex = new Map(ordered.map((item, index) => [item.subjectId, index]));
+  for (let index = 0; index < ordered.length; index += 1) {
+    const itemIndex = indexById.get(ordered[index].subjectId);
+    if (itemIndex !== undefined) cache.orderedPositions[itemIndex] = index;
+  }
   const stabilities = diagnostics.adjacentBucketStabilityByItem ?? diagnostics.bucketStability;
   const unstable = items.filter((item) =>
     (stabilities[item.subjectId] ?? 0) < BUCKET_STABILITY_TARGET - 1e-12);
@@ -1215,8 +1220,9 @@ function globalExplorationPair(
     tieBreak: number;
   }> = [];
   for (const first of firstCandidates) {
-    const position = orderedIndex.get(first.subjectId);
-    if (position === undefined) continue;
+    const firstIndex = indexById.get(first.subjectId);
+    if (firstIndex === undefined) continue;
+    const position = cache.orderedPositions[firstIndex];
     for (let distance = 1; distance <= radius; distance += 1) {
       for (const neighborIndex of [position - distance, position + distance]) {
         const second = ordered[neighborIndex];
@@ -1335,7 +1341,7 @@ export function chooseNextPair(
         addCandidate(ordered[index].subjectId, ordered[index + 1].subjectId);
       }
     }
-    const indexById = new Map(items.map((item, index) => [item.subjectId, index]));
+    const indexById = selectionCache.indexById;
     const candidateEntries = [...candidatePairs.entries()];
     const candidateLimit = options.candidateLimit === undefined
       ? candidateEntries.length
@@ -2278,6 +2284,8 @@ function createPairSelectionCache(
   }
   return {
     sessionId,
+    indexById: new Map(items.map((item, index) => [item.subjectId, index])),
+    orderedPositions: new Int32Array(items.length),
     pairMass,
     pairEffectiveWeight,
     itemEffectiveWeight,
