@@ -10,8 +10,16 @@ import {
 import { rankingTuning, STOPPING_MODE_ORDER } from "../lib/ranking/strategy";
 import { createComparisonBenchmarkScenario } from "./comparison-fixture";
 
-const EXPECTED_FINGERPRINT: string = "d59bb47d36bf36e27951eb120ef73a939808e3eb37134132486d9b71e912326f";
+const EXPECTED_FINGERPRINTS: Record<number, string> = {
+  16: "4d379ab5608167a5e6adc85236a7c2a15a24481b703a3489c797dffb91d17236",
+  32: "db70312673fc16d7e5942b770a4d5cdd93f4883234a1430e120a38959f778dd2",
+  64: "d59bb47d36bf36e27951eb120ef73a939808e3eb37134132486d9b71e912326f",
+};
 const CHECKPOINT = 450;
+const requestedRolloutCount = Number(process.env.FORECAST_OPTIMIZATION_ROLLOUT_COUNT ?? 64);
+const ROLLOUT_COUNT = [16, 32, 64].includes(requestedRolloutCount)
+  ? requestedRolloutCount
+  : 64;
 
 function encoded(values: number[]) {
   return values.map((value) => Number.isFinite(value) ? String(value) : "inf").join(",");
@@ -41,6 +49,13 @@ function summary(result: StoppingTimesByMode) {
   }));
 }
 
+function prefix(result: StoppingTimesByMode, rolloutCount: number): StoppingTimesByMode {
+  return Object.fromEntries(STOPPING_MODE_ORDER.map((mode) => [
+    mode,
+    result[mode].slice(0, rolloutCount),
+  ])) as StoppingTimesByMode;
+}
+
 test("forecast optimization preserves the exact 64-path stopping times", () => {
   const scenario = createComparisonBenchmarkScenario();
   const tuning = rankingTuning("weak");
@@ -61,24 +76,36 @@ test("forecast optimization preserves the exact 64-path stopping times", () => {
     request.history,
     request.sessionId,
     prepared.active.diagnostics,
-    { ...prepared.active.options, rolloutCount: 64 },
-    64,
+    { ...prepared.active.options, rolloutCount: ROLLOUT_COUNT },
+    ROLLOUT_COUNT,
   );
   const startedAt = performance.now();
-  const result = forecastStoppingTimeRolloutsByMode(input, 0, 64);
+  const result = forecastStoppingTimeRolloutsByMode(input, 0, ROLLOUT_COUNT);
   const elapsedMs = performance.now() - startedAt;
   const actual = fingerprint(result);
-  const exactMatch = EXPECTED_FINGERPRINT === "baseline-pending"
-    || actual === EXPECTED_FINGERPRINT;
+  const expectedFingerprint = EXPECTED_FINGERPRINTS[ROLLOUT_COUNT];
+  const exactMatch = expectedFingerprint === "baseline-pending"
+    || actual === expectedFingerprint;
+  const modes = summary(result);
+  const quick = modes.quick;
   console.info(`FORECAST_OPTIMIZATION_RESULT ${JSON.stringify({
     fingerprint: actual,
-    expectedFingerprint: EXPECTED_FINGERPRINT,
+    expectedFingerprint,
     exactMatch,
     elapsedMs,
     checkpoint: CHECKPOINT,
     horizon: input.projectionHorizon,
-    rolloutCount: 64,
-    modes: summary(result),
+    rolloutCount: ROLLOUT_COUNT,
+    modes,
+    quickQuantileDeltaFrom64: {
+      p10: quick.p10 === null ? null : quick.p10 - 352,
+      p50: quick.p50 === null ? null : quick.p50 - 384,
+      p90: quick.p90 === null ? null : quick.p90 - 416,
+    },
+    prefixModes: Object.fromEntries([16, 32, 64].filter((count) => count <= ROLLOUT_COUNT).map((count) => [
+      count,
+      summary(prefix(result, count)),
+    ])),
   })}`);
   expect(exactMatch).toBe(true);
 }, 120_000);
