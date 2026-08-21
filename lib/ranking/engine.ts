@@ -661,6 +661,61 @@ export function summarizeRankingEvidence(
   };
 }
 
+interface ForecastEvidenceObservation {
+  leftSubjectId: number;
+  rightSubjectId: number;
+  outcome: "left" | "tie" | "right";
+  baseWeight: number;
+}
+
+interface ForecastEvidenceCache {
+  sessionId: string;
+  clusters: Map<string, ForecastEvidenceObservation[]>;
+  comparisons?: RankingComparisonInput[];
+}
+
+function createForecastEvidenceCache(
+  history: RankingHistoryInput[],
+  sessionId: string,
+): ForecastEvidenceCache {
+  const cache: ForecastEvidenceCache = { sessionId, clusters: new Map() };
+  for (const entry of history) appendForecastEvidence(cache, entry);
+  return cache;
+}
+
+function appendForecastEvidence(cache: ForecastEvidenceCache, entry: RankingHistoryInput) {
+  if (entry.sessionId !== cache.sessionId || entry.outcome === "skip") return;
+  const key = pairKey(entry.leftSubjectId, entry.rightSubjectId);
+  const cluster = cache.clusters.get(key) ?? [];
+  cluster.push({
+    leftSubjectId: entry.leftSubjectId,
+    rightSubjectId: entry.rightSubjectId,
+    outcome: entry.outcome,
+    baseWeight: sourceAgeWeight(entry),
+  });
+  cache.clusters.set(key, cluster);
+  cache.comparisons = undefined;
+}
+
+function forecastEvidenceComparisons(cache: ForecastEvidenceCache) {
+  if (cache.comparisons) return cache.comparisons;
+  const comparisons: RankingComparisonInput[] = [];
+  for (const cluster of cache.clusters.values()) {
+    const mass = cluster.reduce((sum, observation) => sum + observation.baseWeight, 0);
+    const multiplier = mass > 0 ? repeatedPairEffectiveSampleSize(mass) / mass : 0;
+    for (const observation of cluster) {
+      comparisons.push({
+        leftSubjectId: observation.leftSubjectId,
+        rightSubjectId: observation.rightSubjectId,
+        outcome: observation.outcome,
+        weight: observation.baseWeight * multiplier,
+      });
+    }
+  }
+  cache.comparisons = comparisons;
+  return comparisons;
+}
+
 function normalizedWinner(entry: Pick<RankingHistoryInput, "leftSubjectId" | "rightSubjectId" | "outcome">) {
   if (entry.outcome === "tie") return "tie";
   if (entry.outcome === "left") return String(entry.leftSubjectId);
@@ -2273,6 +2328,26 @@ export interface ForecastPosteriorCheckpoint {
   evidence: RankingEvidenceSummary;
 }
 
+function fitForecastPosteriorAtCheckpoint(
+  input: StoppingForecastRolloutInput,
+  comparisons: RankingComparisonInput[],
+  previousAbilities: Record<number, number>,
+  rolloutSeed: number,
+  answerIndex: number,
+) {
+  return fitModel(input.items, comparisons, previousAbilities, {
+    priorStrength: input.priorStrength,
+    priorScale: input.priorScale,
+    posteriorSampleCount: Math.max(8, input.forecastSamples.length),
+    randomSeed: hash([
+      input.posteriorRandomSeed,
+      rolloutSeed,
+      answerIndex,
+      "exact-forecast-checkpoint",
+    ].join(":")),
+  });
+}
+
 /**
  * Rebuild a rollout's global MAP and Laplace posterior before evaluating a
  * stopping event. Sequential pairwise moment updates remain useful between
@@ -2287,17 +2362,9 @@ export function rebuildForecastPosteriorAtCheckpoint(
   answerIndex: number,
 ): ForecastPosteriorCheckpoint {
   const evidence = summarizeRankingEvidence(history, input.sessionId);
-  const fit = fitModel(input.items, evidence.comparisons, previousAbilities, {
-    priorStrength: input.priorStrength,
-    priorScale: input.priorScale,
-    posteriorSampleCount: Math.max(8, input.forecastSamples.length),
-    randomSeed: hash([
-      input.posteriorRandomSeed,
-      rolloutSeed,
-      answerIndex,
-      "exact-forecast-checkpoint",
-    ].join(":")),
-  });
+  const fit = fitForecastPosteriorAtCheckpoint(
+    input, evidence.comparisons, previousAbilities, rolloutSeed, answerIndex,
+  );
   return { fit, evidence };
 }
 
@@ -2316,6 +2383,7 @@ function simulateForecastRollout(
   );
   const indexById = new Map(input.items.map((item, index) => [item.subjectId, index]));
   const history = input.history.slice();
+  const forecastEvidence = createForecastEvidenceCache(history, input.sessionId);
   let acceptedComparisons = input.acceptedComparisons;
   const selectionCache = createPairSelectionCache(
     input.items, history, input.sessionId, acceptedComparisons,
@@ -2439,6 +2507,7 @@ function simulateForecastRollout(
     );
     history.push(historyRecord);
     appendPairSelectionHistory(selectionCache, historyRecord);
+    appendForecastEvidence(forecastEvidence, historyRecord);
     answersSinceExactRefresh += 1;
     const checkNow = shouldCheckForecastStopping(
       answerIndex,
@@ -2463,12 +2532,15 @@ function simulateForecastRollout(
           optimizerConverged,
           stoppingTimes,
         )) continue;
-      const refreshed = rebuildForecastPosteriorAtCheckpoint(
-        input, history, fit.abilities, rolloutSeed, answerIndex,
+      fit = fitForecastPosteriorAtCheckpoint(
+        input,
+        forecastEvidenceComparisons(forecastEvidence),
+        fit.abilities,
+        rolloutSeed,
+        answerIndex,
       );
-      fit = refreshed.fit;
       fit.acceptedComparisons = acceptedComparisons;
-      fit.effectiveComparisons = refreshed.evidence.evidenceCount;
+      fit.effectiveComparisons = evidenceCount;
       posteriorSamples = fit.posteriorSamples;
       tieLogSamples = fit.tieLogSamples?.length === posteriorSamples.length
         ? fit.tieLogSamples
@@ -2478,9 +2550,6 @@ function simulateForecastRollout(
       fit.tieLogSamples = tieLogSamples;
       optimizerConverged = fit.converged;
       answersSinceExactRefresh = 0;
-      evidenceCount = refreshed.evidence.evidenceCount;
-      uniquePairCount = refreshed.evidence.uniquePairCount;
-      coveredItemCount = refreshed.evidence.coveredItemCount;
       input.items.forEach((item, itemIndex) => {
         abilities[itemIndex] = fit.abilities[item.subjectId] ?? 0;
       });
