@@ -209,7 +209,7 @@ test.describe("移动端 UI/UX", () => {
     for (const viewport of mobileViewports) {
       await page.setViewportSize(viewport);
       await expectNoHorizontalOverflow(page);
-      const navMetrics = await page.locator(".sidebar nav").evaluate((nav) => [...nav.querySelectorAll<HTMLElement>("button, summary")].map((element) => {
+      const navMetrics = await page.locator(".sidebar nav").evaluate((nav) => [...nav.querySelectorAll<HTMLElement>(":scope > button, :scope > details > summary")].map((element) => {
         const rect = element.getBoundingClientRect();
         return { width: rect.width, height: rect.height, right: rect.right };
       }));
@@ -249,6 +249,35 @@ test.describe("移动端 UI/UX", () => {
     await page.getByRole("button", { name: "查看诊断" }).click();
     await expect(page.getByRole("button", { name: "收起诊断" })).toBeVisible();
     await expect(page.locator("#compare-diagnostics")).toBeVisible();
+    const expandedDiagnostics = await page.evaluate(() => {
+      const panel = document.querySelector<HTMLElement>("#compare-diagnostics")!;
+      const evidence = panel.querySelector<HTMLElement>(".progress-evidence")!;
+      const coverage = panel.querySelector<HTMLElement>(".progress-coverage")!;
+      const track = panel.querySelector<HTMLElement>(".progress-track")!;
+      const rows = [...panel.querySelectorAll<HTMLElement>(".forecast-row > span")];
+      return {
+        display: getComputedStyle(panel).display,
+        evidenceBottom: evidence.getBoundingClientRect().bottom,
+        coverageTop: coverage.getBoundingClientRect().top,
+        coverageBottom: coverage.getBoundingClientRect().bottom,
+        trackTop: track.getBoundingClientRect().top,
+        rows: rows.map((row) => ({
+          display: getComputedStyle(row).display,
+          left: row.getBoundingClientRect().left,
+          right: row.getBoundingClientRect().right,
+          panelLeft: panel.getBoundingClientRect().left,
+          panelRight: panel.getBoundingClientRect().right,
+        })),
+      };
+    });
+    expect(expandedDiagnostics.display).toBe("grid");
+    expect(expandedDiagnostics.coverageTop).toBeGreaterThan(expandedDiagnostics.evidenceBottom);
+    expect(expandedDiagnostics.trackTop).toBeGreaterThan(expandedDiagnostics.coverageBottom);
+    for (const row of expandedDiagnostics.rows) {
+      expect(row.display).toBe("grid");
+      expect(row.left).toBeGreaterThanOrEqual(row.panelLeft);
+      expect(row.right).toBeLessThanOrEqual(row.panelRight);
+    }
     await page.getByRole("button", { name: "收起诊断" }).click();
 
     const compareMetrics = await page.evaluate(() => {
@@ -282,17 +311,48 @@ test.describe("移动端 UI/UX", () => {
     await expect(page.locator(".ranking-cards")).toBeVisible();
     await expect(page.locator(".ranking-table-wrap")).toBeHidden();
     await expectNoHorizontalOverflow(page);
+    const bucketBoundaries = await page.evaluate(() => {
+      const list = document.querySelector<HTMLOListElement>(".ranking-cards")!;
+      const entries = [...list.children] as HTMLElement[];
+      const cards = entries.filter((entry) => entry.classList.contains("ranking-card"));
+      const expected = cards.slice(1).filter((card, index) => card.dataset.scoreBucket !== cards[index].dataset.scoreBucket).length;
+      const separators = entries.filter((entry) => entry.classList.contains("ranking-bucket-divider"));
+      return {
+        expected,
+        actual: separators.length,
+        valid: separators.every((separator) => {
+          const previous = separator.previousElementSibling as HTMLElement | null;
+          const next = separator.nextElementSibling as HTMLElement | null;
+          return previous?.classList.contains("ranking-card")
+            && next?.classList.contains("ranking-card")
+            && previous.dataset.scoreBucket !== next.dataset.scoreBucket
+            && separator.textContent?.includes(next.dataset.scoreBucket ?? "");
+        }),
+      };
+    });
+    expect(bucketBoundaries.actual).toBeGreaterThan(0);
+    expect(bucketBoundaries.actual).toBe(bucketBoundaries.expected);
+    expect(bucketBoundaries.valid).toBe(true);
     const rankingPlacement = await page.evaluate(() => ({
       cardsTop: document.querySelector<HTMLElement>(".ranking-cards")?.getBoundingClientRect().top ?? Infinity,
       managerTop: document.querySelector<HTMLElement>(".comparison-manager")?.getBoundingClientRect().top ?? Infinity,
       dangerTop: document.querySelector<HTMLElement>(".rating-write-danger")?.getBoundingClientRect().top ?? Infinity,
       externalLinkHeight: document.querySelector<HTMLElement>(".ranking-card-main > a")?.getBoundingClientRect().height ?? 0,
       detailsHeight: document.querySelector<HTMLElement>(".ranking-card details summary")?.getBoundingClientRect().height ?? 0,
+      titleBounds: [...document.querySelectorAll<HTMLElement>(".ranking-card-main .title-cell > div")].map((title) => ({
+        right: title.getBoundingClientRect().right,
+        cardRight: title.closest<HTMLElement>(".ranking-card")?.getBoundingClientRect().right ?? Infinity,
+        overflow: getComputedStyle(title).overflow,
+      })),
     }));
     expect(rankingPlacement.managerTop).toBeLessThan(rankingPlacement.cardsTop);
     expect(rankingPlacement.dangerTop).toBeLessThan(rankingPlacement.cardsTop);
     expect(rankingPlacement.externalLinkHeight).toBeGreaterThanOrEqual(44);
     expect(rankingPlacement.detailsHeight).toBeGreaterThanOrEqual(44);
+    for (const title of rankingPlacement.titleBounds) {
+      expect(title.right).toBeLessThanOrEqual(title.cardRight + 0.5);
+      expect(title.overflow).toBe("hidden");
+    }
 
     await page.getByRole("button", { name: "继续比较" }).click();
     await page.getByRole("button", { name: "暂停并返回收藏" }).click();

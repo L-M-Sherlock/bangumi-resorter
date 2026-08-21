@@ -7,6 +7,7 @@ import {
   useState,
   type PointerEvent as ReactPointerEvent,
 } from "react";
+import { ThemedSelect, type ThemedSelectOption } from "@/app/ThemedSelect";
 import {
   analysisCheckpointsForHistory,
   analysisForecastBacktest,
@@ -54,6 +55,14 @@ const DISTRIBUTION_LABELS: Record<SortingSession["distribution"]["preset"], stri
   "reverse-j": "反 J",
   custom: "自定义",
 };
+const ANALYSIS_PRIOR_OPTIONS: ThemedSelectOption<PriorMode>[] = [
+  { value: "weak", label: "弱先验" },
+  { value: "strong", label: "强先验" },
+];
+const ANALYSIS_BUDGET_OPTIONS: ThemedSelectOption<ComparisonBudgetMode>[] = STOPPING_MODE_ORDER.map((mode) => ({
+  value: mode,
+  label: BUDGET_MODE_COPY[mode].label,
+}));
 
 export interface AnalysisTaskState {
   status: "idle" | "running" | "complete" | "error" | "cancelled";
@@ -425,8 +434,8 @@ export function SessionAnalysisView({
     <header className="page-header analysis-header">
       <div><span className="eyebrow">当前会话 · 会话分析</span><h1 id="analysis-title">{session.title}</h1><p>{items.length} 部作品 · {live.rawEvidence} 条原始判断 · {formatCount(live.effectiveEvidence)} 条有效证据</p><p>{PRIOR_MODE_COPY[priorMode].label} · {session.distribution.levelCount} 档 {DISTRIBUTION_LABELS[session.distribution.preset]}分布 · 实际后验样本 {live.posteriorSampleCount}</p></div>
       <div className="header-actions analysis-header-actions">
-        <label><span>旧评分先验</span><select className="header-select" value={priorMode} disabled={busy} onChange={(event) => void onPriorMode(event.target.value as PriorMode)}><option value="weak">弱先验</option><option value="strong">强先验</option></select></label>
-        <label><span>停止模式</span><select className="header-select" value={budgetMode} disabled={busy} onChange={(event) => void onMode(event.target.value as ComparisonBudgetMode)}>{STOPPING_MODE_ORDER.map((mode) => <option key={mode} value={mode}>{BUDGET_MODE_COPY[mode].label}</option>)}</select></label>
+        <div className="analysis-select-field"><span>旧评分先验</span><ThemedSelect id="analysis-prior-mode" value={priorMode} options={ANALYSIS_PRIOR_OPTIONS} ariaLabel="旧评分先验" menuLabel="旧评分先验选项" disabled={busy} alignMenu="end" triggerClassName="header-select" title={PRIOR_MODE_COPY[priorMode].description} onChange={onPriorMode} /></div>
+        <div className="analysis-select-field"><span>停止模式</span><ThemedSelect id="analysis-budget-mode" value={budgetMode} options={ANALYSIS_BUDGET_OPTIONS} ariaLabel="停止模式" menuLabel="停止模式选项" disabled={busy} alignMenu="end" triggerClassName="header-select" title={BUDGET_MODE_COPY[budgetMode].description} onChange={onMode} /></div>
         <button type="button" className="outline-button" onClick={onResults}>返回结果</button>
         <button type="button" className="primary-button compact" onClick={onCompare}>继续比较</button>
       </div>

@@ -391,6 +391,8 @@ test("mobile backup wizard and project switcher remain usable", async ({ page })
   await dialog.getByRole("button", { name: "继续最终确认" }).click();
   await expect(dialog.getByRole("button", { name: "创建完整项目" })).toBeVisible();
   await dialog.getByRole("button", { name: "创建完整项目" }).click();
+  await expect(page.locator("#mobile-project-switcher")).toBeHidden();
+  await page.getByRole("button", { name: "更多导航" }).click();
   await expect(page.locator("#mobile-project-switcher")).toBeVisible();
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(0);

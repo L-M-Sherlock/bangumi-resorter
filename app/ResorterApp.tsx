@@ -4,6 +4,7 @@
 import { FormEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { Term } from "@/app/Term";
 import { ThemeToggle } from "@/app/ThemeToggle";
+import { ThemedSelect, type ThemedSelectOption } from "@/app/ThemedSelect";
 import { SessionAnalysisView, type AnalysisTaskState } from "@/app/SessionAnalysisView";
 import { sessionAnalysisContext, type SessionAnalysisContext } from "@/lib/analysis";
 import { AnalysisWorkerClient } from "@/lib/analysis/worker-client";
@@ -389,6 +390,11 @@ function Shell({ view, onNavigate, profile, snapshot, projects, onSwitchSnapshot
           <details className="mobile-nav-more">
             <summary role="button" aria-label="更多导航" title="更多导航"><span className="nav-icon" aria-hidden="true">•••</span><span className="nav-label">更多</span></summary>
             <div className="mobile-nav-menu">
+              {profile && snapshot && <div className="mobile-project-switcher">
+                <span className="mobile-project-label">当前项目与收藏快照</span>
+                <ThemedSelect id="mobile-project-switcher" value={snapshot.id} options={projectOptions} ariaLabel="切换本地项目与收藏快照" menuLabel="本地项目与收藏快照选项" onChange={onSwitchSnapshot} />
+                <button type="button" className={`snapshot-delete-link${currentIsLegacyClone ? " legacy-clone-delete-link" : ""}`} onClick={() => onDeleteSnapshot(snapshot.id)}>{currentIsLegacyClone ? "删除这个旧导入副本" : "删除当前快照"}</button>
+              </div>}
               <a href={sitePath("/principles")}><span aria-hidden="true">§</span><span>排序原理</span></a>
               <a href={GITHUB_REPOSITORY_URL} target="_blank" rel="noreferrer"><span aria-hidden="true">★</span><span>GitHub Star</span></a>
             </div>
@@ -403,7 +409,6 @@ function Shell({ view, onNavigate, profile, snapshot, projects, onSwitchSnapshot
           <ThemedSelect id="local-project-switcher" value={snapshot.id} options={projectOptions} ariaLabel="本地项目与收藏快照" menuLabel="本地项目与收藏快照选项" onChange={onSwitchSnapshot} />
           <button type="button" className={`snapshot-delete-link${currentIsLegacyClone ? " legacy-clone-delete-link" : ""}`} onClick={() => onDeleteSnapshot(snapshot.id)}>{currentIsLegacyClone ? "删除这个旧导入副本" : "删除当前快照"}</button>
         </div>}
-        {profile && snapshot && <div className="mobile-project-switcher"><ThemedSelect id="mobile-project-switcher" value={snapshot.id} options={projectOptions} ariaLabel="切换本地项目与收藏快照" menuLabel="本地项目与收藏快照选项" onChange={onSwitchSnapshot} /><button type="button" className={`snapshot-delete-link${currentIsLegacyClone ? " legacy-clone-delete-link" : ""}`} onClick={() => onDeleteSnapshot(snapshot.id)}>{currentIsLegacyClone ? "删除这个旧导入副本" : "删除当前快照"}</button></div>}
         <div className="sidebar-note"><span className="status-dot" /><div><strong>排序数据仅存于本机</strong><small>默认只读；确认后才会写回</small></div></div>
         <ThemeToggle />
       </aside>
@@ -863,196 +868,6 @@ const SCORE_LEVEL_OPTIONS = Array.from(
   { length: MAX_SCORE_LEVELS - MIN_SCORE_LEVELS + 1 },
   (_, index) => MIN_SCORE_LEVELS + index,
 );
-
-interface ThemedSelectOption<Value extends string> {
-  value: Value;
-  label: string;
-  group?: string;
-}
-
-function ThemedSelect<Value extends string>({
-  id,
-  value,
-  options,
-  ariaLabel,
-  menuLabel,
-  disabled = false,
-  compact = false,
-  alignMenu = "start",
-  rootClassName,
-  triggerClassName,
-  title,
-  onChange,
-}: {
-  id: string;
-  value: Value;
-  options: readonly ThemedSelectOption<Value>[];
-  ariaLabel: string;
-  menuLabel?: string;
-  disabled?: boolean;
-  compact?: boolean;
-  alignMenu?: "start" | "end";
-  rootClassName?: string;
-  triggerClassName?: string;
-  title?: string;
-  onChange: (value: Value) => void | Promise<void>;
-}) {
-  const selectedIndex = Math.max(0, options.findIndex((option) => option.value === value));
-  const selectedOption = options[selectedIndex];
-  const [open, setOpen] = useState(false);
-  const [activeIndex, setActiveIndex] = useState(selectedIndex);
-  const [opensUpward, setOpensUpward] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const listboxId = `${id}-options`;
-
-  useEffect(() => {
-    if (!open) return;
-    const frame = requestAnimationFrame(() => optionRefs.current[activeIndex]?.focus());
-    return () => cancelAnimationFrame(frame);
-  }, [activeIndex, open]);
-
-  useEffect(() => {
-    if (!open) return;
-    function handlePointerDown(event: PointerEvent) {
-      if (event.target instanceof Node && !rootRef.current?.contains(event.target)) setOpen(false);
-    }
-    document.addEventListener("pointerdown", handlePointerDown);
-    return () => document.removeEventListener("pointerdown", handlePointerDown);
-  }, [open]);
-
-  function normalizedIndex(index: number) {
-    return (index + options.length) % options.length;
-  }
-
-  function focusOption(index: number) {
-    setActiveIndex(normalizedIndex(index));
-  }
-
-  function openMenu(index = selectedIndex) {
-    if (disabled || options.length === 0) return;
-    const bounds = rootRef.current?.getBoundingClientRect();
-    if (bounds) {
-      const estimatedHeight = Math.min(360, options.length * 44 + 12);
-      const spaceBelow = window.innerHeight - bounds.bottom - 12;
-      const spaceAbove = bounds.top - 12;
-      setOpensUpward(spaceBelow < estimatedHeight && spaceAbove > spaceBelow);
-    }
-    setActiveIndex(normalizedIndex(index));
-    setOpen(true);
-  }
-
-  function closeMenu(restoreFocus = false) {
-    setOpen(false);
-    if (restoreFocus) requestAnimationFrame(() => triggerRef.current?.focus());
-  }
-
-  function choose(option: ThemedSelectOption<Value>) {
-    closeMenu(true);
-    if (option.value !== value) void onChange(option.value);
-  }
-
-  function handleTriggerKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>) {
-    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-      event.preventDefault();
-      if (open) focusOption(activeIndex + (event.key === "ArrowDown" ? 1 : -1));
-      else openMenu(selectedIndex);
-    } else if ((event.key === "Enter" || event.key === " ") && !open) {
-      event.preventDefault();
-      openMenu(selectedIndex);
-    } else if (event.key === "Home") {
-      event.preventDefault();
-      openMenu(0);
-    } else if (event.key === "End") {
-      event.preventDefault();
-      openMenu(options.length - 1);
-    } else if (event.key === "Escape" && open) {
-      event.preventDefault();
-      closeMenu();
-    }
-  }
-
-  function handleOptionKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>, index: number) {
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      focusOption(index + 1);
-    } else if (event.key === "ArrowUp") {
-      event.preventDefault();
-      focusOption(index - 1);
-    } else if (event.key === "Home") {
-      event.preventDefault();
-      focusOption(0);
-    } else if (event.key === "End") {
-      event.preventDefault();
-      focusOption(options.length - 1);
-    } else if (event.key === "Escape") {
-      event.preventDefault();
-      closeMenu(true);
-    } else if (event.key === "Tab") {
-      closeMenu();
-    }
-  }
-
-  if (!selectedOption) return null;
-
-  const rootClasses = [
-    "themed-select",
-    compact ? "compact" : "",
-    alignMenu === "end" ? "align-end" : "",
-    opensUpward ? "opens-upward" : "",
-    open ? "open" : "",
-    rootClassName ?? "",
-  ].filter(Boolean).join(" ");
-
-  return <div
-    ref={rootRef}
-    className={rootClasses}
-    data-themed-select={id}
-    onBlur={(event) => {
-      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) closeMenu();
-    }}
-  >
-    <button
-      id={id}
-      ref={triggerRef}
-      className={`themed-select-trigger${triggerClassName ? ` ${triggerClassName}` : ""}`}
-      type="button"
-      data-value={value}
-      aria-label={ariaLabel}
-      aria-haspopup="listbox"
-      aria-expanded={open}
-      aria-controls={listboxId}
-      disabled={disabled}
-      title={title}
-      onClick={() => open ? closeMenu() : openMenu()}
-      onKeyDown={handleTriggerKeyDown}
-    >
-      <span className="themed-select-value">{selectedOption.label}</span>
-      <span className="themed-select-chevron" aria-hidden="true">⌄</span>
-    </button>
-    {open && <div id={listboxId} className="themed-select-menu" role="listbox" aria-label={menuLabel ?? `${ariaLabel}选项`}>
-      {options.map((option, index) => <Fragment key={option.value}>
-        {option.group && option.group !== options[index - 1]?.group && <div className="themed-select-group" aria-hidden="true">{option.group}</div>}
-        <button
-          ref={(element) => { optionRefs.current[index] = element; }}
-          className={`themed-select-option${activeIndex === index ? " active" : ""}`}
-          type="button"
-          data-value={option.value}
-          role="option"
-          aria-selected={option.value === value}
-          tabIndex={activeIndex === index ? 0 : -1}
-          onMouseEnter={() => setActiveIndex(index)}
-          onClick={() => choose(option)}
-          onKeyDown={(event) => handleOptionKeyDown(event, index)}
-        >
-          <span>{option.label}</span>
-          <span className="themed-select-check" aria-hidden="true">{option.value === value ? "✓" : ""}</span>
-        </button>
-      </Fragment>)}
-    </div>}
-  </div>;
-}
 
 const SCORE_LEVEL_SELECT_OPTIONS = SCORE_LEVEL_OPTIONS.map((levelCount) => ({
   value: String(levelCount),
@@ -1630,7 +1445,15 @@ function CompareView({ state, busy, scoresVisible, onToggleScores, onMode, onPri
   return <>
     <header className="topbar compare-header"><div><span className="eyebrow">{SUBJECT_TYPES[state.session.subjectType]} · {PRIOR_MODE_COPY[priorMode].label} · {BUDGET_MODE_COPY[budgetMode].label}停止 · <Term term="score-bucket">{scoreLevelCount} 档</Term> · {state.session.title}</span><h1>哪一部在你的偏好中更靠前？</h1></div><div className="header-actions"><PriorModeSelect id="compare-prior-mode" value={priorMode} busy={busy} onChange={onPriorMode} /><InferenceModeSelect id="compare-budget-mode" value={budgetMode} busy={busy} onChange={onMode} /><button className="ghost-button" onClick={onToggleScores}>{scoresVisible ? "隐藏评分" : "显示评分"}</button></div></header>
     <button className="mobile-diagnostics-toggle" type="button" aria-expanded={diagnosticsOpen} aria-controls="compare-diagnostics" onClick={() => setDiagnosticsOpen((value) => !value)}><span>有效证据 {formatEvidence(effectiveEvidenceCount)} 次 · 覆盖 {Math.round(toleranceCoverage)}%</span><span>{diagnosticsOpen ? "收起诊断" : "查看诊断"}</span></button>
-    <div className="progress-row dynamic-progress" id="compare-diagnostics"><div className="progress-copy"><span>有效证据 <strong>{formatEvidence(effectiveEvidenceCount)}</strong> 次（新回答 {newlyAnswered} · 导入 {importedAccepted}{evidenceAdjusted ? ` · 原始判断 ${currentSessionAccepted}` : ""}）</span><span><Term term="adjacent-tolerance">后验期望相邻容差覆盖</Term> <strong>{Math.round(toleranceCoverage)}%</strong></span><span><Term term="maximum-displacement">最坏偏移中位数</Term> <strong>{maxBucketDisplacementValue(diagnostics)}</strong></span></div><div className="progress-track" aria-label={`后验期望相邻容差覆盖 ${Math.round(toleranceCoverage)}%`}><span style={{ width: `${toleranceCoverage}%` }} /></div><div className="forecast-row"><span><Term term="cross-two-buckets">跨两档作品分布</Term> <strong><Term term="posterior-interval">{crossTwoBucketInterval(diagnostics)}</Term></strong></span><span><Term term="maximum-displacement">最坏偏移分布</Term> <strong>{maxBucketDisplacementInterval(diagnostics)}</strong></span><span><Term term="dynamic-forecast">动态剩余预测</Term> <strong>{forecastRange(diagnostics)}</strong></span></div></div>
+    <div className="progress-row dynamic-progress" id="compare-diagnostics">
+      <div className="progress-copy">
+        <span className="progress-evidence">有效证据 <strong>{formatEvidence(effectiveEvidenceCount)}</strong> 次（新回答 {newlyAnswered} · 导入 {importedAccepted}{evidenceAdjusted ? ` · 原始判断 ${currentSessionAccepted}` : ""}）</span>
+        <span className="progress-coverage"><Term term="adjacent-tolerance">后验期望相邻容差覆盖</Term> <strong>{Math.round(toleranceCoverage)}%</strong></span>
+        <span className="progress-displacement"><Term term="maximum-displacement">最坏偏移中位数</Term> <strong>{maxBucketDisplacementValue(diagnostics)}</strong></span>
+      </div>
+      <div className="progress-track" aria-label={`后验期望相邻容差覆盖 ${Math.round(toleranceCoverage)}%`}><span style={{ width: `${toleranceCoverage}%` }} /></div>
+      <div className="forecast-row"><span><Term term="cross-two-buckets">跨两档作品分布</Term> <strong><Term term="posterior-interval">{crossTwoBucketInterval(diagnostics)}</Term></strong></span><span><Term term="maximum-displacement">最坏偏移分布</Term> <strong>{maxBucketDisplacementInterval(diagnostics)}</strong></span><span><Term term="dynamic-forecast">动态剩余预测</Term> <strong>{forecastRange(diagnostics)}</strong></span></div>
+    </div>
     {newlyAnswered > 0 && newlyAnswered % 20 === 0 && <Notice tone="warning">你已经在本会话新完成 {newlyAnswered} 次判断，建议现在下载一次 JSON 备份。</Notice>}
     {targetReady && <Notice tone="success">当前{BUDGET_MODE_COPY[budgetMode].label}停止条件已达标：至少 {percent(activeStoppingCheck?.target ?? stoppingCoverageTarget(budgetMode))} 的作品最多偏移一档这一<Term term="posterior">后验事件</Term>的 90% MC 下界已达到 {percent(activeStoppingCheck?.probabilityTarget ?? STOPPING_PROBABILITY_TARGET)}。可以导出结果，也可以继续比较。</Notice>}
     {!state.model.converged && <Notice tone="warning">排序优化器未收敛（{state.model.optimizationStatus ?? "状态未知"}）；当前排序仅供诊断，系统已禁止报告达标和有限剩余题量。</Notice>}
@@ -1638,13 +1461,13 @@ function CompareView({ state, busy, scoresVisible, onToggleScores, onMode, onPri
     {!targetReady && diagnostics && diagnostics.evidenceCount < diagnostics.evidenceRequired && <Notice>至少需要 {formatEvidence(diagnostics.evidenceRequired)} 次相关性修正后的有效证据；目前为 {formatEvidence(diagnostics.evidenceCount)} 次。</Notice>}
     {!targetReady && activeStoppingCheck?.evidenceSatisfied && !activeStoppingCheck.uniquePairsSatisfied && <Notice>停止条件至少需要 {activeStoppingCheck.uniquePairRequired} 个有效唯一作品对；目前为 {diagnostics?.uniquePairCount ?? 0} 个。</Notice>}
     {!targetReady && activeStoppingCheck?.evidenceSatisfied && activeStoppingCheck.uniquePairsSatisfied && !activeStoppingCheck.itemCoverageSatisfied && <Notice>当前模式至少需要 {activeStoppingCheck.coveredItemRequired} 部作品获得有效比较覆盖；目前为 {diagnostics?.coveredItemCount ?? 0} 部。</Notice>}
-    {calibrationAvailable && <Notice><Term term="calibration-repeat">校准复问</Term> {diagnostics?.calibration.consistent}/{diagnostics?.calibration.completed} 次一致；<Term term="posterior">后验一致率</Term> {percent(diagnostics?.calibration.posteriorMean)}，<Term term="posterior-interval">80% 区间</Term> {percent(diagnostics?.calibration.credibleLow)}–{percent(diagnostics?.calibration.credibleHigh)}。一致率仅作波动诊断；复问答案会作为同一作品对的相关重复证据折权入模。</Notice>}
     <section className={`comparison-stage ${busy ? "busy" : ""}`} aria-busy={busy}>
       <MediaCard item={left} newRate={rankedBySubjectId.get(left.subjectId)?.newRate ?? left.rate} side="left" scoreLevelCount={scoreLevelCount} showScore={scoresVisible} disabled={busy} onChoose={() => onAnswer("left")} />
       <div className="versus" aria-hidden="true"><span>{busy ? "…" : "VS"}</span></div>
       <MediaCard item={right} newRate={rankedBySubjectId.get(right.subjectId)?.newRate ?? right.rate} side="right" scoreLevelCount={scoreLevelCount} showScore={scoresVisible} disabled={busy} onChoose={() => onAnswer("right")} />
     </section>
     <div className="secondary-actions"><button disabled={busy} onClick={() => onAnswer("tie")}><span>＝</span>差不多喜欢 <kbd>↑</kbd></button><button disabled={busy} onClick={() => onAnswer("skip")}><span>↷</span>这次跳过 <kbd>↓</kbd></button><button disabled={busy} onClick={onUndo} title="快捷键：Ctrl+Z（Windows / Linux）或 ⌘Z（macOS）"><span>↶</span>撤销上次 <kbd>⌘/Ctrl Z</kbd></button></div>
+    {calibrationAvailable && <Notice><Term term="calibration-repeat">校准复问</Term> {diagnostics?.calibration.consistent}/{diagnostics?.calibration.completed} 次一致；<Term term="posterior">后验一致率</Term> {percent(diagnostics?.calibration.posteriorMean)}，<Term term="posterior-interval">80% 区间</Term> {percent(diagnostics?.calibration.credibleLow)}–{percent(diagnostics?.calibration.credibleHigh)}。一致率仅作波动诊断；复问答案会作为同一作品对的相关重复证据折权入模。</Notice>}
     <footer className="session-footer"><span><Term term="prior">{PRIOR_MODE_COPY[priorMode].label}</Term> · <Term term="inference-mode">{BUDGET_MODE_COPY[budgetMode].label}停止</Term>：{BUDGET_MODE_COPY[budgetMode].description}</span><div><button onClick={onResults}>查看当前结果</button><button onClick={onPause}>暂停并返回收藏</button></div></footer>
   </>;
 }
@@ -2087,8 +1910,11 @@ function newScorePillLabel(item: Pick<RankedItem, "rate" | "newRate">, scoreLeve
 }
 
 function MobileRankingCards({ items, scoreLevelCount }: { items: RankedItem[]; scoreLevelCount: number }) {
-  return <ol className="ranking-cards" aria-label="移动端排名结果">{items.map((item) =>
-    <li className="ranking-card" key={item.subjectId}>
+  return <ol className="ranking-cards" aria-label="移动端排名结果">{items.map((item, index) => {
+    const bucketStart = index > 0 && items[index - 1].newRate !== item.newRate;
+    return <Fragment key={item.subjectId}>
+      {bucketStart && <li className="ranking-bucket-divider" role="separator" aria-label={`新评分 ${item.newRate} 分档开始`}><span>新评分 {item.newRate} 分档</span></li>}
+      <li className="ranking-card" data-score-bucket={item.newRate}>
       <div className="ranking-card-main">
         <strong className="ranking-card-rank">#{item.rank}</strong>
         <div className="title-cell"><Poster item={item} /><div><strong>{primaryName(item)}</strong><small>{item.nameCn ? item.name : (item.date?.slice(0, 4) || "") + " · " + SUBJECT_TYPES[item.subjectType]}</small></div></div>
@@ -2100,7 +1926,9 @@ function MobileRankingCards({ items, scoreLevelCount }: { items: RankedItem[]; s
         <span>稳定度 <strong>{item.bucketStability === undefined ? "—" : percent(item.bucketStability)}</strong></span>
       </div>
       <details><summary>模型细节</summary><dl><div><dt>连续潜在分数</dt><dd>{item.ability.toFixed(3)}</dd></div><div><dt>后验标准差</dt><dd>{item.uncertainty.toFixed(3)}</dd></div></dl></details>
-    </li>)}</ol>;
+      </li>
+    </Fragment>;
+  })}</ol>;
 }
 
 function ResultsView({ state, sessions, username, busy, onBack, onAnalysis, onMode, onPriorMode, onDistribution, onExportCsv, onAddComparison, onDeleteComparison, onImportComparison, onResync }: {

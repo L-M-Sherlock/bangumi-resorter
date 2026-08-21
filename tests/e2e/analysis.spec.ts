@@ -65,11 +65,14 @@ test("current session analysis exposes six linked charts and resumable history c
   await page.locator("input[type='range']").fill("0");
   await expect(page.getByText("第 0 条判断", { exact: true })).toBeVisible();
 
-  await page.getByLabel("停止模式").selectOption("thorough");
-  await expect(page.getByLabel("停止模式")).toHaveValue("thorough");
+  await expect(page.locator(".analysis-header-actions select")).toHaveCount(0);
+  await page.locator("#analysis-budget-mode").click();
+  await page.getByRole("listbox", { name: "停止模式选项" }).getByRole("option", { name: "精细", exact: true }).click();
+  await expect(page.locator("#analysis-budget-mode")).toHaveAttribute("data-value", "thorough");
   await expect(page.locator(".analysis-chart-card").filter({ hasText: "三档停止下界" })).toContainText("精细（当前）");
-  await page.getByLabel("旧评分先验").selectOption("strong");
-  await expect(page.getByLabel("旧评分先验")).toHaveValue("strong");
+  await page.locator("#analysis-prior-mode").click();
+  await page.getByRole("listbox", { name: "旧评分先验选项" }).getByRole("option", { name: "强先验", exact: true }).click();
+  await expect(page.locator("#analysis-prior-mode")).toHaveAttribute("data-value", "strong");
   await expect(page.getByText(/强先验 · 10 档/)).toBeVisible();
 
   await page.getByRole("button", { name: "返回结果" }).click();
