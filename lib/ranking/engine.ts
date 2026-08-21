@@ -63,6 +63,10 @@ export interface FitResult {
   posteriorSamples: Float64Array[];
   /** Joint Laplace draws of log(nu), aligned with posteriorSamples. */
   tieLogSamples?: Float64Array;
+  /** Fit configuration retained for exact forecast checkpoint refreshes. */
+  priorStrength?: number;
+  priorScale?: number;
+  posteriorRandomSeed?: number;
 }
 
 export interface FitOptions {
@@ -411,6 +415,9 @@ export function fitModel(
       iterations: 0, acceptedComparisons: 0, effectiveComparisons: 0,
       tieStrength: DEFAULT_TIE_STRENGTH, optimizationStatus: "converged", posteriorSamples: [],
       tieLogSamples: new Float64Array(),
+      priorStrength: Math.max(1e-6, options.priorStrength ?? DEFAULT_PRIOR_STRENGTH),
+      priorScale: Math.max(0, options.priorScale ?? DEFAULT_PRIOR_SCALE),
+      posteriorRandomSeed: options.randomSeed ?? 0x5eed1234,
     };
   }
   const indexById = new Map(items.map((item, index) => [item.subjectId, index]));
@@ -530,6 +537,9 @@ export function fitModel(
     optimizationStatus,
     posteriorSamples,
     tieLogSamples: posterior.tieLogSamples,
+    priorStrength,
+    priorScale,
+    posteriorRandomSeed: options.randomSeed ?? 0x5eed1234,
   };
 }
 
@@ -1381,6 +1391,10 @@ export interface StoppingForecastRolloutInput {
   acceptedComparisons: number;
   tieStrength: number;
   optimizerConverged: boolean;
+  /** The production fit configuration used to rebuild path posteriors. */
+  priorStrength: number;
+  priorScale: number;
+  posteriorRandomSeed: number;
   evidenceRequired: number;
   uniquePairRequired: number;
   pairMass: Record<string, number>;
@@ -2076,6 +2090,39 @@ function refreshForecastSelectionDiagnostics(
   return { ...previous, ...metrics };
 }
 
+export interface ForecastPosteriorCheckpoint {
+  fit: FitResult;
+  evidence: RankingEvidenceSummary;
+}
+
+/**
+ * Rebuild a rollout's global MAP and Laplace posterior before evaluating a
+ * stopping event. Sequential pairwise moment updates remain useful between
+ * checkpoints for question selection, but their covariance approximation is
+ * not sufficiently stable to authorize stopping.
+ */
+export function rebuildForecastPosteriorAtCheckpoint(
+  input: StoppingForecastRolloutInput,
+  history: RankingHistoryInput[],
+  previousAbilities: Record<number, number>,
+  rolloutSeed: number,
+  answerIndex: number,
+): ForecastPosteriorCheckpoint {
+  const evidence = summarizeRankingEvidence(history, input.sessionId);
+  const fit = fitModel(input.items, evidence.comparisons, previousAbilities, {
+    priorStrength: input.priorStrength,
+    priorScale: input.priorScale,
+    posteriorSampleCount: Math.max(8, input.forecastSamples.length),
+    randomSeed: hash([
+      input.posteriorRandomSeed,
+      rolloutSeed,
+      answerIndex,
+      "exact-forecast-checkpoint",
+    ].join(":")),
+  });
+  return { fit, evidence };
+}
+
 function simulateForecastRollout(
   input: StoppingForecastRolloutInput,
   truth: Float64Array,
@@ -2083,8 +2130,8 @@ function simulateForecastRollout(
   rolloutSeed: number,
 ) {
   const random = seededRandom(rolloutSeed);
-  const posteriorSamples = input.forecastSamples.map((sample) => sample.slice());
-  const tieLogSamples = input.forecastTieLogSamples.slice();
+  let posteriorSamples: Float64Array[] = input.forecastSamples.map((sample) => sample.slice());
+  let tieLogSamples: Float64Array = input.forecastTieLogSamples.slice();
   const indexById = new Map(input.items.map((item, index) => [item.subjectId, index]));
   const history = input.history.slice();
   let acceptedComparisons = input.acceptedComparisons;
@@ -2102,13 +2149,14 @@ function simulateForecastRollout(
     .filter((mass) => repeatedPairEffectiveSampleSize(mass) >= MINIMUM_COVERAGE_WEIGHT).length;
   let coveredItemCount = [...itemEffectiveWeight.values()]
     .filter((weight) => weight >= MINIMUM_COVERAGE_WEIGHT).length;
-  const fit = fitFromForecastEnsemble(
+  let fit = fitFromForecastEnsemble(
     input.items, posteriorSamples, tieLogSamples, acceptedComparisons, evidenceCount,
     input.tieStrength, input.optimizerConverged,
   );
   const abilities = input.currentAbilities.slice();
   input.items.forEach((item, index) => { fit.abilities[item.subjectId] = abilities[index]; });
   let diagnostics = input.initialDiagnostics;
+  let optimizerConverged = input.optimizerConverged;
   const diagnosticStride = Math.max(1, Math.round(input.diagnosticStride));
   const stoppingCheckStride = Math.max(8, diagnosticStride);
   const stoppingTimes = Object.fromEntries(STOPPING_MODE_ORDER.map((mode) => [mode, Number.POSITIVE_INFINITY])) as Record<ComparisonBudgetMode, number>;
@@ -2208,6 +2256,26 @@ function simulateForecastRollout(
       || answerIndex % stoppingCheckStride === 0
       || evidenceCount === input.evidenceRequired;
     if (checkNow) {
+      const refreshed = rebuildForecastPosteriorAtCheckpoint(
+        input, history, fit.abilities, rolloutSeed, answerIndex,
+      );
+      fit = refreshed.fit;
+      fit.acceptedComparisons = acceptedComparisons;
+      fit.effectiveComparisons = refreshed.evidence.evidenceCount;
+      posteriorSamples = fit.posteriorSamples;
+      tieLogSamples = fit.tieLogSamples?.length === posteriorSamples.length
+        ? fit.tieLogSamples
+        : new Float64Array(posteriorSamples.length).fill(
+          Math.log(fit.tieStrength ?? input.tieStrength),
+        );
+      fit.tieLogSamples = tieLogSamples;
+      optimizerConverged = fit.converged;
+      evidenceCount = refreshed.evidence.evidenceCount;
+      uniquePairCount = refreshed.evidence.uniquePairCount;
+      coveredItemCount = refreshed.evidence.coveredItemCount;
+      input.items.forEach((item, itemIndex) => {
+        abilities[itemIndex] = fit.abilities[item.subjectId] ?? 0;
+      });
       const stoppingEventLows = forecastStoppingEventLows(
         input.items,
         abilities,
@@ -2218,7 +2286,7 @@ function simulateForecastRollout(
         uniquePairCount,
         input.uniquePairRequired,
         coveredItemCount,
-        input.optimizerConverged,
+        optimizerConverged,
       );
       for (const mode of STOPPING_MODE_ORDER) {
         if (!Number.isFinite(stoppingTimes[mode])
@@ -2298,6 +2366,9 @@ export function prepareStoppingForecastRollouts(
     acceptedComparisons: fit.acceptedComparisons,
     tieStrength: fit.tieStrength ?? DEFAULT_TIE_STRENGTH,
     optimizerConverged: fit.converged,
+    priorStrength: fit.priorStrength ?? DEFAULT_PRIOR_STRENGTH,
+    priorScale: fit.priorScale ?? DEFAULT_PRIOR_SCALE,
+    posteriorRandomSeed: fit.posteriorRandomSeed ?? options.randomSeed,
     evidenceRequired: diagnostics.evidenceRequired,
     uniquePairRequired: diagnostics.uniquePairRequired ?? minimumUniquePairs(items.length),
     pairMass: evidence.pairMass,
@@ -2359,7 +2430,7 @@ function summarizeStoppingTimes(
 ): StoppingForecast {
   const rolloutCount = stoppingTimes.length;
   const base = {
-    method: "posterior-contraction-mc-v12" as const,
+    method: "posterior-contraction-mc-v13" as const,
     rolloutCount,
     nextCheckpoint,
     projectionHorizon,

@@ -65,7 +65,7 @@ export function retargetStoppingMode(
   const diagnostics = model.diagnostics;
   if (!diagnostics
     || !STOPPING_MODE_ORDER.every((entry) =>
-      diagnostics.forecasts?.[entry]?.method === "posterior-contraction-mc-v12")
+      diagnostics.forecasts?.[entry]?.method === "posterior-contraction-mc-v13")
     || !STOPPING_MODE_ORDER.every((entry) =>
       diagnostics.stoppingChecks?.some((check) => check.mode === entry))) {
     return undefined;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { analyzeRanking, buildRankedItems, calibrationPosterior, chooseNextPair, davidsonProbabilities, fitModel, forecastStoppingTime, prepareStoppingForecastRollouts, summarizeRankingEvidence, updateForecastClusterPosterior, updateForecastPosterior } from "../lib/ranking/engine";
+import { analyzeRanking, buildRankedItems, calibrationPosterior, chooseNextPair, davidsonProbabilities, fitModel, forecastStoppingTime, prepareStoppingForecastRollouts, rebuildForecastPosteriorAtCheckpoint, summarizeRankingEvidence, updateForecastClusterPosterior, updateForecastPosterior } from "../lib/ranking/engine";
 import { distributionConfig } from "../lib/distribution";
 import {
   allowedCrossTwoBucketCount,
@@ -560,7 +560,7 @@ describe("weighted Davidson ranking engine", () => {
     const evidenceLimitedForecast = forecastStoppingTime(rated, adjacentFit, uniform, coverageLimitedHistory, "session", evidenceLimited, {
       projectionHorizon: 100, randomSeed: 12, forecastEfficiency: 16,
     });
-    expect(evidenceLimitedForecast.method).toBe("posterior-contraction-mc-v12");
+    expect(evidenceLimitedForecast.method).toBe("posterior-contraction-mc-v13");
     expect(evidenceLimitedForecast.medianAdditional ?? Number.POSITIVE_INFINITY).toBeGreaterThanOrEqual(1);
 
     const globallyStable = analyzeRanking(rated, {
@@ -686,6 +686,78 @@ describe("weighted Davidson ranking engine", () => {
     expect(input.currentAbilities.every((ability) => ability === 0)).toBe(true);
   });
 
+  it("rebuilds the global posterior at a forecast stopping checkpoint", () => {
+    const rated = Array.from({ length: 24 }, (_, index) => ({
+      subjectId: index + 1,
+      rate: 1 + (index * 7) % 10,
+    }));
+    const entries = Array.from({ length: 80 }, (_, index) => {
+      const leftSubjectId = 1 + index % rated.length;
+      let rightSubjectId = 1 + (index * 7 + 5) % rated.length;
+      if (rightSubjectId === leftSubjectId) rightSubjectId = 1 + rightSubjectId % rated.length;
+      return history(
+        `checkpoint-${index}`,
+        leftSubjectId,
+        rightSubjectId,
+        index % 5 === 0 ? "tie" : index % 2 === 0 ? "left" : "right",
+        index,
+      );
+    });
+    const prefix = entries.slice(0, 48);
+    const fitOptions = {
+      priorStrength: 0.05,
+      priorScale: 0,
+      posteriorSampleCount: 64,
+      randomSeed: 731,
+    };
+    const initialFit = fitModel(
+      rated,
+      summarizeRankingEvidence(prefix, "session").comparisons,
+      undefined,
+      fitOptions,
+    );
+    const diagnostics = analyzeRanking(rated, initialFit, uniform, prefix, "session");
+    const input = prepareStoppingForecastRollouts(
+      rated,
+      initialFit,
+      uniform,
+      prefix,
+      "session",
+      diagnostics,
+      { randomSeed: 731 },
+      16,
+    );
+    const completeHistory = entries.slice(0, 80);
+    const refreshed = rebuildForecastPosteriorAtCheckpoint(
+      input,
+      completeHistory,
+      initialFit.abilities,
+      991,
+      32,
+    );
+    const direct = fitModel(
+      rated,
+      summarizeRankingEvidence(completeHistory, "session").comparisons,
+      initialFit.abilities,
+      fitOptions,
+    );
+
+    expect(refreshed.evidence.evidenceCount).toBeCloseTo(
+      summarizeRankingEvidence(completeHistory, "session").evidenceCount,
+      12,
+    );
+    expect(refreshed.fit.posteriorSamples).toHaveLength(64);
+    expect(refreshed.fit.priorStrength).toBe(0.05);
+    expect(refreshed.fit.priorScale).toBe(0);
+    expect(refreshed.fit.tieStrength).toBeCloseTo(direct.tieStrength!, 10);
+    for (const item of rated) {
+      expect(refreshed.fit.abilities[item.subjectId]).toBeCloseTo(
+        direct.abilities[item.subjectId],
+        9,
+      );
+    }
+  });
+
   it("fails closed when optimization has not converged", () => {
     const rated = Array.from({ length: 4 }, (_, index) => ({ subjectId: index + 1, rate: 7 }));
     const entries = [
@@ -740,7 +812,7 @@ describe("weighted Davidson ranking engine", () => {
     const forecast = forecastStoppingTime(rated, fit, uniform, entries, "session", diagnostics, {
       projectionHorizon: 100, randomSeed: 17, forecastEfficiency: 16,
     });
-    expect(forecast.method).toBe("posterior-contraction-mc-v12");
+    expect(forecast.method).toBe("posterior-contraction-mc-v13");
     expect(forecast.rolloutCount).toBe(64);
     expect(forecast.withinProjectionSuccesses).toBeLessThanOrEqual(forecast.rolloutCount);
   });
