@@ -185,6 +185,17 @@ test("demo project can filter, compare, derive, upgrade, edit records, and delet
   await expect(page.locator('.comparison-histogram .distribution-stats')).toHaveCount(2);
   await expect(page.locator(".result-summary .histogram .bar-old")).toHaveCount(10);
   await expect(page.locator(".result-summary .histogram .bar-new")).toHaveCount(10);
+  const resultChartLayout = await page.locator(".result-summary > .panel").evaluate((panel) => {
+    const legend = panel.querySelector<HTMLElement>(".chart-legend")!;
+    const histogram = panel.querySelector<HTMLElement>(".histogram")!;
+    const panelRect = panel.getBoundingClientRect();
+    return {
+      trailingSpace: panelRect.bottom - legend.getBoundingClientRect().bottom - Number.parseFloat(getComputedStyle(panel).paddingBottom),
+      histogramHeight: histogram.getBoundingClientRect().height,
+    };
+  });
+  expect(Math.abs(resultChartLayout.trailingSpace)).toBeLessThanOrEqual(1);
+  expect(resultChartLayout.histogramHeight).toBeGreaterThan(160);
   expect(await page.locator(".score-pill.new.changed").count()).toBeGreaterThan(0);
   const changedPills = page.locator(".score-pill.new.changed");
   expect(await page.locator(".score-pill.new.changed.higher, .score-pill.new.changed.lower").count()).toBe(await changedPills.count());

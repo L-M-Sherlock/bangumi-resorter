@@ -409,13 +409,18 @@ kbd { padding: 2px 5px; border: 1px solid rgba(255,255,255,.35); border-radius: 
 .session-footer button { border: 0; border-bottom: 1px solid #aaa49a; color: var(--ink); background: transparent; font-size: 10px; }
 
 .result-summary { margin: 26px 0 20px; display: grid; grid-template-columns: minmax(0, 1fr) 210px; gap: 16px; }
-.result-summary .histogram { height: 160px; }
+.result-summary > .panel { min-height: 0; display: flex; flex-direction: column; }
+.result-summary .score-histogram { min-height: 0; flex: 1; display: flex; flex-direction: column; }
+.result-summary .histogram-scroll { min-height: 160px; flex: 1; display: flex; }
+.result-summary .histogram { width: 100%; min-height: 160px; height: auto; flex: 1; }
 .panel-title .themed-select { width: auto; }
 .panel-title .themed-select-trigger { min-height: 34px; font-size: 10px; }
 .distribution-controls { display: flex; align-items: center; gap: 8px; }
 .distribution-controls .themed-select { min-width: 112px; }
 .distribution-charts { margin-top: 18px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.result-summary .distribution-charts { min-height: 0; flex: 1; }
 .distribution-chart { min-width: 0; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-faint); }
+.result-summary .distribution-chart { min-height: 0; display: flex; flex-direction: column; }
 .distribution-chart > strong { color: var(--muted); font-size: 10px; }
 .distribution-chart .histogram { margin-top: 10px; }
 .chart-legend { display: flex; gap: 16px; justify-content: flex-end; color: var(--muted); font-size: 9px; }
